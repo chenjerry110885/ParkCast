@@ -169,8 +169,10 @@ def test_climatology_prefers_the_bucket_rate_over_the_lot_rate(conn):
     Ten weeks of "always free" in one bucket (bucket rate 1.0) are mixed with ten
     weeks of "always full" in a different bucket, which drags the lot's overall
     rate down to 0.5. A lot-first (rather than bucket-first) implementation would
-    return 0.5 here instead of 1.0 -- both tiers clear CLIMATOLOGY_MIN_SUPPORT, so
-    a passing test can only be explained by the bucket tier winning.
+    return the lot rate here, so a passing test can only be explained by the
+    bucket tier winning. Shrinkage pulls the bucket's raw 1.0 down toward the
+    lot's 0.5, so what is pinned is that the answer is driven by the bucket and
+    sits well clear of the lot rate -- not that it is exactly 1.0.
     """
     target_base = 1788537600
     other_base = target_base + 6 * 3600  # a fixed offset lands in a different bucket
@@ -187,8 +189,10 @@ def test_climatology_prefers_the_bucket_rate_over_the_lot_rate(conn):
         "test setup requires the prediction target to land in the 'always free' bucket"
 
     c = Climatology(load_history(conn))
-    assert c.predict("A", predict_ts, 30) == pytest.approx(1.0), \
-        "the bucket rate (1.0) must win; a lot-first order would return the lot rate (0.5)"
+    # lot: 10 hits / 20, shrunk toward the identical global 0.5, stays 0.5.
+    # bucket: 10 hits / 10, shrunk toward that 0.5 with 8 pseudo-obs -> 14/18.
+    assert c.predict("A", predict_ts, 30) == pytest.approx(14 / 18), \
+        "the bucket must win; a lot-first order would return the lot rate (0.5)"
 
 
 def test_climatology_falls_back_to_the_lot_rate_not_the_global_rate(conn):
@@ -208,8 +212,107 @@ def test_climatology_falls_back_to_the_lot_rate_not_the_global_rate(conn):
 
     c = Climatology(load_history(conn))
     # Global rate across both lots is (10 + 0) / 20 == 0.5 -- what a bucket-then-
-    # global-only fallback (no lot tier) would return instead of the lot's own 1.0.
-    assert c.predict("A", predict_ts, 30) == pytest.approx(1.0)
+    # global-only fallback (no lot tier) would return. The lot tier gives A's own
+    # 10/10 shrunk toward that 0.5 with 20 pseudo-obs: (10 + 10) / 30.
+    assert c.predict("A", predict_ts, 30) == pytest.approx(2 / 3)
+    assert c.predict("A", predict_ts, 30) > 0.5, "the lot tier must beat the global rate"
+
+
+# --- shrinkage keeps climatology a probability -------------------------------
+#
+# Spec section 8 makes climatology the baseline a model has to beat. A 30-minute
+# bucket at a 5-minute cadence holds 6 observations a week, so a raw bucket rate
+# is nearly always 0.0 or 1.0 -- measured live, 96.1% of bucket cells and 79% of
+# published grid bytes. A baseline that answers with certainties is trivially
+# beatable on Brier score, which would make the headline claim hollow.
+
+
+def test_climatology_never_returns_a_certainty_on_realistic_input(conn):
+    """Thin buckets, always-free lots and always-full lots together: exactly the
+    mix that produced 96% degenerate cells before shrinkage."""
+    base = 1788537600
+    for week in range(3):                      # lot A: always a space
+        write(conn, base + week * 7 * 86400, lot="A", free=5)
+    for week in range(3):                      # lot B: always full
+        write(conn, base + week * 7 * 86400, lot="B", free=0)
+    for i in range(20):                        # some mixed history for the city
+        write(conn, base + 3600 + i * 300, lot="C", free=i % 2)
+
+    c = Climatology(load_history(conn))
+    seen = []
+    for lot_id in ("A", "B", "C"):
+        for bucket in range(0, 336, 7):        # spread across the week
+            p = c.predict(lot_id, base + bucket * 1800, 30)
+            assert p is not None
+            seen.append(p)
+            assert 0.0 < p < 1.0, f"{lot_id} bucket {bucket} returned {p}"
+    assert min(seen) < max(seen), "shrinkage must not flatten every lot together"
+
+
+def test_climatology_shrinks_a_lone_observation_most_of_the_way_to_its_parent(conn):
+    """One reading in a bucket is 1/9 of the answer, not all of it."""
+    base = 1788537600
+    for i in range(40):
+        write(conn, 1000 + i * 300, lot="A", free=5)   # lot rate ~1
+    write(conn, base, lot="A", free=0)                 # a single full reading
+
+    c = Climatology(load_history(conn))
+    lone_bucket = c.predict("A", base + 7 * 86400, 30)
+    elsewhere = c.predict("A", base + 3 * 86400, 30)
+    assert lone_bucket < elsewhere, "the observation must still move the answer"
+    assert lone_bucket > 0.75, "one sample must not drag the bucket to near-zero"
+
+
+def test_climatology_is_a_no_op_when_every_tier_agrees(conn):
+    """Shrinkage toward a parent that already matches must not shift the mean."""
+    base = 1788537600
+    for week, free in enumerate((5, 5, 0)):
+        write(conn, base + week * 7 * 86400, free=free)
+    c = Climatology(load_history(conn))
+    assert c.predict("A", base + 21 * 86400, 30) == pytest.approx(2 / 3)
+
+
+def test_climatology_bucket_and_lot_priors_are_configured(conn):
+    """The published grid is sensitive to these two numbers, so a silent edit
+    should fail here rather than quietly reshaping every probability."""
+    from parkcast import config
+
+    assert config.CLIMATOLOGY_BUCKET_PRIOR == 8
+    assert config.CLIMATOLOGY_LOT_PRIOR == 20
+    assert not hasattr(config, "CLIMATOLOGY_MIN_SUPPORT"), (
+        "the hard support gate is replaced by shrinkage; leaving the constant "
+        "around implies a threshold that no longer exists"
+    )
+
+
+def test_published_grid_bytes_are_mostly_probabilities(conn):
+    """The end of the chain: what the client actually downloads. Before
+    shrinkage 79% of live grid bytes were exactly 0 or 100.
+
+    Blend still rounds to 100 for a lot that has a space now and almost always
+    has one, at a horizon where persistence dominates -- that is persistence
+    being 0/1, not climatology being degenerate. So the far horizon, where
+    climatology carries the weight, is pinned exactly, and the whole grid only
+    loosely.
+    """
+    from parkcast.grid import UNKNOWN, build_grid
+
+    base = 1788537600
+    for i in range(60):
+        write(conn, base + i * 300, lot="A", free=(i % 7 != 0))
+        write(conn, base + i * 300, lot="B", free=5)
+    h = load_history(conn)
+    lot_ids = ["A", "B"]
+    grid = build_grid(Blend(h), lot_ids, h.latest_ts)
+
+    known = [b for b in grid if b != UNKNOWN]
+    assert known
+    far = [grid[i * 24 + 23] for i in range(len(lot_ids))]  # +120 min
+    assert all(0 < b < 100 for b in far), f"climatology-dominated bytes: {far}"
+    certain = [b for b in known if b in (0, 100)]
+    assert len(certain) / len(known) < 0.1, (
+        f"{len(certain)} of {len(known)} bytes are certainties"
+    )
 
 
 def test_read_cold_missing_dir_returns_normally(conn, tmp_path):

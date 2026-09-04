@@ -119,14 +119,42 @@ def week_bucket(ts: int) -> int:
     return int(local_min // config.CLIMATOLOGY_BUCKET_MIN) % BUCKETS_PER_WEEK
 
 
-class Climatology:
-    """P = the historical fraction of readings where this lot had a space.
+def _shrink(counter: list[int], prior_rate: float, strength: float) -> float:
+    """Blend a [hits, n] counter toward `prior_rate` with `strength` pseudo-obs.
 
-    Falls back lot+bucket -> lot -> global, so a lot with thin history still
-    gets an answer grounded in something rather than a coin flip. Both the
-    bucket and lot tiers are only trusted once they have CLIMATOLOGY_MIN_SUPPORT
-    observations behind them; the global tier is ungated beyond having any
-    observation at all, since it is the fallback of last resort.
+    Equivalent to a Beta(strength * prior_rate, strength * (1 - prior_rate))
+    posterior mean. At n = 0 it returns the prior exactly, which is what makes
+    a missing tier fall through to its parent without a special case.
+    """
+    hits, n = counter
+    return (hits + strength * prior_rate) / (n + strength)
+
+
+class Climatology:
+    """P = this lot's historical rate at this time of week, shrunk toward the
+    rates above it.
+
+    The tiers are still lot+bucket -> lot -> global, but each one is a
+    Beta-smoothed version of the one above rather than a raw fraction:
+
+        lot_rate    = (lot_hits    + BETA  * global_rate) / (lot_n    + BETA)
+        bucket_rate = (bucket_hits + ALPHA * lot_rate)    / (bucket_n + ALPHA)
+
+    A 30-minute bucket at a 5-minute cadence sees 6 observations a week, so a
+    raw hits/total is 0.0 or 1.0 in 96% of cells -- a baseline that answers a
+    probability question with a certainty, and one a model would beat on Brier
+    score without being any good. Spec section 8 makes climatology the bar to
+    clear, so it has to be a real forecast.
+
+    Shrinkage replaces the old CLIMATOLOGY_MIN_SUPPORT gate rather than joining
+    it: a thin bucket is now pulled most of the way to its parent instead of
+    being discarded at a threshold, and a bucket with no observations at all
+    evaluates to exactly the lot rate, so the fallback chain is continuous
+    rather than a cliff. A hard gate on top would only discard smoothed
+    evidence that is already mostly its parent's.
+
+    The global tier stays raw: it is the fallback of last resort and has
+    nothing above it to shrink toward.
     """
 
     def __init__(self, history: History) -> None:
@@ -143,11 +171,19 @@ class Climatology:
                     counter[1] += 1
 
     def predict(self, lot_id: str, target_ts: int, horizon_min: int) -> float | None:
-        for counter in (self._bucket.get((lot_id, week_bucket(target_ts))),
-                        self._lot.get(lot_id)):
-            if counter and counter[1] >= config.CLIMATOLOGY_MIN_SUPPORT:
-                return counter[0] / counter[1]
-        return self._global[0] / self._global[1] if self._global[1] else None
+        if not self._global[1]:
+            return None
+        rate = self._global[0] / self._global[1]
+
+        lot = self._lot.get(lot_id)
+        if lot is None:
+            return rate
+        rate = _shrink(lot, rate, config.CLIMATOLOGY_LOT_PRIOR)
+
+        bucket = self._bucket.get((lot_id, week_bucket(target_ts)))
+        if bucket is None:
+            return rate
+        return _shrink(bucket, rate, config.CLIMATOLOGY_BUCKET_PRIOR)
 
 
 class Persistence:
