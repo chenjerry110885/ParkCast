@@ -28,7 +28,8 @@ Measured 2026-09-04 — do not re-derive, and do not assume these have drifted w
 | Availability feed | `https://tcgbusfs.blob.core.windows.net/blobtcmsv/TCMSV_allavailable.json` (472 KB, no auth) |
 | Metadata feed | `https://tcgbusfs.blob.core.windows.net/blobtcmsv/TCMSV_alldesc.json` (2.85 MB, no auth) |
 | Update cadence | **exactly 5 min** |
-| Publish lag | **~3 min, consistent** → poll on phase offset `:03:20, :08:20, …` |
+| Publish lag | **+2:45 to +3:15, consistent** |
+| Poll schedule | data_ts minutes are `≡3 (mod 5)`; publish is `≡1 (mod 5)` → **poll at minutes ≡1 (mod 5), second 30** (`:06:30, :11:30, …`) |
 | Churn per tick | **42–47%** of lots change |
 | Usable lots | **1,068** (valid count + known capacity), 12/12 districts |
 | No-data sentinel | **`-9` → NULL, never 0** |

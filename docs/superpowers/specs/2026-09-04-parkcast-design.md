@@ -45,7 +45,7 @@ Both Taipei endpoints were probed directly and a 30-sample cadence study was run
 
 Cache-busting returned identical payloads, confirming the cadence is the real publish rhythm rather than CDN caching.
 
-**Design consequences.** The consistent lag means the collector should poll on a phase offset (`:03:20, :08:20, :13:20…`), receiving data ~20 s after publication rather than up to 5 minutes later — roughly halving effective staleness at no extra cost. The 42–47% churn drives the storage design in §6.
+**Design consequences.** The consistent lag means the collector should poll on a phase offset. Feed timestamps fall on minutes `≡ 3 (mod 5)` and publish ~3 min later, so publication lands on minutes `≡ 1 (mod 5)`. Polling at **minutes ≡ 1 (mod 5), second 30** (`:06:30, :11:30, :16:30…`) receives data ~20-30 s after publication rather than up to 5 minutes later — roughly halving effective staleness at no extra cost. The 42–47% churn drives the storage design in §6.
 
 ## 4. Scope
 
