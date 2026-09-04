@@ -236,3 +236,72 @@ def test_blend_never_leaves_the_unit_interval(conn):
     for h in range(0, 125, 5):
         p = b.predict("A", 7000 + h * 60, h)
         assert 0.0 <= p <= 1.0, f"horizon {h} produced {p}"
+
+
+def test_cold_observations_covered_by_the_hot_store_are_not_counted_twice(conn, tmp_path):
+    """The same reading must not appear once at its true ts and once slot-snapped."""
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    # True feed timestamps sit at slot boundary + 180s, exactly as the real feed does.
+    for slot in range(10):
+        write(conn, start + slot * 300 + 180, free=5)
+    compact_day(conn, day, tmp_path)
+
+    hot_only = load_history(conn)
+    with_cold = load_history(conn, cold_dir=tmp_path)
+    assert len(with_cold.by_lot["A"]) == len(hot_only.by_lot["A"]), (
+        "cold rows already covered by the hot window must be skipped"
+    )
+
+
+def test_cold_observations_older_than_the_hot_window_are_kept(conn, tmp_path):
+    """Genuinely older history is the whole reason to read the cold store."""
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    for slot in range(10):
+        write(conn, start + slot * 300 + 180, free=5)
+    compact_day(conn, day, tmp_path)
+
+    # A second, older Parquet day that the hot store does not cover.
+    older = date(2026, 9, 3)
+    older_start, _ = day_bounds(older)
+    other = store.connect(tmp_path / "older.sqlite")
+    for slot in range(10):
+        store.insert_snapshot(
+            other,
+            FeedSnapshot(older_start + slot * 300 + 180, older_start + slot * 300 + 380,
+                         (Observation("A", 5, None),)),
+            {"A": 50},
+        )
+    compact_day(other, older, tmp_path)
+    other.close()
+
+    h = load_history(conn, cold_dir=tmp_path)
+    assert len(h.by_lot["A"]) == 20, "10 hot + 10 genuinely older cold"
+
+
+def test_snap_to_slot_rounds_down_to_the_grid():
+    from parkcast.forecast import _snap_to_slot
+
+    start, _ = day_bounds(date(2026, 9, 4))
+    assert _snap_to_slot(start + 180) == start
+    assert _snap_to_slot(start + 300) == start + 300
+    assert _snap_to_slot(start + 599) == start + 300
+
+
+def test_all_cold_is_kept_when_the_hot_store_is_empty(conn, tmp_path):
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    other = store.connect(tmp_path / "src.sqlite")
+    for slot in range(10):
+        store.insert_snapshot(
+            other,
+            FeedSnapshot(start + slot * 300 + 180, start + slot * 300 + 380,
+                         (Observation("A", 5, None),)),
+            {"A": 50},
+        )
+    compact_day(other, day, tmp_path)
+    other.close()
+
+    h = load_history(conn, cold_dir=tmp_path)  # conn is empty
+    assert len(h.by_lot["A"]) == 10

@@ -32,9 +32,17 @@ def load_history(conn, *, cold_dir: Path | None = None) -> History:
     """
     by_lot: dict[str, list[tuple[int, int]]] = defaultdict(list)
 
+    row = conn.execute("SELECT MIN(data_ts) FROM observations").fetchone()
+    earliest_hot = row[0]
+    cold_cutoff = _snap_to_slot(earliest_hot) if earliest_hot is not None else None
+
     if cold_dir is not None:
         for lot_id, ts, free in _read_cold(cold_dir):
-            by_lot[lot_id].append((ts, free))
+            # The hot store is authoritative for anything it still retains; taking
+            # the cold copy too would count the same reading twice at a different
+            # timestamp, silently double-weighting the most recent 48 hours.
+            if cold_cutoff is None or ts < cold_cutoff:
+                by_lot[lot_id].append((ts, free))
 
     for lot_id, ts, free in conn.execute(
         "SELECT lot_id, data_ts, free_car FROM observations "
@@ -56,6 +64,21 @@ def load_history(conn, *, cold_dir: Path | None = None) -> History:
         )
     }
     return History(latest_ts, current, dict(by_lot))
+
+
+def _snap_to_slot(ts: int) -> int:
+    """Round a timestamp down to the 5-minute slot grid the cold store uses.
+
+    compact_day writes slot-aligned timestamps, so comparing a hot timestamp
+    against cold ones is only exact once the hot side is snapped the same way.
+    """
+    from datetime import datetime
+
+    from parkcast.compact import SLOT_SECONDS, day_bounds
+
+    day = datetime.fromtimestamp(ts, config.TAIPEI_TZ).date()
+    start, _ = day_bounds(day)
+    return start + ((ts - start) // SLOT_SECONDS) * SLOT_SECONDS
 
 
 def _read_cold(cold_dir: Path):
