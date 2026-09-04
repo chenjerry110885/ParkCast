@@ -44,9 +44,15 @@ def load_history(conn, *, cold_dir: Path | None = None) -> History:
             if cold_cutoff is None or ts < cold_cutoff:
                 by_lot[lot_id].append((ts, free))
 
+    # Deliberately unordered. `idx_obs_data_ts` is non-covering, so ORDER BY
+    # data_ts turns a table scan into one random primary-key lookup per row:
+    # measured on the live store at 85,735 rows, 11.19s with the ORDER BY
+    # against 0.16s without, and the cost grows with the window. The sort below
+    # is what actually guarantees the order, and it has to run anyway because
+    # cold rows are read before hot ones.
     for lot_id, ts, free in conn.execute(
         "SELECT lot_id, data_ts, free_car FROM observations "
-        "WHERE free_car IS NOT NULL ORDER BY data_ts"
+        "WHERE free_car IS NOT NULL"
     ):
         by_lot[lot_id].append((ts, free))
 

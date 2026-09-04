@@ -28,6 +28,71 @@ def test_history_separates_current_from_past(conn):
     assert h.by_lot["A"] == [(1000, 5), (1300, 9)], "by_lot keeps the full ordered series"
 
 
+# --- by_lot is sorted by us, not by the database ----------------------------
+#
+# The query that fills by_lot carries no ORDER BY: on the live store the index
+# is non-covering, so ordering in SQL cost 11.19s against 0.16s for the same
+# 85,735 rows. Ordering is a property of History, so it is pinned here against
+# a connection that hands back rows in the worst order it can.
+
+
+class _Rows(list):
+    def fetchone(self):
+        return self[0]
+
+
+class _HostileConn:
+    """Returns every SELECT in an order chosen to break an unsorted reader."""
+
+    def __init__(self, rows):  # rows: (lot_id, data_ts, free_car)
+        self._rows = list(rows)
+
+    def execute(self, sql, params=()):
+        if "MIN(data_ts)" in sql:
+            return _Rows([(min(ts for _, ts, _ in self._rows),)])
+        if "MAX(data_ts)" in sql:
+            return _Rows([(max(ts for _, ts, _ in self._rows),)])
+        if "data_ts, free_car" in sql:  # the by_lot scan
+            return _Rows(sorted(self._rows, key=lambda r: -r[1]))
+        latest = max(ts for _, ts, _ in self._rows)
+        return _Rows([(lot, free) for lot, ts, free in self._rows if ts == latest])
+
+
+def test_by_lot_series_are_sorted_ascending_by_timestamp():
+    rows = [("A", 3000, 1), ("A", 1000, 5), ("A", 2000, 3),
+            ("B", 2500, 0), ("B", 500, 7)]
+    h = load_history(_HostileConn(rows))
+    for lot_id, series in h.by_lot.items():
+        stamps = [ts for ts, _ in series]
+        assert stamps == sorted(stamps), f"{lot_id} came back out of order"
+    assert h.by_lot["A"] == [(1000, 5), (2000, 3), (3000, 1)]
+
+
+def test_by_lot_is_sorted_across_the_cold_hot_boundary(conn, tmp_path):
+    """Cold rows are appended before hot ones, so the two blocks must interleave
+    correctly rather than merely being sorted within themselves."""
+    day = date(2026, 9, 3)
+    start, _ = day_bounds(day)
+    other = store.connect(tmp_path / "src.sqlite")
+    for slot in range(5):
+        store.insert_snapshot(
+            other,
+            FeedSnapshot(start + slot * 300 + 180, start + slot * 300 + 380,
+                         (Observation("A", 5, None),)),
+            {"A": 50},
+        )
+    compact_day(other, day, tmp_path)
+    other.close()
+
+    later, _ = day_bounds(date(2026, 9, 4))
+    for slot in range(5):
+        write(conn, later + slot * 300 + 180, free=3)
+
+    stamps = [ts for ts, _ in load_history(conn, cold_dir=tmp_path).by_lot["A"]]
+    assert stamps == sorted(stamps)
+    assert len(stamps) == 10
+
+
 def test_history_excludes_missing_readings(conn):
     write(conn, 1000, free=5)
     write(conn, 1300, free=None)
