@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import date, datetime, timezone
 
@@ -7,6 +8,7 @@ from parkcast import config, scheduler, store
 from parkcast.collector import TickResult
 from parkcast.compact import day_bounds
 from parkcast.feed import FeedSnapshot, Observation
+from parkcast.metadata import Lot
 from parkcast.scheduler import next_poll_ts, taipei_date
 
 
@@ -667,3 +669,70 @@ def test_publish_failure_does_not_stop_collection(monkeypatch):
                               now_fn=clock.now_fn, archive=_no_archive, publish=boom)
 
     assert len(ticks) == 3, "collection must survive a publishing failure"
+
+
+# --- publish_artifacts must never blank good artifacts -----------------------
+
+
+def _make_lot(lot_id: str) -> Lot:
+    return Lot(id=lot_id, name=f"lot {lot_id}", area="中正區", lot_type="立體",
+               capacity_car=50, lat=25.05, lon=121.52,
+               service_time="00:00:00-23:59:59", fare_text="每小時30元")
+
+
+def test_publish_artifacts_with_no_lots_leaves_existing_files_untouched(tmp_path):
+    """An empty `lots` argument (e.g. a metadata outage at startup left `_lots`
+    empty) must not overwrite good artifacts with a header-only grid and an
+    empty lots.json."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4))
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+    (out_dir / "grid.bin").write_bytes(b"OLD-GRID-BYTES-18")
+    (out_dir / "lots.json").write_text('{"lots":[{"i":0,"id":"OLD"}]}', encoding="utf-8")
+
+    scheduler.publish_artifacts(conn, [], out_dir)
+    conn.close()
+
+    assert (out_dir / "grid.bin").read_bytes() == b"OLD-GRID-BYTES-18"
+    assert (out_dir / "lots.json").read_text(encoding="utf-8") == (
+        '{"lots":[{"i":0,"id":"OLD"}]}'
+    )
+    assert list(out_dir.glob("*.tmp")) == []
+
+
+def test_publish_artifacts_with_empty_history_leaves_existing_files_untouched(tmp_path):
+    """Same failure shape, different cause: a non-empty `lots` list where none
+    of the lots have any observation (fresh store, or a store that has not
+    seen these particular lots yet) must also leave existing artifacts alone."""
+    conn = store.connect(tmp_path / "t.sqlite")  # no observations inserted
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+    (out_dir / "grid.bin").write_bytes(b"OLD-GRID-BYTES-18")
+    (out_dir / "lots.json").write_text('{"lots":[{"i":0,"id":"OLD"}]}', encoding="utf-8")
+
+    scheduler.publish_artifacts(conn, [_make_lot("A"), _make_lot("B")], out_dir)
+    conn.close()
+
+    assert (out_dir / "grid.bin").read_bytes() == b"OLD-GRID-BYTES-18"
+    assert (out_dir / "lots.json").read_text(encoding="utf-8") == (
+        '{"lots":[{"i":0,"id":"OLD"}]}'
+    )
+    assert list(out_dir.glob("*.tmp")) == []
+
+
+def test_publish_artifacts_still_overwrites_on_a_normal_publish(tmp_path):
+    """The empty-history guard must not break the happy path."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+    (out_dir / "grid.bin").write_bytes(b"OLD-GRID-BYTES-18")
+    (out_dir / "lots.json").write_text('{"lots":[{"i":0,"id":"OLD"}]}', encoding="utf-8")
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir)
+    conn.close()
+
+    assert (out_dir / "grid.bin").read_bytes() != b"OLD-GRID-BYTES-18"
+    lots_doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert [l["id"] for l in lots_doc["lots"]] == ["A"]
