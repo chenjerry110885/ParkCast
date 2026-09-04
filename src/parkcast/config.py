@@ -32,3 +32,12 @@ MAX_EXHAUSTED_SLOTS = 12
 # Taipei bounding box for coordinate sanity checks.
 LAT_MIN, LAT_MAX = 24.5, 25.5
 LON_MIN, LON_MAX = 121.0, 122.5
+
+# --- forecasting ---
+HORIZON_STEP_MIN = 5
+HORIZON_COUNT = 24            # +5 min through +120 min
+CLIMATOLOGY_BUCKET_MIN = 30   # time-of-week bucket width
+CLIMATOLOGY_MIN_SUPPORT = 3   # observations needed before a bucket is trusted
+BLEND_HALF_LIFE_MIN = 30      # persistence weight halves every 30 min of horizon
+
+ARTIFACT_DIR = DATA_DIR / "artifacts"
