@@ -19,6 +19,7 @@
 - Poll phase: feed `data_ts` minutes are `≡3 (mod 5)`; publication is `≡1 (mod 5)`. Poll at **minute ≡1 (mod 5), second 30**.
 - Coordinates: use `EntranceCoord` **only if it passes a Taipei bounds check** (`24.5<lat<25.5`, `121.0<lon<122.5`) — 574 of 1752 lots carry `0,0`. Otherwise transform `tw97x/y` (EPSG:3826 → EPSG:4326), which is valid for all 1752.
 - **`Xcod` is LATITUDE and `Ycod` is LONGITUDE** in `EntranceCoord`. The names are misleading.
+- **Captured fixtures under `tests/fixtures/` are immutable ground truth.** They are real upstream payloads. If a test disagrees with a fixture, the test is wrong. Never edit a fixture to make a test pass; recapture it from the live endpoint or fix the test.
 - Commits follow Conventional Commits, concise, **no `Co-Authored-By` trailers**.
 
 ## File Structure
@@ -322,6 +323,19 @@ from parkcast.feed import FeedSnapshot, parse_availability, parse_updatetime
 FIXTURE = Path(__file__).parent / "fixtures" / "avail_sample.json"
 
 
+def _fixture_payload() -> dict:
+    return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
+def _observed_at(payload: dict) -> int:
+    """A realistic fetch time for this fixture: the feed publishes ~3 min after stamping.
+
+    Derived from the fixture rather than hardcoded, so recapturing the fixture never
+    invalidates the tests -- and so nobody is ever tempted to edit captured data.
+    """
+    return parse_updatetime(payload["data"]["UPDATETIME"]) + 200
+
+
 def test_parse_updatetime_treats_cst_as_taipei_not_us_central():
     ts = parse_updatetime("Fri Sep 04 09:08:00 CST 2026")
     # 09:08 UTC+8 == 01:08 UTC. If CST were misread as US Central (UTC-6 or -5),
@@ -335,11 +349,12 @@ def test_parse_updatetime_rejects_garbage():
 
 
 def test_parse_availability_on_real_payload():
-    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    snap = parse_availability(payload, observed_at=1788484280)
+    payload = _fixture_payload()
+    observed_at = _observed_at(payload)
+    snap = parse_availability(payload, observed_at=observed_at)
 
     assert isinstance(snap, FeedSnapshot)
-    assert snap.observed_at == 1788484280
+    assert snap.observed_at == observed_at
     assert snap.data_ts > 0
     # data_ts must precede observed_at: the feed publishes ~3 min after stamping.
     assert snap.data_ts < snap.observed_at
@@ -354,15 +369,15 @@ def test_sentinel_minus_nine_becomes_none_not_zero():
             "park": [{"id": "TPE0001", "availablecar": 16, "availablemotor": -9}],
         }
     }
-    snap = parse_availability(payload, observed_at=1788484280)
+    snap = parse_availability(payload, observed_at=1788484280)  # 09:11:20, after the 09:08 stamp
     obs = snap.observations[0]
     assert obs.free_car == 16
     assert obs.free_motor is None, "-9 must become None; 0 would mean 'lot is full'"
 
 
 def test_data_ts_minutes_land_on_the_expected_phase():
-    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    snap = parse_availability(payload, observed_at=1788484280)
+    payload = _fixture_payload()
+    snap = parse_availability(payload, observed_at=_observed_at(payload))
     assert (snap.data_ts // 60) % 5 == 3, "feed stamps minutes congruent to 3 (mod 5)"
 ```
 
@@ -984,6 +999,7 @@ from pathlib import Path
 import pytest
 
 from parkcast import collector, store
+from parkcast.feed import parse_updatetime
 
 FIXTURE = Path(__file__).parent / "fixtures" / "avail_sample.json"
 
@@ -999,27 +1015,33 @@ def fake_fetch(_url, **_kwargs):
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
 
 
+def fixture_observed_at(offset: int = 200) -> int:
+    """A fetch time consistent with the fixture's own stamp; never hardcode this."""
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    return parse_updatetime(payload["data"]["UPDATETIME"]) + offset
+
+
 def test_tick_writes_rows_and_reports_advance(conn):
-    result = collector.collect_once(conn, {}, now=1788484280, fetch=fake_fetch)
+    result = collector.collect_once(conn, {}, now=fixture_observed_at(), fetch=fake_fetch)
     assert result.rows_written > 1000
     assert result.advanced is True
     assert store.count_rows(conn) == result.rows_written
 
 
 def test_repeated_tick_writes_nothing_and_reports_no_advance(conn):
-    first = collector.collect_once(conn, {}, now=1788484280, fetch=fake_fetch)
-    second = collector.collect_once(conn, {}, now=1788484600, fetch=fake_fetch)
+    first = collector.collect_once(conn, {}, now=fixture_observed_at(), fetch=fake_fetch)
+    second = collector.collect_once(conn, {}, now=fixture_observed_at(520), fetch=fake_fetch)
     assert second.rows_written == 0
     assert second.advanced is False, "same data_ts means the feed has not published yet"
     assert store.count_rows(conn) == first.rows_written
 
 
 def test_observed_at_uses_supplied_now_not_feed_time(conn):
-    collector.collect_once(conn, {}, now=1788484280, fetch=fake_fetch)
+    collector.collect_once(conn, {}, now=fixture_observed_at(), fetch=fake_fetch)
     data_ts, observed_at = conn.execute(
         "SELECT data_ts, observed_at FROM observations LIMIT 1"
     ).fetchone()
-    assert observed_at == 1788484280
+    assert observed_at == fixture_observed_at()
     assert data_ts != observed_at, "the two must never be collapsed"
 
 
@@ -1028,7 +1050,7 @@ def test_fetch_failure_propagates_rather_than_writing_partial_data(conn):
         raise ConnectionError("network down")
 
     with pytest.raises(ConnectionError):
-        collector.collect_once(conn, {}, now=1788484280, fetch=boom)
+        collector.collect_once(conn, {}, now=fixture_observed_at(), fetch=boom)
     assert store.count_rows(conn) == 0
 ```
 
@@ -1365,6 +1387,169 @@ git commit -m "feat: package collector for continuous operation"
 
 ---
 
+### Task 9b: Daily metadata refresh
+
+Task 9 loads the metadata snapshot and capacity map once at process start. Under
+`restart: unless-stopped` the container runs for months, so the "daily" snapshot fires exactly
+once and the capacity map goes stale — new lots get permanent `NO_CAPACITY`, drifted capacities
+produce wrong `CLAMPED` flags, and both failures are silent. Spec section 6 requires metadata
+snapshotted per validity range, so this closes a real spec gap.
+
+**Files:**
+- Modify: `src/parkcast/scheduler.py` (add day-rollover refresh to `run_forever`)
+- Modify: `src/parkcast/__main__.py` (supply the refresh callable)
+- Test: `tests/test_scheduler.py` (append)
+
+**Interfaces:**
+- Consumes: `config.TAIPEI_TZ`, existing `run_forever` injection points
+- Produces:
+  - `taipei_date(ts: int) -> date`
+  - `run_forever(..., refresh_metadata: Callable[[date], dict[str, int | None]] | None = None)`
+  - `__main__.build_capacities(day: date) -> dict[str, int | None]`
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# appended to tests/test_scheduler.py
+from datetime import date
+
+from parkcast import config
+from parkcast.scheduler import taipei_date
+
+
+def test_taipei_date_uses_taipei_not_utc():
+    """16:30 UTC is already the next day in Taipei (UTC+8)."""
+    ts = int(datetime(2026, 9, 4, 16, 30, tzinfo=timezone.utc).timestamp())
+    assert taipei_date(ts) == date(2026, 9, 5)
+
+
+def test_refresh_not_called_while_the_day_is_unchanged(monkeypatch):
+    calls = []
+    clock = _VirtualClock(start=int(datetime(2026, 9, 4, 2, 0, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        if len(clock.slots) >= 3:
+            raise _StopLoop
+        return SimpleNamespace(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"A": 1}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.read, refresh_metadata=lambda d: calls.append(d) or {})
+    assert calls == [], "refresh must not fire within a single Taipei day"
+
+
+def test_refresh_fires_once_when_the_taipei_day_rolls_over(monkeypatch):
+    calls = []
+    # Start just before Taipei midnight (15:59 UTC == 23:59 Taipei).
+    clock = _VirtualClock(start=int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        if len(calls) >= 1:
+            raise _StopLoop
+        return SimpleNamespace(data_ts=clock.now, rows_written=1, advanced=True)
+
+    def refresh(day):
+        calls.append(day)
+        return {"NEW": 42}
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.read, refresh_metadata=refresh)
+    assert calls == [date(2026, 9, 5)], f"expected one refresh at the day boundary, got {calls}"
+
+
+def test_failed_refresh_keeps_the_previous_capacities(monkeypatch):
+    """A refresh that raises must not lose the capacities we already have."""
+    seen = []
+    clock = _VirtualClock(start=int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        seen.append(dict(capacities))
+        if len(seen) >= 3:
+            raise _StopLoop
+        return SimpleNamespace(data_ts=clock.now, rows_written=1, advanced=True)
+
+    def boom(day):
+        raise ConnectionError("metadata endpoint down")
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.read, refresh_metadata=boom)
+    assert all(c == {"OLD": 1} for c in seen), "stale capacities beat no capacities"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/Scripts/python -m pytest tests/test_scheduler.py -k "refresh or taipei_date" -v`
+Expected: FAIL — `cannot import name 'taipei_date'`
+
+- [ ] **Step 3: Add the refresh to `src/parkcast/scheduler.py`**
+
+```python
+def taipei_date(ts: int) -> date:
+    """The calendar date in Taipei for an epoch timestamp."""
+    return datetime.fromtimestamp(ts, config.TAIPEI_TZ).date()
+```
+
+Then, inside `run_forever`, track the day and refresh on rollover. Add the parameter
+`refresh_metadata: Callable[[date], dict[str, int | None]] | None = None`, initialise
+`current_day = taipei_date(now_fn())` before the loop, and after the `prune` call:
+
+```python
+        if refresh_metadata is not None:
+            day = taipei_date(now_fn())
+            if day != current_day:
+                try:
+                    capacities = refresh_metadata(day)
+                    current_day = day
+                    log.info("metadata refreshed for %s (%s lots)", day, len(capacities))
+                except Exception:
+                    # Stale capacities beat no capacities; try again next slot.
+                    log.exception("metadata refresh failed; keeping previous capacities")
+```
+
+Note `capacities` is rebound, so the loop must read it fresh each iteration when calling
+`collect(conn, capacities)` — it already does.
+
+- [ ] **Step 4: Supply the callable in `src/parkcast/__main__.py`**
+
+```python
+def build_capacities(day: date) -> dict[str, int | None]:
+    """Fetch metadata, snapshot it for `day`, and return the capacity map."""
+    raw = fetch_json(config.METADATA_URL)
+    snapshot_metadata(raw, config.PARQUET_DIR / "meta", day)
+    return capacity_map(parse_metadata(raw))
+```
+
+`main()` then calls `build_capacities(datetime.now(config.TAIPEI_TZ).date())` for the initial load
+and passes `refresh_metadata=build_capacities` into `run_forever`.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `.venv/Scripts/python -m pytest -q`
+Expected: 55 passed.
+
+- [ ] **Step 6: Rebuild and restart the live collector**
+
+```bash
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
+Expected: container comes back up; existing rows in `data/hot.sqlite` survive (bind mount), and a
+tick appears within ~5.5 minutes.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/parkcast/scheduler.py src/parkcast/__main__.py tests/test_scheduler.py
+git commit -m "fix: refresh metadata and capacities on Taipei day rollover"
+```
+
+---
+
 ### Task 10: Daily Parquet compaction
 
 **Files:**
@@ -1602,6 +1787,33 @@ def test_frozen_lot_detected_after_long_unchanged_run(conn):
     assert "FINE" not in frozen
 
 
+def test_sensor_that_seizes_mid_day_is_detected(conn):
+    """The realistic failure: works, then freezes. Earlier variation must not hide it."""
+    for slot in range(100):
+        write(conn, slot, lot="SEIZED", free=slot)
+    for slot in range(100, 200):
+        write(conn, slot, lot="SEIZED", free=7)
+    assert "SEIZED" in find_frozen_lots(conn, date(2026, 9, 4), min_run=72)
+
+
+def test_sensor_frozen_early_then_recovering_is_detected(conn):
+    """Mirror case: a long frozen run followed by normal variation."""
+    for slot in range(100):
+        write(conn, slot, lot="RECOVERED", free=7)
+    for slot in range(100, 200):
+        write(conn, slot, lot="RECOVERED", free=slot)
+    assert "RECOVERED" in find_frozen_lots(conn, date(2026, 9, 4), min_run=72)
+
+
+def test_a_run_just_under_the_threshold_is_not_flagged(conn):
+    """Pins the boundary: 71 identical readings is not yet suspicious, 72 is."""
+    for slot in range(71):
+        write(conn, slot, lot="ALMOST", free=7)
+    assert find_frozen_lots(conn, date(2026, 9, 4), min_run=72) == []
+    write(conn, 71, lot="ALMOST", free=7)
+    assert find_frozen_lots(conn, date(2026, 9, 4), min_run=72) == ["ALMOST"]
+
+
 def test_short_unchanged_run_is_not_frozen(conn):
     """A genuinely quiet lot overnight should not be flagged."""
     for slot in range(20):
@@ -1644,23 +1856,39 @@ class DayReport:
 
 
 def find_frozen_lots(conn, day: date, *, min_run: int = 72) -> list[str]:
-    """Lots whose value never changed across at least `min_run` observations.
+    """Lots with a RUN of at least `min_run` consecutive identical observations.
 
-    72 slots is six hours. A lot that never moves for six hours is far more
-    likely to have a broken sensor than to be genuinely static, and undetected
-    it becomes a confidently wrong prediction.
+    72 observations is six hours at the 5-minute cadence. A lot that never moves
+    for six hours is far more likely to have a broken sensor than to be genuinely
+    static, and undetected it becomes a confidently wrong prediction.
+
+    The run matters, not the whole day: the realistic failure is a sensor that
+    works, then seizes. Asking merely "was this lot constant all day" misses that
+    entirely, because the earlier varying readings hide the later frozen ones.
     """
     start, end = day_bounds(day)
+    # Gap-and-islands: the difference between a row's overall rank and its rank
+    # within its own value is constant exactly across a run of identical values,
+    # so grouping on it yields one group per run.
     rows = conn.execute(
         """
-        SELECT lot_id, COUNT(*) AS n, COUNT(DISTINCT free_car) AS distinct_values
-        FROM observations
-        WHERE data_ts >= ? AND data_ts < ? AND free_car IS NOT NULL
-        GROUP BY lot_id
+        WITH ordered AS (
+            SELECT lot_id, free_car,
+                   ROW_NUMBER() OVER (PARTITION BY lot_id ORDER BY data_ts) -
+                   ROW_NUMBER() OVER (PARTITION BY lot_id, free_car ORDER BY data_ts) AS island
+            FROM observations
+            WHERE data_ts >= ? AND data_ts < ? AND free_car IS NOT NULL
+        ),
+        runs AS (
+            SELECT lot_id, COUNT(*) AS run_len
+            FROM ordered
+            GROUP BY lot_id, free_car, island
+        )
+        SELECT lot_id FROM runs GROUP BY lot_id HAVING MAX(run_len) >= ?
         """,
-        (start, end),
+        (start, end, min_run),
     ).fetchall()
-    return [lot_id for lot_id, n, distinct in rows if n >= min_run and distinct == 1]
+    return [lot_id for (lot_id,) in rows]
 
 
 def build_report(conn, day: date) -> DayReport:
@@ -1711,12 +1939,12 @@ def format_report(report: DayReport) -> str:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/Scripts/python -m pytest tests/test_report.py -v`
-Expected: 5 passed.
+Expected: 8 passed.
 
 - [ ] **Step 5: Run the full suite**
 
 Run: `.venv/Scripts/python -m pytest -v`
-Expected: 55 passed.
+Expected: 59 passed.
 
 - [ ] **Step 6: Commit**
 
@@ -1731,7 +1959,7 @@ git commit -m "feat: add daily data-quality report"
 
 - [ ] Collector has been running continuously for 24 hours without gaps
 - [ ] `python -m parkcast` reports a fresh tick every 5 minutes
-- [ ] Full test suite passes (55 tests)
+- [ ] Full test suite passes (59 tests)
 - [ ] `build_report` shows coverage above 99% for a complete day
 - [ ] A day has been compacted to Parquet and reads back with 288 slots per lot
 

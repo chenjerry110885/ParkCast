@@ -1,0 +1,10 @@
+services:
+  collector:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ../data:/app/data
+    environment:
+      TZ: Asia/Taipei
