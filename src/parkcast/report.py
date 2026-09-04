@@ -12,6 +12,7 @@ class DayReport:
     ticks_seen: int
     ticks_expected: int
     lots_seen: int
+    lots_with_gaps: int
     missing_pct: float
     clamped: int
     frozen_lots: tuple[str, ...]
@@ -19,6 +20,12 @@ class DayReport:
 
 def find_frozen_lots(conn, day: date, *, min_run: int = 72) -> list[str]:
     """Lots with a RUN of at least `min_run` consecutive identical observations.
+
+    Runs are counted in consecutive OBSERVATIONS, not consecutive slots, so a
+    run bridges anything that left no row: a collection outage, and also any
+    MISSING reading, since the `free_car IS NOT NULL` filter removes those
+    before the rows are ranked. 36 identical readings, a nine-hour gap, then 36
+    more identical readings is therefore reported as one run of 72.
 
     72 observations is six hours at the 5-minute cadence. A lot that never moves
     for six hours is far more likely to have a broken sensor than to be genuinely
@@ -65,6 +72,21 @@ def build_report(conn, day: date) -> DayReport:
         "SELECT COUNT(DISTINCT lot_id) FROM observations WHERE data_ts >= ? AND data_ts < ?",
         window,
     ).fetchone()[0]
+    # Per-lot coverage (spec section 10). Citywide counts hide a truncated
+    # tick entirely: a batch that wrote 965 of 1177 lots still reports
+    # "lots 1177" and a full tick count, because every lot and every data_ts
+    # was seen by *someone*. Counting lots short of the day's tick total is
+    # what makes the hole visible.
+    lots_with_gaps = conn.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT lot_id FROM observations
+            WHERE data_ts >= ? AND data_ts < ?
+            GROUP BY lot_id HAVING COUNT(*) < ?
+        )
+        """,
+        (start, end, ticks_seen),
+    ).fetchone()[0]
     total, missing, clamped = conn.execute(
         """
         SELECT COUNT(*),
@@ -80,6 +102,7 @@ def build_report(conn, day: date) -> DayReport:
         ticks_seen=ticks_seen,
         ticks_expected=SLOTS_PER_DAY,
         lots_seen=lots_seen,
+        lots_with_gaps=lots_with_gaps,
         missing_pct=(100.0 * (missing or 0) / total) if total else 0.0,
         clamped=clamped or 0,
         frozen_lots=tuple(find_frozen_lots(conn, day)),
@@ -92,6 +115,7 @@ def format_report(report: DayReport) -> str:
         f"ParkCast data quality — {report.day.isoformat()}",
         f"  ticks      {report.ticks_seen}/{report.ticks_expected} ({coverage:.1f}% coverage)",
         f"  lots       {report.lots_seen}",
+        f"  incomplete {report.lots_with_gaps} lots missed at least one tick",
         f"  missing    {report.missing_pct:.2f}% of readings",
         f"  clamped    {report.clamped}",
         f"  frozen     {len(report.frozen_lots)} lots",

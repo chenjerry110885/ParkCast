@@ -31,6 +31,32 @@ def test_counts_ticks_and_reports_gaps(conn):
     assert report.lots_seen == 1
 
 
+def test_a_lot_missing_from_some_ticks_is_counted_as_incomplete(conn):
+    """Per-lot coverage (spec section 10) is what makes a truncated tick visible.
+
+    The citywide counters cannot see one: when a batch wrote 965 of 1177 lots,
+    every lot and every data_ts was still observed by *someone*, so lots_seen
+    and ticks_seen both looked perfect. Counting lots short of the day's tick
+    total is the only citywide number that moves.
+    """
+    for slot in (0, 1, 2):
+        write(conn, slot, lot="COMPLETE")
+    for slot in (0, 1):
+        write(conn, slot, lot="TRUNCATED")
+
+    report = build_report(conn, date(2026, 9, 4))
+    assert report.ticks_seen == 3
+    assert report.lots_seen == 2, "the citywide counters see nothing wrong"
+    assert report.lots_with_gaps == 1
+
+
+def test_no_lot_is_incomplete_when_every_tick_is_whole(conn):
+    for slot in (0, 1, 2):
+        for lot in ("A", "B"):
+            write(conn, slot, lot=lot)
+    assert build_report(conn, date(2026, 9, 4)).lots_with_gaps == 0
+
+
 def test_missing_percentage_counts_nulls(conn):
     write(conn, 0, free=10)
     write(conn, 1, free=None)
@@ -87,3 +113,14 @@ def test_format_report_is_human_readable(conn):
     text = format_report(build_report(conn, date(2026, 9, 4)))
     assert "2026-09-04" in text
     assert "ticks" in text.lower()
+
+
+def test_format_report_surfaces_incomplete_lots(conn):
+    """A number computed but never printed is a number nobody acts on."""
+    for slot in (0, 1, 2):
+        write(conn, slot, lot="COMPLETE")
+    write(conn, 0, lot="TRUNCATED")
+
+    text = format_report(build_report(conn, date(2026, 9, 4)))
+    assert "incomplete" in text.lower()
+    assert "1" in text.split("incomplete")[1].splitlines()[0]
