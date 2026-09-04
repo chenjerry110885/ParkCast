@@ -78,6 +78,10 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
 
     Lots are ordered by id and filtered to those with at least one usable
     observation, so grid rows and lots.json indices line up exactly.
+
+    Refuses to publish a set that is empty, or that has collapsed to less than
+    MIN_PUBLISH_LOT_FRACTION of what is already published: stale artifacts beat
+    artifacts that have lost most of the city.
     """
     history = load_history(conn, cold_dir=config.PARQUET_DIR)
     forecaster = Blend(history)
@@ -98,6 +102,23 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
             len(lots), len(history.by_lot),
         )
         return
+
+    published = artifacts.read_header(Path(out_dir) / "grid.bin")
+    if published is not None:
+        floor = published["n_lots"] * config.MIN_PUBLISH_LOT_FRACTION
+        if len(ordered) < floor:
+            # Emptiness is only the extreme of this failure. A store restored
+            # from a partial backup, or one still filling after a rebuild, can
+            # yield a plausible-looking handful of lots; publishing it would take
+            # most of the city's parking off the map until it recovers.
+            log.error(
+                "refusing to publish %s lots over an existing %s-lot grid "
+                "(floor is %.0f, %.0f%% of published); leaving artifacts untouched",
+                len(ordered), published["n_lots"], floor,
+                config.MIN_PUBLISH_LOT_FRACTION * 100,
+            )
+            return
+
     grid = build_grid(forecaster, [lot.id for lot in ordered], history.latest_ts)
     # One set of identity values for both files: the row order is recomputed
     # every tick, so a client pairing this grid with an older lots.json must be

@@ -50,3 +50,8 @@ CLIMATOLOGY_LOT_PRIOR = 20    # lot shrinks toward the citywide rate
 BLEND_HALF_LIFE_MIN = 30      # persistence weight halves every 30 min of horizon
 
 ARTIFACT_DIR = DATA_DIR / "artifacts"
+# Refuse to publish a grid holding less than this fraction of the lots the
+# currently published grid holds. A partially restored store that yields 40 lots
+# would otherwise replace a 1,088-lot grid with the city losing 96% of its
+# parking -- the same failure the empty guard already covers, one notch down.
+MIN_PUBLISH_LOT_FRACTION = 0.5

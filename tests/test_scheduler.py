@@ -755,3 +755,70 @@ def test_publish_artifacts_stamps_both_files_with_one_identity(tmp_path):
     for field in ("generated_at", "base_data_ts", "n_lots"):
         assert doc[field] == header[field], f"{field} disagrees across the pair"
     assert doc["n_lots"] == len(doc["lots"]) == 2
+
+
+def _publish(conn, out_dir, lot_ids):
+    scheduler.publish_artifacts(conn, [_make_lot(i) for i in lot_ids], out_dir)
+
+
+def test_publish_artifacts_refuses_a_collapsed_lot_count(tmp_path, caplog):
+    """A store restored from a partial backup yields a plausible handful of
+    lots. Publishing it would take most of the city's parking off the map."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    ids = [f"L{i:03d}" for i in range(10)]
+    for lot_id in ids:
+        _seed(conn, date(2026, 9, 4), lot=lot_id)
+    out_dir = tmp_path / "artifacts"
+    _publish(conn, out_dir, ids)                       # a healthy 10-lot grid
+    good_grid = (out_dir / "grid.bin").read_bytes()
+    good_lots = (out_dir / "lots.json").read_bytes()
+
+    thin = store.connect(tmp_path / "thin.sqlite")     # only 4 of the 10 survive
+    for lot_id in ids[:4]:
+        _seed(thin, date(2026, 9, 4), lot=lot_id)
+    with caplog.at_level(logging.ERROR, logger="parkcast.scheduler"):
+        _publish(thin, out_dir, ids[:4])
+    conn.close()
+    thin.close()
+
+    assert (out_dir / "grid.bin").read_bytes() == good_grid, "the good grid must survive"
+    assert (out_dir / "lots.json").read_bytes() == good_lots
+    assert "refusing to publish" in caplog.text
+    assert list(out_dir.glob("*.tmp")) == []
+
+
+def test_publish_artifacts_allows_a_lot_count_above_the_floor(tmp_path):
+    """Lots do legitimately come and go -- the guard must only catch a collapse."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    ids = [f"L{i:03d}" for i in range(10)]
+    for lot_id in ids:
+        _seed(conn, date(2026, 9, 4), lot=lot_id)
+    out_dir = tmp_path / "artifacts"
+    _publish(conn, out_dir, ids)
+
+    fewer = store.connect(tmp_path / "fewer.sqlite")   # 6 of 10, above the 50% floor
+    for lot_id in ids[:6]:
+        _seed(fewer, date(2026, 9, 4), lot=lot_id)
+    _publish(fewer, out_dir, ids[:6])
+    conn.close()
+    fewer.close()
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert doc["n_lots"] == 6
+    assert artifacts.decode_header((out_dir / "grid.bin").read_bytes())["n_lots"] == 6
+
+
+def test_publish_artifacts_publishes_when_there_is_no_readable_baseline(tmp_path):
+    """No grid.bin yet, or bytes that are not a grid: nothing to compare, so the
+    guard must not block the first publish or a recovery from a corrupt file."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+    (out_dir / "grid.bin").write_bytes(b"not a grid header at all, truly")
+
+    _publish(conn, out_dir, ["A"])
+    conn.close()
+
+    header = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
+    assert header["magic"] == artifacts.MAGIC and header["n_lots"] == 1

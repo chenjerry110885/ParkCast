@@ -43,6 +43,21 @@ def decode_header(blob: bytes) -> dict:
     }
 
 
+def read_header(path: Path) -> dict | None:
+    """The header of an already-published grid, or None if there isn't one.
+
+    None covers every "nothing trustworthy to compare against" case -- no file,
+    a truncated one, or bytes that are not a grid at all -- so callers can treat
+    a missing baseline as "publish" without knowing the format.
+    """
+    try:
+        blob = Path(path).read_bytes()[:HEADER_SIZE]
+        header = decode_header(blob)
+    except (OSError, struct.error):
+        return None
+    return header if header["magic"] == MAGIC else None
+
+
 def build_lots_json(
     lots: Sequence[Lot], *, generated_at: int, base_data_ts: int, n_lots: int
 ) -> bytes:
