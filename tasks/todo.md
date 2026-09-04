@@ -1387,6 +1387,169 @@ git commit -m "feat: package collector for continuous operation"
 
 ---
 
+### Task 9b: Daily metadata refresh
+
+Task 9 loads the metadata snapshot and capacity map once at process start. Under
+`restart: unless-stopped` the container runs for months, so the "daily" snapshot fires exactly
+once and the capacity map goes stale — new lots get permanent `NO_CAPACITY`, drifted capacities
+produce wrong `CLAMPED` flags, and both failures are silent. Spec section 6 requires metadata
+snapshotted per validity range, so this closes a real spec gap.
+
+**Files:**
+- Modify: `src/parkcast/scheduler.py` (add day-rollover refresh to `run_forever`)
+- Modify: `src/parkcast/__main__.py` (supply the refresh callable)
+- Test: `tests/test_scheduler.py` (append)
+
+**Interfaces:**
+- Consumes: `config.TAIPEI_TZ`, existing `run_forever` injection points
+- Produces:
+  - `taipei_date(ts: int) -> date`
+  - `run_forever(..., refresh_metadata: Callable[[date], dict[str, int | None]] | None = None)`
+  - `__main__.build_capacities(day: date) -> dict[str, int | None]`
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# appended to tests/test_scheduler.py
+from datetime import date
+
+from parkcast import config
+from parkcast.scheduler import taipei_date
+
+
+def test_taipei_date_uses_taipei_not_utc():
+    """16:30 UTC is already the next day in Taipei (UTC+8)."""
+    ts = int(datetime(2026, 9, 4, 16, 30, tzinfo=timezone.utc).timestamp())
+    assert taipei_date(ts) == date(2026, 9, 5)
+
+
+def test_refresh_not_called_while_the_day_is_unchanged(monkeypatch):
+    calls = []
+    clock = _VirtualClock(start=int(datetime(2026, 9, 4, 2, 0, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        if len(clock.slots) >= 3:
+            raise _StopLoop
+        return SimpleNamespace(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"A": 1}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.read, refresh_metadata=lambda d: calls.append(d) or {})
+    assert calls == [], "refresh must not fire within a single Taipei day"
+
+
+def test_refresh_fires_once_when_the_taipei_day_rolls_over(monkeypatch):
+    calls = []
+    # Start just before Taipei midnight (15:59 UTC == 23:59 Taipei).
+    clock = _VirtualClock(start=int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        if len(calls) >= 1:
+            raise _StopLoop
+        return SimpleNamespace(data_ts=clock.now, rows_written=1, advanced=True)
+
+    def refresh(day):
+        calls.append(day)
+        return {"NEW": 42}
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.read, refresh_metadata=refresh)
+    assert calls == [date(2026, 9, 5)], f"expected one refresh at the day boundary, got {calls}"
+
+
+def test_failed_refresh_keeps_the_previous_capacities(monkeypatch):
+    """A refresh that raises must not lose the capacities we already have."""
+    seen = []
+    clock = _VirtualClock(start=int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        seen.append(dict(capacities))
+        if len(seen) >= 3:
+            raise _StopLoop
+        return SimpleNamespace(data_ts=clock.now, rows_written=1, advanced=True)
+
+    def boom(day):
+        raise ConnectionError("metadata endpoint down")
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.read, refresh_metadata=boom)
+    assert all(c == {"OLD": 1} for c in seen), "stale capacities beat no capacities"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/Scripts/python -m pytest tests/test_scheduler.py -k "refresh or taipei_date" -v`
+Expected: FAIL — `cannot import name 'taipei_date'`
+
+- [ ] **Step 3: Add the refresh to `src/parkcast/scheduler.py`**
+
+```python
+def taipei_date(ts: int) -> date:
+    """The calendar date in Taipei for an epoch timestamp."""
+    return datetime.fromtimestamp(ts, config.TAIPEI_TZ).date()
+```
+
+Then, inside `run_forever`, track the day and refresh on rollover. Add the parameter
+`refresh_metadata: Callable[[date], dict[str, int | None]] | None = None`, initialise
+`current_day = taipei_date(now_fn())` before the loop, and after the `prune` call:
+
+```python
+        if refresh_metadata is not None:
+            day = taipei_date(now_fn())
+            if day != current_day:
+                try:
+                    capacities = refresh_metadata(day)
+                    current_day = day
+                    log.info("metadata refreshed for %s (%s lots)", day, len(capacities))
+                except Exception:
+                    # Stale capacities beat no capacities; try again next slot.
+                    log.exception("metadata refresh failed; keeping previous capacities")
+```
+
+Note `capacities` is rebound, so the loop must read it fresh each iteration when calling
+`collect(conn, capacities)` — it already does.
+
+- [ ] **Step 4: Supply the callable in `src/parkcast/__main__.py`**
+
+```python
+def build_capacities(day: date) -> dict[str, int | None]:
+    """Fetch metadata, snapshot it for `day`, and return the capacity map."""
+    raw = fetch_json(config.METADATA_URL)
+    snapshot_metadata(raw, config.PARQUET_DIR / "meta", day)
+    return capacity_map(parse_metadata(raw))
+```
+
+`main()` then calls `build_capacities(datetime.now(config.TAIPEI_TZ).date())` for the initial load
+and passes `refresh_metadata=build_capacities` into `run_forever`.
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `.venv/Scripts/python -m pytest -q`
+Expected: 55 passed.
+
+- [ ] **Step 6: Rebuild and restart the live collector**
+
+```bash
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
+Expected: container comes back up; existing rows in `data/hot.sqlite` survive (bind mount), and a
+tick appears within ~5.5 minutes.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/parkcast/scheduler.py src/parkcast/__main__.py tests/test_scheduler.py
+git commit -m "fix: refresh metadata and capacities on Taipei day rollover"
+```
+
+---
+
 ### Task 10: Daily Parquet compaction
 
 **Files:**
@@ -1738,7 +1901,7 @@ Expected: 5 passed.
 - [ ] **Step 5: Run the full suite**
 
 Run: `.venv/Scripts/python -m pytest -v`
-Expected: 55 passed.
+Expected: 59 passed.
 
 - [ ] **Step 6: Commit**
 
@@ -1753,7 +1916,7 @@ git commit -m "feat: add daily data-quality report"
 
 - [ ] Collector has been running continuously for 24 hours without gaps
 - [ ] `python -m parkcast` reports a fresh tick every 5 minutes
-- [ ] Full test suite passes (55 tests)
+- [ ] Full test suite passes (59 tests)
 - [ ] `build_report` shows coverage above 99% for a complete day
 - [ ] A day has been compacted to Parquet and reads back with 288 slots per lot
 
