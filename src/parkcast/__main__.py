@@ -4,15 +4,23 @@ from datetime import date, datetime
 
 from parkcast import config, store
 from parkcast.collector import fetch_json
-from parkcast.metadata import capacity_map, parse_metadata, snapshot_metadata
-from parkcast.scheduler import run_forever
+from parkcast.metadata import Lot, capacity_map, parse_metadata, snapshot_metadata
+from parkcast.scheduler import publish_artifacts, run_forever
+
+# The lot list `publish_artifacts` reads each tick. `build_capacities` refreshes
+# it alongside the capacity map on every day-rollover, so it is never frozen at
+# whatever the feed looked like on day one - a bug this codebase has already
+# had to fix once for capacities themselves.
+_lots: tuple[Lot, ...] = ()
 
 
 def build_capacities(day: date) -> dict[str, int | None]:
     """Fetch metadata, snapshot it for `day`, and return the capacity map."""
+    global _lots
     raw = fetch_json(config.METADATA_URL)
     snapshot_metadata(raw, config.PARQUET_DIR / "meta", day)
-    return capacity_map(parse_metadata(raw))
+    _lots = parse_metadata(raw)
+    return capacity_map(_lots)
 
 
 def main() -> None:
@@ -40,7 +48,12 @@ def main() -> None:
             "(every lot flags NO_CAPACITY) until the next day-rollover refresh"
         )
 
-    run_forever(conn, capacities, refresh_metadata=build_capacities)
+    run_forever(
+        conn,
+        capacities,
+        refresh_metadata=build_capacities,
+        publish=lambda conn: publish_artifacts(conn, _lots),
+    )
 
 
 if __name__ == "__main__":

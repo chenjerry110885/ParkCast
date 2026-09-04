@@ -12,9 +12,11 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from parkcast import config, store
+from parkcast import artifacts, config, store
 from parkcast.collector import collect_once
 from parkcast.compact import compact_day
+from parkcast.forecast import Blend, load_history
+from parkcast.grid import build_grid
 from parkcast.report import build_report, format_report
 
 log = logging.getLogger("parkcast.scheduler")
@@ -71,6 +73,31 @@ def _first_day_to_archive(conn, today: date) -> date:
     return today if oldest is None else min(taipei_date(oldest), today)
 
 
+def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
+    """Rebuild and republish grid.bin and lots.json from current history.
+
+    Lots are ordered by id and filtered to those with at least one usable
+    observation, so grid rows and lots.json indices line up exactly.
+    """
+    history = load_history(conn, cold_dir=config.PARQUET_DIR)
+    forecaster = Blend(history)
+    ordered = sorted(
+        (lot for lot in lots if lot.id in history.by_lot), key=lambda lot: lot.id
+    )
+    grid = build_grid(forecaster, [lot.id for lot in ordered], history.latest_ts)
+    artifacts.publish(
+        out_dir,
+        grid_blob=artifacts.encode_grid(
+            grid,
+            generated_at=int(time.time()),
+            base_data_ts=history.latest_ts,
+            n_lots=len(ordered),
+        ),
+        lots_blob=artifacts.build_lots_json(ordered),
+    )
+    log.info("published %s lots x %s horizons", len(ordered), config.HORIZON_COUNT)
+
+
 def run_forever(
     conn,
     capacities: dict[str, int | None],
@@ -80,6 +107,7 @@ def run_forever(
     now_fn=lambda: int(time.time()),
     refresh_metadata: Callable[[date], dict[str, int | None]] | None = None,
     archive: Callable[..., None] = archive_day,
+    publish: Callable[..., None] | None = None,
 ) -> None:
     today = taipei_date(now_fn())
     current_day = today
@@ -101,6 +129,15 @@ def run_forever(
             if result.advanced:
                 log.info("tick data_ts=%s rows=%s", result.data_ts, result.rows_written)
                 exhausted_slots = 0
+                if publish is not None:
+                    try:
+                        publish(conn)
+                    except Exception:
+                        # Publishing is downstream of collection: a tick missed is
+                        # data that can never be re-fetched, while a stale artifact
+                        # is fixed by the very next tick. It must never be able to
+                        # take collection down with it.
+                        log.exception("publishing artifacts failed; will retry next tick")
                 break
             log.warning("feed has not advanced (data_ts=%s); retrying", result.data_ts)
         else:

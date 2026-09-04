@@ -620,3 +620,50 @@ def test_one_good_tick_resets_the_exhausted_slot_counter(monkeypatch):
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
                               now_fn=clock.now_fn, archive=_no_archive)
+
+
+# --- publishing forecast artifacts -------------------------------------------
+
+
+def test_publish_runs_after_an_advancing_tick(monkeypatch):
+    """publish is None by default (every test above passes none), so wiring it
+    in must not disturb any existing behaviour -- it must only fire once per
+    tick that actually advanced."""
+    published = []
+    clock = _VirtualClock(1788537600)
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        if len(published) >= 2:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn, archive=_no_archive,
+                              publish=lambda conn: published.append(clock.now))
+
+    assert len(published) == 2
+
+
+def test_publish_failure_does_not_stop_collection(monkeypatch):
+    """Collection is irreplaceable; a failed publish just means the artifacts
+    are stale for one more tick. It must never be able to take collection down."""
+    ticks = []
+    clock = _VirtualClock(1788537600)
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        ticks.append(clock.now)
+        if len(ticks) >= 3:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    def boom(conn):
+        raise RuntimeError("artifact write failed")
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn, archive=_no_archive, publish=boom)
+
+    assert len(ticks) == 3, "collection must survive a publishing failure"
