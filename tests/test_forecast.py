@@ -101,6 +101,72 @@ def test_history_excludes_missing_readings(conn):
     assert "A" not in h.current, "a lot whose newest reading is NULL has no current value"
 
 
+# --- before_ts: the train side of a time split -------------------------------
+#
+# Climatology counts every observation it is given, so scoring it against the
+# same store it was built from lets it see its own labels. Persistence gets only
+# the newest tick and has no such advantage. Spec section 8 rests on that
+# comparison being fair, so a backtest needs a history that provably stops.
+
+
+def test_before_ts_excludes_observations_at_or_after_the_cutoff(conn):
+    for ts in (1000, 1300, 1600, 1900):
+        write(conn, ts, free=5)
+    h = load_history(conn, before_ts=1600)
+    assert h.by_lot["A"] == [(1000, 5), (1300, 5)], "the cutoff is strict: >= is excluded"
+
+
+def test_before_ts_current_is_the_newest_tick_before_the_cutoff(conn):
+    write(conn, 1000, free=5)
+    write(conn, 1300, free=7)
+    write(conn, 1600, free=9)   # the label a backtest would score against
+    h = load_history(conn, before_ts=1600)
+    assert h.latest_ts == 1300, "latest_ts must not reach past the cutoff"
+    assert h.current == {"A": 7}, "current must be the newest tick before the cutoff"
+
+
+def test_before_ts_filters_the_cold_store_too(conn, tmp_path):
+    """A cutoff that only bound the hot query would train on the cold copy of
+    exactly the days being scored."""
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    other = store.connect(tmp_path / "src.sqlite")
+    for slot in range(10):
+        store.insert_snapshot(
+            other,
+            FeedSnapshot(start + slot * 300, start + slot * 300 + 200,
+                         (Observation("A", 5, None),)),
+            {"A": 50},
+        )
+    compact_day(other, day, tmp_path)
+    other.close()
+
+    cutoff = start + 5 * 300
+    h = load_history(conn, cold_dir=tmp_path, before_ts=cutoff)   # conn is empty
+    assert [ts for ts, _ in h.by_lot["A"]] == [start + i * 300 for i in range(5)]
+
+
+def test_before_ts_none_keeps_everything(conn):
+    for ts in (1000, 1300, 1600):
+        write(conn, ts, free=5)
+    assert len(load_history(conn).by_lot["A"]) == 3
+    assert load_history(conn).latest_ts == 1600
+
+
+def test_a_forecaster_trained_before_the_cutoff_cannot_see_its_labels(conn):
+    """The leak this exists to close: without a cutoff, climatology's count for
+    the target bucket already contains the target observation."""
+    base = 1788537600
+    for week in range(4):
+        write(conn, base + week * 7 * 86400, free=5)   # always a space...
+    target = base + 4 * 7 * 86400
+    write(conn, target, free=0)                        # ...until the test day
+
+    leaky = Climatology(load_history(conn)).predict("A", target, 30)
+    clean = Climatology(load_history(conn, before_ts=target)).predict("A", target, 30)
+    assert clean > leaky, "the label must not be inside the training counts"
+
+
 def test_persistence_is_one_when_a_space_exists(conn):
     write(conn, 1000, free=5)
     assert Persistence(load_history(conn)).predict("A", 1600, 10) == 1.0

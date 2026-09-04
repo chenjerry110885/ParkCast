@@ -2,6 +2,24 @@
 
 Three implementations share one protocol so Plan 4 can evaluate them against
 each other and against a trained model on identical inputs.
+
+Train/test contract
+-------------------
+The forecasters are not symmetric in what they consume. `Persistence` reads
+only the newest tick, but `Climatology` (and therefore `Blend`) counts every
+observation in the `History` it was built from. Scoring a Climatology built
+over the whole store against observations inside that store lets it see its own
+labels: its counts include the very reading being predicted, so it starts the
+comparison with an advantage that no honest model can match. Spec section 8
+exists to make that comparison meaningful, so it must not be rigged.
+
+`load_history(conn, before_ts=T)` returns a history containing only
+observations strictly before `T`. A backtest builds its forecasters from
+`load_history(..., before_ts=T)` and scores them against observations at or
+after `T`. The cutoff filters the hot query and the cold reader alike, so no
+tier of the fallback chain and no lag feature can reach across it. Splits are
+by time, never at random -- a random split leaks the future backwards through
+those same counts.
 """
 from collections import defaultdict
 from dataclasses import dataclass
@@ -24,15 +42,31 @@ class Forecaster(Protocol):
         ...
 
 
-def load_history(conn, *, cold_dir: Path | None = None) -> History:
+def load_history(
+    conn, *, cold_dir: Path | None = None, before_ts: int | None = None
+) -> History:
     """Read the hot store, optionally extended by the cold Parquet corpus.
 
     Missing readings are absent rather than zero: a NULL means the feed said
     nothing, and coercing it to 0 would assert the lot was full.
+
+    `before_ts` keeps only observations strictly before it, in both stores --
+    the train side of a time split. `current` and `latest_ts` then describe the
+    newest tick before the cutoff, not the newest tick overall, so a forecaster
+    built from this history cannot see a single label it will be scored on. See
+    the train/test contract in the module docstring.
     """
     by_lot: dict[str, list[tuple[int, int]]] = defaultdict(list)
 
-    row = conn.execute("SELECT MIN(data_ts) FROM observations").fetchone()
+    # Spliced in only when a cutoff is asked for. A data_ts range predicate on
+    # the by_lot scan tempts the planner back onto idx_obs_data_ts, which is the
+    # slow non-covering plan the scan below exists to avoid; backtests run
+    # offline and can afford it, the 5-minute publish cannot.
+    cut = "" if before_ts is None else " AND data_ts < :before"
+    where = "" if before_ts is None else " WHERE data_ts < :before"
+    params = {} if before_ts is None else {"before": before_ts}
+
+    row = conn.execute(f"SELECT MIN(data_ts) FROM observations{where}", params).fetchone()
     earliest_hot = row[0]
     cold_cutoff = _snap_to_slot(earliest_hot) if earliest_hot is not None else None
 
@@ -41,8 +75,13 @@ def load_history(conn, *, cold_dir: Path | None = None) -> History:
             # The hot store is authoritative for anything it still retains; taking
             # the cold copy too would count the same reading twice at a different
             # timestamp, silently double-weighting the most recent 48 hours.
-            if cold_cutoff is None or ts < cold_cutoff:
-                by_lot[lot_id].append((ts, free))
+            if cold_cutoff is not None and ts >= cold_cutoff:
+                continue
+            # The cutoff has to bind here too, or a backtest would train on the
+            # cold copy of exactly the days it is scored against.
+            if before_ts is not None and ts >= before_ts:
+                continue
+            by_lot[lot_id].append((ts, free))
 
     # Deliberately unordered. `idx_obs_data_ts` is non-covering, so ORDER BY
     # data_ts turns a table scan into one random primary-key lookup per row:
@@ -51,15 +90,15 @@ def load_history(conn, *, cold_dir: Path | None = None) -> History:
     # is what actually guarantees the order, and it has to run anyway because
     # cold rows are read before hot ones.
     for lot_id, ts, free in conn.execute(
-        "SELECT lot_id, data_ts, free_car FROM observations "
-        "WHERE free_car IS NOT NULL"
+        f"SELECT lot_id, data_ts, free_car FROM observations "
+        f"WHERE free_car IS NOT NULL{cut}", params
     ):
         by_lot[lot_id].append((ts, free))
 
     for series in by_lot.values():
         series.sort()
 
-    row = conn.execute("SELECT MAX(data_ts) FROM observations").fetchone()
+    row = conn.execute(f"SELECT MAX(data_ts) FROM observations{where}", params).fetchone()
     latest_ts = row[0] or 0
     current = {
         lot_id: free
