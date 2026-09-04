@@ -236,43 +236,92 @@ def test_refresh_not_called_while_the_day_is_unchanged(monkeypatch):
     assert calls == [], "refresh must not fire within a single Taipei day"
 
 
-def test_refresh_fires_once_when_the_taipei_day_rolls_over(monkeypatch):
-    calls = []
+def test_refresh_rebind_is_observable_at_the_call_site(monkeypatch):
+    """The map collect() receives must become the refreshed one, not stay bound to the original.
+
+    A mutation that assigns the refreshed map to an unused local (instead of
+    rebinding `capacities`) would leave every observed map as the original —
+    this must fail in that case.
+    """
+    seen = []
     # Start just before Taipei midnight (15:59:30 UTC == 23:59:30 Taipei).
     clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
     def collect(conn, capacities):
-        if len(calls) >= 1:
+        seen.append(dict(capacities))
+        if len(seen) >= 4:
             raise _StopLoop()
         return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
 
     def refresh(day):
-        calls.append(day)
         return {"NEW": 42}
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
                                now_fn=clock.now_fn, refresh_metadata=refresh)
-    assert calls == [date(2026, 9, 5)], f"expected one refresh at the day boundary, got {calls}"
+
+    assert {"OLD": 1} in seen, "the slot(s) before the refresh landed should still see the original map"
+    assert {"NEW": 42} in seen, "later slots must see the refreshed map, proving it was rebound"
 
 
-def test_failed_refresh_keeps_the_previous_capacities(monkeypatch):
-    """A refresh that raises must not lose the capacities we already have."""
+def test_failed_refresh_is_retried_on_a_later_slot(monkeypatch):
+    """current_day must stay stale on failure, or a single bad refresh kills all future retries.
+
+    A mutation that advances `current_day` in a `finally` block (so it
+    advances even when refresh_metadata raises) would permanently disable
+    retries after the first failure — refresh_metadata would only ever be
+    called once, and the successful map would never be observed.
+    """
     seen = []
+    refresh_calls = []
     clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
     def collect(conn, capacities):
         seen.append(dict(capacities))
-        if len(seen) >= 3:
+        if len(seen) >= 4:
             raise _StopLoop()
         return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
 
-    def boom(day):
-        raise ConnectionError("metadata endpoint down")
+    def refresh(day):
+        refresh_calls.append(day)
+        if len(refresh_calls) == 1:
+            raise ConnectionError("metadata endpoint down")
+        return {"NEW": 42}
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
-                               now_fn=clock.now_fn, refresh_metadata=boom)
-    assert all(c == {"OLD": 1} for c in seen), "stale capacities beat no capacities"
+                               now_fn=clock.now_fn, refresh_metadata=refresh)
+
+    assert len(refresh_calls) >= 2, "a failed refresh must be retried on a later slot"
+    assert {"NEW": 42} in seen, "collect must eventually observe the successfully refreshed map"
+
+
+def test_successful_refresh_fires_exactly_once_for_the_day(monkeypatch):
+    """current_day must be updated on success, or every slot in the same day refires forever.
+
+    A mutation that drops `current_day = day` from the success path would
+    make refresh_metadata fire on every remaining slot of the day, not once.
+    """
+    refresh_calls = []
+    ticks = []
+    # Start just before Taipei midnight; 4 slots (20 min) stay well inside the new day.
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        ticks.append(clock.now)
+        if len(ticks) >= 4:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    def refresh(day):
+        refresh_calls.append(day)
+        return {"NEW": 42}
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+                               now_fn=clock.now_fn, refresh_metadata=refresh)
+
+    assert len(refresh_calls) == 1, f"expected exactly one refresh for the day, got {len(refresh_calls)}"
