@@ -752,9 +752,54 @@ def test_publish_artifacts_stamps_both_files_with_one_identity(tmp_path):
 
     header = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
     doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
-    for field in ("generated_at", "base_data_ts", "n_lots"):
+    for field in ("generated_at", "base_data_ts", "n_lots", "roster_id"):
         assert doc[field] == header[field], f"{field} disagrees across the pair"
     assert doc["n_lots"] == len(doc["lots"]) == 2
+    assert doc["roster_id"] == artifacts.roster_id([l["id"] for l in doc["lots"]]), (
+        "the roster must hash the rows actually published"
+    )
+    assert doc["v"] == artifacts.VERSION
+
+
+def test_publish_artifacts_keeps_the_roster_id_across_ticks(tmp_path):
+    """lots.json is cached for a week while grid.bin is republished every five
+    minutes. If the roster stamp moved with generated_at, a client enforcing the
+    pairing check would have to re-fetch it every tick or drop the check."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    _seed(conn, date(2026, 9, 4), lot="B")
+    out_dir = tmp_path / "artifacts"
+    lots = [_make_lot("A"), _make_lot("B")]
+
+    scheduler.publish_artifacts(conn, lots, out_dir)
+    first = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
+    _seed(conn, date(2026, 9, 5), lot="A")   # a later tick, same two lots
+    _seed(conn, date(2026, 9, 5), lot="B")
+    scheduler.publish_artifacts(conn, lots, out_dir)
+    second = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
+    conn.close()
+
+    assert second["base_data_ts"] > first["base_data_ts"], "a genuinely newer publish"
+    assert second["roster_id"] == first["roster_id"], "an unchanged roster keeps its id"
+
+
+def test_publish_artifacts_changes_the_roster_id_when_the_rows_shift(tmp_path):
+    """A lot joining at index 0 shifts every later row; n_lots would also catch
+    this one, but the stamp that must move is the roster."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    for lot_id in ("A", "B", "C"):
+        _seed(conn, date(2026, 9, 4), lot=lot_id)
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(conn, [_make_lot("B"), _make_lot("C")], out_dir)
+    before = artifacts.decode_header((out_dir / "grid.bin").read_bytes())["roster_id"]
+    scheduler.publish_artifacts(
+        conn, [_make_lot("A"), _make_lot("B"), _make_lot("C")], out_dir
+    )
+    after = artifacts.decode_header((out_dir / "grid.bin").read_bytes())["roster_id"]
+    conn.close()
+
+    assert before != after
 
 
 def _publish(conn, out_dir, lot_ids):

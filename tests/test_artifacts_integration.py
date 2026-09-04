@@ -1,4 +1,5 @@
 """End-to-end check against a snapshot of the live database, when one exists."""
+import json
 import shutil
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from parkcast import config, store
 from parkcast.artifacts import HEADER_SIZE, build_lots_json, decode_header, encode_grid
 from parkcast.forecast import Blend, load_history
 from parkcast.grid import UNKNOWN, build_grid
+from parkcast.metadata import Lot
 
 LIVE_DB = config.DB_PATH
 
@@ -25,11 +27,19 @@ def test_end_to_end_over_real_observations(tmp_path):
     lot_ids = sorted(history.by_lot)
     grid = build_grid(Blend(history), lot_ids, history.latest_ts)
     blob = encode_grid(grid, generated_at=history.latest_ts + 30,
-                       base_data_ts=history.latest_ts, n_lots=len(lot_ids))
+                       base_data_ts=history.latest_ts, lot_ids=lot_ids)
 
     header = decode_header(blob)
     assert header["n_lots"] == len(lot_ids)
     assert len(blob) == HEADER_SIZE + len(lot_ids) * 24
+    doc = json.loads(build_lots_json(
+        [Lot(id=i, name=i, area="", lot_type="", capacity_car=None,
+             lat=25.0, lon=121.5, service_time="", fare_text="") for i in lot_ids],
+        generated_at=history.latest_ts + 30, base_data_ts=history.latest_ts,
+    ))
+    assert doc["roster_id"] == header["roster_id"], (
+        "a citywide roster must hash identically on both sides"
+    )
 
     known = [b for b in grid if b != UNKNOWN]
     assert known, "a real snapshot must produce some known probabilities"

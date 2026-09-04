@@ -119,19 +119,21 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
             )
             return
 
-    grid = build_grid(forecaster, [lot.id for lot in ordered], history.latest_ts)
-    # One set of identity values for both files: the row order is recomputed
+    # One list drives the grid's rows, the header's roster and lots.json alike,
+    # so the three cannot describe different sets of lots.
+    lot_ids = [lot.id for lot in ordered]
+    grid = build_grid(forecaster, lot_ids, history.latest_ts)
+    # One set of generation values for both files: the row order is recomputed
     # every tick, so a client pairing this grid with an older lots.json must be
-    # able to tell. Computed once here rather than twice, so they cannot drift.
-    generated_at = int(time.time())
+    # able to tell. `n_lots` and `roster_id` are derived inside each encoder
+    # from the rows it is actually writing, so no stamp can outlive its rows.
     identity = {
-        "generated_at": generated_at,
+        "generated_at": int(time.time()),
         "base_data_ts": history.latest_ts,
-        "n_lots": len(ordered),
     }
     artifacts.publish(
         out_dir,
-        grid_blob=artifacts.encode_grid(grid, **identity),
+        grid_blob=artifacts.encode_grid(grid, lot_ids=lot_ids, **identity),
         lots_blob=artifacts.build_lots_json(ordered, **identity),
     )
     log.info("published %s lots x %s horizons", len(ordered), config.HORIZON_COUNT)
