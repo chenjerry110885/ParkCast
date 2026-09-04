@@ -24,8 +24,21 @@ def main() -> None:
 
     conn = store.connect(config.DB_PATH)
 
-    capacities = build_capacities(datetime.now(config.TAIPEI_TZ).date())
-    log.info("loaded capacities for %s lots", len(capacities))
+    # The metadata blob is 2.85 MB and separate from the availability blob, so
+    # it can be unavailable while collection would be perfectly fine. Dying
+    # here costs ticks that cannot be re-fetched; starting with no capacities
+    # costs nothing but a NO_CAPACITY flag on every lot, and the day-rollover
+    # refresh fills them in. This mirrors the rollover path, which already
+    # treats a metadata failure as survivable.
+    try:
+        capacities = build_capacities(datetime.now(config.TAIPEI_TZ).date())
+        log.info("loaded capacities for %s lots", len(capacities))
+    except Exception:
+        capacities = {}
+        log.exception(
+            "metadata unavailable at startup; collecting with no capacities "
+            "(every lot flags NO_CAPACITY) until the next day-rollover refresh"
+        )
 
     run_forever(conn, capacities, refresh_metadata=build_capacities)
 
