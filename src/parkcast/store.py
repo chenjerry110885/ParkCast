@@ -39,6 +39,11 @@ def insert_snapshot(
 
     DO NOTHING on conflict: a given (lot_id, data_ts) describes one moment, so
     the first sighting is the truthful observed_at. Re-fetching must not rewrite it.
+
+    The whole tick is one explicit transaction, so it is all-or-nothing. Under
+    autocommit, executemany commits every row separately and a crash mid-batch
+    leaves a truncated tick that looks complete to every later reader; the
+    in-slot retry cannot heal it, because by then the feed has advanced.
     """
     rows = []
     for obs in snapshot.observations:
@@ -50,16 +55,25 @@ def insert_snapshot(
              free_car, free_motor, int(flags))
         )
 
-    cursor = conn.executemany(
-        """
-        INSERT INTO observations
-            (lot_id, data_ts, observed_at, free_car, free_motor, quality)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(lot_id, data_ts) DO NOTHING
-        """,
-        rows,
-    )
-    return cursor.rowcount
+    # BEGIN IMMEDIATE, not a deferred BEGIN: take the write lock up front rather
+    # than discovering it is held after the batch has already been built.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        cursor = conn.executemany(
+            """
+            INSERT INTO observations
+                (lot_id, data_ts, observed_at, free_car, free_motor, quality)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(lot_id, data_ts) DO NOTHING
+            """,
+            rows,
+        )
+        written = cursor.rowcount
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return written
 
 
 def latest_data_ts(conn: sqlite3.Connection) -> int | None:

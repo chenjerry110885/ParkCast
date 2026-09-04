@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from parkcast import store
@@ -61,6 +63,40 @@ def test_latest_data_ts(conn):
     store.insert_snapshot(conn, snap(1000, 1180), {"TPE0001": 50})
     store.insert_snapshot(conn, snap(1300, 1480), {"TPE0001": 50})
     assert store.latest_data_ts(conn) == 1300
+
+
+def test_aborted_batch_writes_no_rows_at_all(conn):
+    """A tick is all-or-nothing: a batch that fails partway must leave nothing behind.
+
+    Under autocommit each row of the executemany commits separately, so a batch
+    that dies on row 6 leaves rows 1-5 permanently visible — a truncated tick
+    indistinguishable from a complete one. This happened twice in the live
+    store (1119 and 965 rows against a full tick of 1177) when the container
+    was restarted mid-batch. The in-slot retry cannot repair it: by the time
+    the process is back, the feed has advanced and that data_ts is gone
+    forever.
+
+    The failure is injected with a NULL lot_id on the last observation, which
+    violates the primary key's implicit NOT NULL only once SQLite reaches
+    that row — i.e. after the five good rows have already been written.
+    """
+    good = tuple(Observation(f"L{i}", 10 + i, None) for i in range(5))
+    doomed = Observation(None, 10, None)  # type: ignore[arg-type]
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert_snapshot(conn, FeedSnapshot(1000, 1180, good + (doomed,)), {})
+
+    assert store.count_rows(conn) == 0, "the good rows of a failed tick must be rolled back"
+
+
+def test_connection_is_usable_after_an_aborted_batch(conn):
+    """The rollback must leave no transaction open, or every later tick fails too."""
+    doomed = (Observation("A", 10, None), Observation(None, 10, None))  # type: ignore[arg-type]
+    with pytest.raises(sqlite3.IntegrityError):
+        store.insert_snapshot(conn, FeedSnapshot(1000, 1180, doomed), {})
+
+    assert store.insert_snapshot(conn, snap(1300, 1480), {"TPE0001": 50}) == 1
+    assert store.count_rows(conn) == 1
 
 
 def test_prune_removes_only_old_rows(conn):
