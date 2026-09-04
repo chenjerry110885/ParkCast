@@ -74,11 +74,17 @@ tests/
 HORIZON_STEP_MIN = 5
 HORIZON_COUNT = 24            # +5 min through +120 min
 CLIMATOLOGY_BUCKET_MIN = 30   # time-of-week bucket width
-CLIMATOLOGY_MIN_SUPPORT = 3   # observations needed before a bucket is trusted
+CLIMATOLOGY_BUCKET_PRIOR = 8  # bucket shrinks toward the lot rate
+CLIMATOLOGY_LOT_PRIOR = 20    # lot shrinks toward the citywide rate
 BLEND_HALF_LIFE_MIN = 30      # persistence weight halves every 30 min of horizon
 
 ARTIFACT_DIR = DATA_DIR / "artifacts"
 ```
+
+> **Corrected after implementation.** This block originally read
+> `CLIMATOLOGY_MIN_SUPPORT = 3   # observations needed before a bucket is trusted`.
+> That hard support gate **was removed**, not shipped — it is replaced by the two
+> shrinkage priors above. Do not wire it back in; see Task 2 for why.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -264,10 +270,25 @@ git commit -m "feat(forecast): add history loading and persistence baseline"
 - Modify: `tests/test_forecast.py`
 
 **Interfaces:**
-- Consumes: `History`, `config.CLIMATOLOGY_BUCKET_MIN`, `config.CLIMATOLOGY_MIN_SUPPORT`, `config.TAIPEI_TZ`
+- Consumes: `History`, `config.CLIMATOLOGY_BUCKET_MIN`, `config.CLIMATOLOGY_BUCKET_PRIOR`, `config.CLIMATOLOGY_LOT_PRIOR`, `config.TAIPEI_TZ`
 - Produces:
   - `week_bucket(ts: int) -> int` — index of the 30-minute bucket within the Taipei week
   - `Climatology` — class implementing `Forecaster`
+
+> **Corrected after implementation.** This task was planned around a hard
+> `CLIMATOLOGY_MIN_SUPPORT = 3` gate ("trust a tier once it has 3 observations").
+> **That gate was removed and never shipped.** A 30-minute bucket at a 5-minute
+> cadence sees 6 observations a week, so the raw fraction it returns is exactly
+> 0.0 or 1.0 in 96.1% of cells — measured live, and 79% of published grid bytes
+> came out as 0 or 100. A baseline that answers a probability question with a
+> certainty is trivially beaten on Brier score, which would make spec section 8's
+> comparison hollow. Hierarchical Beta shrinkage replaces it, and the two are
+> *alternatives, not layers*: at `n = 0` the shrinkage formula returns the parent
+> exactly, so the bucket → lot → global fall-through the gate implemented
+> discretely is now continuous, and a gate on top would discard smoothed evidence
+> at an arbitrary threshold to reach nearly the value it discarded. The code and
+> tests below are kept as the historical plan; the **corrected** versions follow
+> each block.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -316,6 +337,19 @@ def test_climatology_is_none_with_no_history_at_all(conn):
     assert Climatology(load_history(conn)).predict("A", 1000, 30) is None
 ```
 
+> **Corrected expected values.** Two of the assertions above pin the degenerate
+> output shrinkage exists to remove and are wrong as shipped:
+> - `test_climatology_uses_the_lot_bucket_rate` — not `2/3`. Every tier holds the
+>   same three observations, so the answer is the full chain:
+>   `g = (2 + 0.5)/(3 + 1)`, `lot = (2 + 20*g)/(3 + 20)`, then
+>   `(2 + 8*lot)/(3 + 8)` ≈ `0.6403`.
+> - `test_climatology_falls_back_to_the_global_rate_for_an_unseen_lot` — not
+>   `1.0`. The global tier carries a Jeffreys prior, so ten hits out of ten
+>   returns `10.5/11` ≈ `0.9545`. A tier with nothing above it to shrink toward
+>   must still never hand the client a certainty.
+>
+> The other two assertions ship unchanged.
+
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k climatology -v`
@@ -345,7 +379,7 @@ class Climatology:
     only trusted once it has CLIMATOLOGY_MIN_SUPPORT observations behind it.
     """
 
-    def __init__(self, history: History) -> None:
+    def __init__(self, history: History) -> None:  # unchanged as shipped
         self._bucket: dict[tuple[str, int], list[int]] = defaultdict(lambda: [0, 0])
         self._lot: dict[str, list[int]] = defaultdict(lambda: [0, 0])
         self._global = [0, 0]
@@ -365,6 +399,43 @@ class Climatology:
                 return counter[0] / counter[1]
         return self._global[0] / self._global[1] if self._global[1] else None
 ```
+
+> **`predict` above is NOT what shipped.** The support gate never made it into
+> the tree; `config.CLIMATOLOGY_MIN_SUPPORT` does not exist, and
+> `tests/test_forecast.py` asserts `not hasattr(config, "CLIMATOLOGY_MIN_SUPPORT")`
+> so that re-adding it fails the suite. The shipped version shrinks each tier
+> toward its parent instead — see `src/parkcast/forecast.py` for the authoritative
+> code:
+>
+> ```python
+> def _shrink(counter, prior_rate, strength):
+>     """Beta(strength * prior_rate, ...) posterior mean. At n = 0 it returns the
+>     prior exactly, which is what makes a missing tier fall through."""
+>     hits, n = counter
+>     return (hits + strength * prior_rate) / (n + strength)
+>
+>
+>     def predict(self, lot_id, target_ts, horizon_min):
+>         if not self._global[1]:
+>             return None
+>         # Jeffreys: the tier with no parent shrinks toward 0.5, so a degenerate
+>         # corpus cannot propagate a certainty down every tier beneath it.
+>         rate = (self._global[0] + 0.5) / (self._global[1] + 1)
+>
+>         lot = self._lot.get(lot_id)
+>         if lot is None:
+>             return rate
+>         rate = _shrink(lot, rate, config.CLIMATOLOGY_LOT_PRIOR)
+>
+>         bucket = self._bucket.get((lot_id, week_bucket(target_ts)))
+>         if bucket is None:
+>             return rate
+>         return _shrink(bucket, rate, config.CLIMATOLOGY_BUCKET_PRIOR)
+> ```
+>
+> Measured effect on the live corpus (1,088 lots, 87,905 observations): bucket
+> cells at exactly 0.0 or 1.0 fell from 96.1% to 0.00%, published grid bytes at
+> 0 or 100 from 79% to 6.3%, and the mean stayed at the true base rate (0.897).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
