@@ -294,8 +294,40 @@ def test_failed_refresh_is_retried_on_a_later_slot(monkeypatch):
         scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
                                now_fn=clock.now_fn, refresh_metadata=refresh)
 
-    assert len(refresh_calls) >= 2, "a failed refresh must be retried on a later slot"
+    assert refresh_calls == [date(2026, 9, 5), date(2026, 9, 5)], (
+        f"expected two refresh attempts, both for the new day, got {refresh_calls}"
+    )
     assert {"NEW": 42} in seen, "collect must eventually observe the successfully refreshed map"
+
+
+def test_persistently_failing_refresh_never_corrupts_capacities(monkeypatch):
+    """A refresh that always raises must leave capacities exactly as they were, on every tick.
+
+    The retry test above only fails once then recovers, so it never checks
+    what `capacities` equals *during* a failed tick. A mutation that replaces
+    the map on failure (e.g. `except Exception: capacities = {}`) would
+    silently corrupt it during the failure window — this must fail in that
+    case. "Stale capacities beat no capacities" is the whole point of the
+    except branch.
+    """
+    seen = []
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        seen.append(dict(capacities))
+        if len(seen) >= 4:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    def boom(day):
+        raise ConnectionError("metadata endpoint down")
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+                               now_fn=clock.now_fn, refresh_metadata=boom)
+
+    assert all(c == {"OLD": 1} for c in seen), f"stale capacities beat no capacities, got {seen}"
 
 
 def test_successful_refresh_fires_exactly_once_for_the_day(monkeypatch):
@@ -324,4 +356,4 @@ def test_successful_refresh_fires_exactly_once_for_the_day(monkeypatch):
         scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
                                now_fn=clock.now_fn, refresh_metadata=refresh)
 
-    assert len(refresh_calls) == 1, f"expected exactly one refresh for the day, got {len(refresh_calls)}"
+    assert refresh_calls == [date(2026, 9, 5)], f"expected exactly one refresh call for the day, got {refresh_calls}"
