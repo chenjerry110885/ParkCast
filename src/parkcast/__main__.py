@@ -1,11 +1,18 @@
 """Entry point: python -m parkcast"""
 import logging
-from datetime import datetime
+from datetime import date, datetime
 
 from parkcast import config, store
 from parkcast.collector import fetch_json
 from parkcast.metadata import capacity_map, parse_metadata, snapshot_metadata
 from parkcast.scheduler import run_forever
+
+
+def build_capacities(day: date) -> dict[str, int | None]:
+    """Fetch metadata, snapshot it for `day`, and return the capacity map."""
+    raw = fetch_json(config.METADATA_URL)
+    snapshot_metadata(raw, config.PARQUET_DIR / "meta", day)
+    return capacity_map(parse_metadata(raw))
 
 
 def main() -> None:
@@ -17,12 +24,10 @@ def main() -> None:
 
     conn = store.connect(config.DB_PATH)
 
-    raw_metadata = fetch_json(config.METADATA_URL)
-    snapshot_metadata(raw_metadata, config.PARQUET_DIR / "meta", datetime.now(config.TAIPEI_TZ).date())
-    capacities = capacity_map(parse_metadata(raw_metadata))
+    capacities = build_capacities(datetime.now(config.TAIPEI_TZ).date())
     log.info("loaded capacities for %s lots", len(capacities))
 
-    run_forever(conn, capacities)
+    run_forever(conn, capacities, refresh_metadata=build_capacities)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
+from datetime import date, datetime, timezone
+
 import pytest
 
 from parkcast import config, scheduler
 from parkcast.collector import TickResult
-from parkcast.scheduler import next_poll_ts
+from parkcast.scheduler import next_poll_ts, taipei_date
 
 
 def minute_of(ts: int) -> int:
@@ -205,3 +207,72 @@ def test_run_forever_slot_targets_stay_300s_apart_despite_exhausted_retries(monk
     assert len(targets) == 3
     assert targets[1] - targets[0] == 300
     assert targets[2] - targets[1] == 300
+
+
+# --- daily metadata refresh --------------------------------------------------
+
+
+def test_taipei_date_uses_taipei_not_utc():
+    """16:30 UTC is already the next day in Taipei (UTC+8)."""
+    ts = int(datetime(2026, 9, 4, 16, 30, tzinfo=timezone.utc).timestamp())
+    assert taipei_date(ts) == date(2026, 9, 5)
+
+
+def test_refresh_not_called_while_the_day_is_unchanged(monkeypatch):
+    calls = []
+    ticks = []
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 2, 0, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        ticks.append(clock.now)
+        if len(ticks) >= 3:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"A": 1}, collect=collect, sleep=clock.sleep,
+                               now_fn=clock.now_fn, refresh_metadata=lambda d: calls.append(d) or {})
+    assert calls == [], "refresh must not fire within a single Taipei day"
+
+
+def test_refresh_fires_once_when_the_taipei_day_rolls_over(monkeypatch):
+    calls = []
+    # Start just before Taipei midnight (15:59:30 UTC == 23:59:30 Taipei).
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        if len(calls) >= 1:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    def refresh(day):
+        calls.append(day)
+        return {"NEW": 42}
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+                               now_fn=clock.now_fn, refresh_metadata=refresh)
+    assert calls == [date(2026, 9, 5)], f"expected one refresh at the day boundary, got {calls}"
+
+
+def test_failed_refresh_keeps_the_previous_capacities(monkeypatch):
+    """A refresh that raises must not lose the capacities we already have."""
+    seen = []
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        seen.append(dict(capacities))
+        if len(seen) >= 3:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    def boom(day):
+        raise ConnectionError("metadata endpoint down")
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+                               now_fn=clock.now_fn, refresh_metadata=boom)
+    assert all(c == {"OLD": 1} for c in seen), "stale capacities beat no capacities"

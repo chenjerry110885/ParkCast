@@ -1,15 +1,24 @@
 """Phase-aligned polling loop.
 
 Minute-of-hour is identical in UTC and UTC+8 because the offset is a whole
-number of hours, so slot arithmetic needs no timezone conversion.
+number of hours, so slot arithmetic needs no timezone conversion. The
+calendar *day*, however, is not — Taipei is UTC+8, so 16:00 UTC is already
+the next day in Taipei, and day-rollover refresh must use that local date.
 """
 import logging
 import time
+from collections.abc import Callable
+from datetime import date, datetime
 
 from parkcast import config, store
 from parkcast.collector import collect_once
 
 log = logging.getLogger("parkcast.scheduler")
+
+
+def taipei_date(ts: int) -> date:
+    """The calendar date in Taipei for an epoch timestamp."""
+    return datetime.fromtimestamp(ts, config.TAIPEI_TZ).date()
 
 
 def next_poll_ts(now: int) -> int:
@@ -29,7 +38,9 @@ def run_forever(
     collect=collect_once,
     sleep=time.sleep,
     now_fn=lambda: int(time.time()),
+    refresh_metadata: Callable[[date], dict[str, int | None]] | None = None,
 ) -> None:
+    current_day = taipei_date(now_fn())
     while True:
         target = next_poll_ts(now_fn())
         sleep(max(0, target - now_fn()))
@@ -52,3 +63,14 @@ def run_forever(
         removed = store.prune(conn, now_fn() - config.HOT_RETENTION_SEC)
         if removed:
             log.info("pruned %s rows beyond the hot window", removed)
+
+        if refresh_metadata is not None:
+            day = taipei_date(now_fn())
+            if day != current_day:
+                try:
+                    capacities = refresh_metadata(day)
+                    current_day = day
+                    log.info("metadata refreshed for %s (%s lots)", day, len(capacities))
+                except Exception:
+                    # Stale capacities beat no capacities; try again next slot.
+                    log.exception("metadata refresh failed; keeping previous capacities")
