@@ -74,11 +74,17 @@ tests/
 HORIZON_STEP_MIN = 5
 HORIZON_COUNT = 24            # +5 min through +120 min
 CLIMATOLOGY_BUCKET_MIN = 30   # time-of-week bucket width
-CLIMATOLOGY_MIN_SUPPORT = 3   # observations needed before a bucket is trusted
+CLIMATOLOGY_BUCKET_PRIOR = 8  # bucket shrinks toward the lot rate
+CLIMATOLOGY_LOT_PRIOR = 20    # lot shrinks toward the citywide rate
 BLEND_HALF_LIFE_MIN = 30      # persistence weight halves every 30 min of horizon
 
 ARTIFACT_DIR = DATA_DIR / "artifacts"
 ```
+
+> **Corrected after implementation.** This block originally read
+> `CLIMATOLOGY_MIN_SUPPORT = 3   # observations needed before a bucket is trusted`.
+> That hard support gate **was removed**, not shipped — it is replaced by the two
+> shrinkage priors above. Do not wire it back in; see Task 2 for why.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -264,10 +270,25 @@ git commit -m "feat(forecast): add history loading and persistence baseline"
 - Modify: `tests/test_forecast.py`
 
 **Interfaces:**
-- Consumes: `History`, `config.CLIMATOLOGY_BUCKET_MIN`, `config.CLIMATOLOGY_MIN_SUPPORT`, `config.TAIPEI_TZ`
+- Consumes: `History`, `config.CLIMATOLOGY_BUCKET_MIN`, `config.CLIMATOLOGY_BUCKET_PRIOR`, `config.CLIMATOLOGY_LOT_PRIOR`, `config.TAIPEI_TZ`
 - Produces:
   - `week_bucket(ts: int) -> int` — index of the 30-minute bucket within the Taipei week
   - `Climatology` — class implementing `Forecaster`
+
+> **Corrected after implementation.** This task was planned around a hard
+> `CLIMATOLOGY_MIN_SUPPORT = 3` gate ("trust a tier once it has 3 observations").
+> **That gate was removed and never shipped.** A 30-minute bucket at a 5-minute
+> cadence sees 6 observations a week, so the raw fraction it returns is exactly
+> 0.0 or 1.0 in 96.1% of cells — measured live, and 79% of published grid bytes
+> came out as 0 or 100. A baseline that answers a probability question with a
+> certainty is trivially beaten on Brier score, which would make spec section 8's
+> comparison hollow. Hierarchical Beta shrinkage replaces it, and the two are
+> *alternatives, not layers*: at `n = 0` the shrinkage formula returns the parent
+> exactly, so the bucket → lot → global fall-through the gate implemented
+> discretely is now continuous, and a gate on top would discard smoothed evidence
+> at an arbitrary threshold to reach nearly the value it discarded. The code and
+> tests below are kept as the historical plan; the **corrected** versions follow
+> each block.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -316,6 +337,19 @@ def test_climatology_is_none_with_no_history_at_all(conn):
     assert Climatology(load_history(conn)).predict("A", 1000, 30) is None
 ```
 
+> **Corrected expected values.** Two of the assertions above pin the degenerate
+> output shrinkage exists to remove and are wrong as shipped:
+> - `test_climatology_uses_the_lot_bucket_rate` — not `2/3`. Every tier holds the
+>   same three observations, so the answer is the full chain:
+>   `g = (2 + 0.5)/(3 + 1)`, `lot = (2 + 20*g)/(3 + 20)`, then
+>   `(2 + 8*lot)/(3 + 8)` ≈ `0.6403`.
+> - `test_climatology_falls_back_to_the_global_rate_for_an_unseen_lot` — not
+>   `1.0`. The global tier carries a Jeffreys prior, so ten hits out of ten
+>   returns `10.5/11` ≈ `0.9545`. A tier with nothing above it to shrink toward
+>   must still never hand the client a certainty.
+>
+> The other two assertions ship unchanged.
+
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k climatology -v`
@@ -345,7 +379,7 @@ class Climatology:
     only trusted once it has CLIMATOLOGY_MIN_SUPPORT observations behind it.
     """
 
-    def __init__(self, history: History) -> None:
+    def __init__(self, history: History) -> None:  # unchanged as shipped
         self._bucket: dict[tuple[str, int], list[int]] = defaultdict(lambda: [0, 0])
         self._lot: dict[str, list[int]] = defaultdict(lambda: [0, 0])
         self._global = [0, 0]
@@ -365,6 +399,43 @@ class Climatology:
                 return counter[0] / counter[1]
         return self._global[0] / self._global[1] if self._global[1] else None
 ```
+
+> **`predict` above is NOT what shipped.** The support gate never made it into
+> the tree; `config.CLIMATOLOGY_MIN_SUPPORT` does not exist, and
+> `tests/test_forecast.py` asserts `not hasattr(config, "CLIMATOLOGY_MIN_SUPPORT")`
+> so that re-adding it fails the suite. The shipped version shrinks each tier
+> toward its parent instead — see `src/parkcast/forecast.py` for the authoritative
+> code:
+>
+> ```python
+> def _shrink(counter, prior_rate, strength):
+>     """Beta(strength * prior_rate, ...) posterior mean. At n = 0 it returns the
+>     prior exactly, which is what makes a missing tier fall through."""
+>     hits, n = counter
+>     return (hits + strength * prior_rate) / (n + strength)
+>
+>
+>     def predict(self, lot_id, target_ts, horizon_min):
+>         if not self._global[1]:
+>             return None
+>         # Jeffreys: the tier with no parent shrinks toward 0.5, so a degenerate
+>         # corpus cannot propagate a certainty down every tier beneath it.
+>         rate = (self._global[0] + 0.5) / (self._global[1] + 1)
+>
+>         lot = self._lot.get(lot_id)
+>         if lot is None:
+>             return rate
+>         rate = _shrink(lot, rate, config.CLIMATOLOGY_LOT_PRIOR)
+>
+>         bucket = self._bucket.get((lot_id, week_bucket(target_ts)))
+>         if bucket is None:
+>             return rate
+>         return _shrink(bucket, rate, config.CLIMATOLOGY_BUCKET_PRIOR)
+> ```
+>
+> Measured effect on the live corpus (1,088 lots, 87,905 observations): bucket
+> cells at exactly 0.0 or 1.0 fell from 96.1% to 0.00%, published grid bytes at
+> 0 or 100 from 79% to 6.3%, and the mean stayed at the true base rate (0.897).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -493,6 +564,165 @@ Expected: 18 passed.
 ```bash
 git add src/parkcast/forecast.py tests/test_forecast.py
 git commit -m "feat(forecast): blend persistence into climatology by horizon"
+```
+
+---
+
+### Task 3b: Stop double-counting the hot/cold overlap
+
+`load_history` unions the hot SQLite store with the cold Parquet corpus, but the two overlap: the
+hot store retains 48 hours, and those same days have already been compacted. `compact_day` snaps
+timestamps to the 5-minute slot grid while the hot store keeps the true `data_ts`, so the duplicates
+carry *different* timestamps and are invisible to a dedup check.
+
+Measured on real data: history reported 145,430 observations where the truth is 73,800. Every
+reading in the 48-hour window is counted twice, giving the most recent two days double weight in
+climatology — the exact baseline Plan 4's model must beat. A biased baseline makes that comparison
+meaningless.
+
+**Files:**
+- Modify: `src/parkcast/forecast.py`
+- Modify: `tests/test_forecast.py`
+
+**Interfaces:**
+- Consumes: `compact.SLOT_SECONDS`, `compact.day_bounds`, `config.TAIPEI_TZ`
+- Produces: `_snap_to_slot(ts: int) -> int`; `load_history` gains overlap exclusion
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# appended to tests/test_forecast.py
+from datetime import date
+
+from parkcast.compact import compact_day, day_bounds
+
+
+def test_cold_observations_covered_by_the_hot_store_are_not_counted_twice(conn, tmp_path):
+    """The same reading must not appear once at its true ts and once slot-snapped."""
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    # True feed timestamps sit at slot boundary + 180s, exactly as the real feed does.
+    for slot in range(10):
+        write(conn, start + slot * 300 + 180, free=5)
+    compact_day(conn, day, tmp_path)
+
+    hot_only = load_history(conn)
+    with_cold = load_history(conn, cold_dir=tmp_path)
+    assert len(with_cold.by_lot["A"]) == len(hot_only.by_lot["A"]), (
+        "cold rows already covered by the hot window must be skipped"
+    )
+
+
+def test_cold_observations_older_than_the_hot_window_are_kept(conn, tmp_path):
+    """Genuinely older history is the whole reason to read the cold store."""
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    for slot in range(10):
+        write(conn, start + slot * 300 + 180, free=5)
+    compact_day(conn, day, tmp_path)
+
+    # A second, older Parquet day that the hot store does not cover.
+    older = date(2026, 9, 3)
+    older_start, _ = day_bounds(older)
+    other = store.connect(tmp_path / "older.sqlite")
+    for slot in range(10):
+        store.insert_snapshot(
+            other,
+            FeedSnapshot(older_start + slot * 300 + 180, older_start + slot * 300 + 380,
+                         (Observation("A", 5, None),)),
+            {"A": 50},
+        )
+    compact_day(other, older, tmp_path)
+    other.close()
+
+    h = load_history(conn, cold_dir=tmp_path)
+    assert len(h.by_lot["A"]) == 20, "10 hot + 10 genuinely older cold"
+
+
+def test_snap_to_slot_rounds_down_to_the_grid():
+    from parkcast.forecast import _snap_to_slot
+
+    start, _ = day_bounds(date(2026, 9, 4))
+    assert _snap_to_slot(start + 180) == start
+    assert _snap_to_slot(start + 300) == start + 300
+    assert _snap_to_slot(start + 599) == start + 300
+
+
+def test_all_cold_is_kept_when_the_hot_store_is_empty(conn, tmp_path):
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    other = store.connect(tmp_path / "src.sqlite")
+    for slot in range(10):
+        store.insert_snapshot(
+            other,
+            FeedSnapshot(start + slot * 300 + 180, start + slot * 300 + 380,
+                         (Observation("A", 5, None),)),
+            {"A": 50},
+        )
+    compact_day(other, day, tmp_path)
+    other.close()
+
+    h = load_history(conn, cold_dir=tmp_path)  # conn is empty
+    assert len(h.by_lot["A"]) == 10
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k "cold or snap" -v`
+Expected: the two overlap tests FAIL (20 entries instead of 10), and `_snap_to_slot` fails to import.
+
+- [ ] **Step 3: Add the snapping helper and the cutoff to `src/parkcast/forecast.py`**
+
+```python
+def _snap_to_slot(ts: int) -> int:
+    """Round a timestamp down to the 5-minute slot grid the cold store uses.
+
+    compact_day writes slot-aligned timestamps, so comparing a hot timestamp
+    against cold ones is only exact once the hot side is snapped the same way.
+    """
+    from datetime import datetime
+
+    from parkcast.compact import SLOT_SECONDS, day_bounds
+
+    day = datetime.fromtimestamp(ts, config.TAIPEI_TZ).date()
+    start, _ = day_bounds(day)
+    return start + ((ts - start) // SLOT_SECONDS) * SLOT_SECONDS
+```
+
+Then in `load_history`, before reading the cold store, compute the cutoff and filter:
+
+```python
+    row = conn.execute("SELECT MIN(data_ts) FROM observations").fetchone()
+    earliest_hot = row[0]
+    cold_cutoff = _snap_to_slot(earliest_hot) if earliest_hot is not None else None
+
+    if cold_dir is not None:
+        for lot_id, ts, free in _read_cold(cold_dir):
+            # The hot store is authoritative for anything it still retains; taking
+            # the cold copy too would count the same reading twice at a different
+            # timestamp, silently double-weighting the most recent 48 hours.
+            if cold_cutoff is None or ts < cold_cutoff:
+                by_lot[lot_id].append((ts, free))
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -v`
+Expected: all pass, 4 new.
+
+- [ ] **Step 5: Verify against real data**
+
+```bash
+.venv/Scripts/python -c "import sqlite3; from pathlib import Path; from parkcast import config, store; from parkcast.forecast import load_history; c=store.connect(config.DB_PATH); h=load_history(c, cold_dir=config.PARQUET_DIR); print('observations:', sum(len(v) for v in h.by_lot.values()))"
+```
+
+Expected: roughly the hot-store row count, not double it.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/parkcast/forecast.py tests/test_forecast.py
+git commit -m "fix(forecast): stop double-counting the hot/cold overlap"
 ```
 
 ---

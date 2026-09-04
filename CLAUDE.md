@@ -35,6 +35,24 @@ Measured 2026-09-04 — do not re-derive, and do not assume these have drifted w
 | No-data sentinel | **`-9` → NULL, never 0** |
 | Coordinates | `tw97x/y` = TWD97 TM2 (EPSG:3826); `EntranceCoord` = WGS84 lat/lon |
 
+### Forecasting facts (measured 2026-09-05 over 62 real ticks / 72,858 observations)
+
+| Fact | Value |
+|---|---|
+| `grid.bin` size | **26,129 bytes** at 1,088 lots × 24 horizons (17-byte header) |
+| `lots.json` size | **234 KB raw / 45 KB gzipped** (compact keys, no fare text) |
+| P(free≥1) base rate | **0.844 at 19:00**, rising to **0.919 at 23:00** Taipei |
+| Lots in feed with history | 1,088 of 1,756 in metadata |
+
+**The target is saturated.** ~85-92% of lots have a space at any time, so a citywide Brier score is
+dominated by easy cases and **climatology is a strong baseline**. Plan 4 must report skill on the
+hard subset (lots at or near capacity) in addition to the citywide number, or the evaluation will
+flatter itself.
+
+**Price is unstructured.** `payex` is free Chinese text averaging 57 chars ("小時：100元/時…"). The
+Plan 3 expected-cost ranker needs a numeric hourly rate parsed out of it — treat that as real work,
+not a field read.
+
 **Non-negotiable:** the collector runs from day one. Every day it is not running is a
 training day that cannot be recovered.
 

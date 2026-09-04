@@ -12,9 +12,11 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from parkcast import config, store
+from parkcast import artifacts, config, store
 from parkcast.collector import collect_once
 from parkcast.compact import compact_day
+from parkcast.forecast import Blend, load_history
+from parkcast.grid import build_grid
 from parkcast.report import build_report, format_report
 
 log = logging.getLogger("parkcast.scheduler")
@@ -71,6 +73,72 @@ def _first_day_to_archive(conn, today: date) -> date:
     return today if oldest is None else min(taipei_date(oldest), today)
 
 
+def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
+    """Rebuild and republish grid.bin and lots.json from current history.
+
+    Lots are ordered by id and filtered to those with at least one usable
+    observation, so grid rows and lots.json indices line up exactly.
+
+    Refuses to publish a set that is empty, or that has collapsed to less than
+    MIN_PUBLISH_LOT_FRACTION of what is already published: stale artifacts beat
+    artifacts that have lost most of the city.
+    """
+    history = load_history(conn, cold_dir=config.PARQUET_DIR)
+    forecaster = Blend(history)
+    ordered = sorted(
+        (lot for lot in lots if lot.id in history.by_lot), key=lambda lot: lot.id
+    )
+    if not ordered:
+        # Reachable with a perfectly good `lots` argument too: an empty
+        # `history` (e.g. right after a metadata-blob outage left `_lots`
+        # empty at startup, or a fresh store with no observations yet) makes
+        # every lot fail the `history.by_lot` filter. Writing a header-only
+        # grid.bin and an empty lots.json would blank the whole site to zero
+        # parking lots until the next day-rollover refresh. Stale artifacts
+        # beat empty ones, so leave whatever is already published alone.
+        log.warning(
+            "no lots survived the history filter (%s candidate lots, %s with "
+            "history); leaving existing artifacts untouched",
+            len(lots), len(history.by_lot),
+        )
+        return
+
+    published = artifacts.read_header(Path(out_dir) / "grid.bin")
+    if published is not None:
+        floor = published["n_lots"] * config.MIN_PUBLISH_LOT_FRACTION
+        if len(ordered) < floor:
+            # Emptiness is only the extreme of this failure. A store restored
+            # from a partial backup, or one still filling after a rebuild, can
+            # yield a plausible-looking handful of lots; publishing it would take
+            # most of the city's parking off the map until it recovers.
+            log.error(
+                "refusing to publish %s lots over an existing %s-lot grid "
+                "(floor is %.0f, %.0f%% of published); leaving artifacts untouched",
+                len(ordered), published["n_lots"], floor,
+                config.MIN_PUBLISH_LOT_FRACTION * 100,
+            )
+            return
+
+    # One list drives the grid's rows, the header's roster and lots.json alike,
+    # so the three cannot describe different sets of lots.
+    lot_ids = [lot.id for lot in ordered]
+    grid = build_grid(forecaster, lot_ids, history.latest_ts)
+    # One set of generation values for both files: the row order is recomputed
+    # every tick, so a client pairing this grid with an older lots.json must be
+    # able to tell. `n_lots` and `roster_id` are derived inside each encoder
+    # from the rows it is actually writing, so no stamp can outlive its rows.
+    identity = {
+        "generated_at": int(time.time()),
+        "base_data_ts": history.latest_ts,
+    }
+    artifacts.publish(
+        out_dir,
+        grid_blob=artifacts.encode_grid(grid, lot_ids=lot_ids, **identity),
+        lots_blob=artifacts.build_lots_json(ordered, **identity),
+    )
+    log.info("published %s lots x %s horizons", len(ordered), config.HORIZON_COUNT)
+
+
 def run_forever(
     conn,
     capacities: dict[str, int | None],
@@ -80,6 +148,7 @@ def run_forever(
     now_fn=lambda: int(time.time()),
     refresh_metadata: Callable[[date], dict[str, int | None]] | None = None,
     archive: Callable[..., None] = archive_day,
+    publish: Callable[..., None] | None = None,
 ) -> None:
     today = taipei_date(now_fn())
     current_day = today
@@ -101,6 +170,15 @@ def run_forever(
             if result.advanced:
                 log.info("tick data_ts=%s rows=%s", result.data_ts, result.rows_written)
                 exhausted_slots = 0
+                if publish is not None:
+                    try:
+                        publish(conn)
+                    except Exception:
+                        # Publishing is downstream of collection: a tick missed is
+                        # data that can never be re-fetched, while a stale artifact
+                        # is fixed by the very next tick. It must never be able to
+                        # take collection down with it.
+                        log.exception("publishing artifacts failed; will retry next tick")
                 break
             log.warning("feed has not advanced (data_ts=%s); retrying", result.data_ts)
         else:

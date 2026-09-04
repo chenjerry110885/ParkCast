@@ -1,12 +1,14 @@
+import json
 import logging
 from datetime import date, datetime, timezone
 
 import pytest
 
-from parkcast import config, scheduler, store
+from parkcast import artifacts, config, scheduler, store
 from parkcast.collector import TickResult
 from parkcast.compact import day_bounds
 from parkcast.feed import FeedSnapshot, Observation
+from parkcast.metadata import Lot
 from parkcast.scheduler import next_poll_ts, taipei_date
 
 
@@ -620,3 +622,248 @@ def test_one_good_tick_resets_the_exhausted_slot_counter(monkeypatch):
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
                               now_fn=clock.now_fn, archive=_no_archive)
+
+
+# --- publishing forecast artifacts -------------------------------------------
+
+
+def test_publish_runs_after_an_advancing_tick(monkeypatch):
+    """publish is None by default (every test above passes none), so wiring it
+    in must not disturb any existing behaviour -- it must only fire once per
+    tick that actually advanced."""
+    published = []
+    clock = _VirtualClock(1788537600)
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        if len(published) >= 2:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn, archive=_no_archive,
+                              publish=lambda conn: published.append(clock.now))
+
+    assert len(published) == 2
+
+
+def test_publish_failure_does_not_stop_collection(monkeypatch):
+    """Collection is irreplaceable; a failed publish just means the artifacts
+    are stale for one more tick. It must never be able to take collection down."""
+    ticks = []
+    clock = _VirtualClock(1788537600)
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        ticks.append(clock.now)
+        if len(ticks) >= 3:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    def boom(conn):
+        raise RuntimeError("artifact write failed")
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn, archive=_no_archive, publish=boom)
+
+    assert len(ticks) == 3, "collection must survive a publishing failure"
+
+
+# --- publish_artifacts must never blank good artifacts -----------------------
+
+
+def _make_lot(lot_id: str) -> Lot:
+    return Lot(id=lot_id, name=f"lot {lot_id}", area="中正區", lot_type="立體",
+               capacity_car=50, lat=25.05, lon=121.52,
+               service_time="00:00:00-23:59:59", fare_text="每小時30元")
+
+
+def test_publish_artifacts_with_no_lots_leaves_existing_files_untouched(tmp_path):
+    """An empty `lots` argument (e.g. a metadata outage at startup left `_lots`
+    empty) must not overwrite good artifacts with a header-only grid and an
+    empty lots.json."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4))
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+    (out_dir / "grid.bin").write_bytes(b"OLD-GRID-BYTES-18")
+    (out_dir / "lots.json").write_text('{"lots":[{"i":0,"id":"OLD"}]}', encoding="utf-8")
+
+    scheduler.publish_artifacts(conn, [], out_dir)
+    conn.close()
+
+    assert (out_dir / "grid.bin").read_bytes() == b"OLD-GRID-BYTES-18"
+    assert (out_dir / "lots.json").read_text(encoding="utf-8") == (
+        '{"lots":[{"i":0,"id":"OLD"}]}'
+    )
+    assert list(out_dir.glob("*.tmp")) == []
+
+
+def test_publish_artifacts_with_empty_history_leaves_existing_files_untouched(tmp_path):
+    """Same failure shape, different cause: a non-empty `lots` list where none
+    of the lots have any observation (fresh store, or a store that has not
+    seen these particular lots yet) must also leave existing artifacts alone."""
+    conn = store.connect(tmp_path / "t.sqlite")  # no observations inserted
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+    (out_dir / "grid.bin").write_bytes(b"OLD-GRID-BYTES-18")
+    (out_dir / "lots.json").write_text('{"lots":[{"i":0,"id":"OLD"}]}', encoding="utf-8")
+
+    scheduler.publish_artifacts(conn, [_make_lot("A"), _make_lot("B")], out_dir)
+    conn.close()
+
+    assert (out_dir / "grid.bin").read_bytes() == b"OLD-GRID-BYTES-18"
+    assert (out_dir / "lots.json").read_text(encoding="utf-8") == (
+        '{"lots":[{"i":0,"id":"OLD"}]}'
+    )
+    assert list(out_dir.glob("*.tmp")) == []
+
+
+def test_publish_artifacts_still_overwrites_on_a_normal_publish(tmp_path):
+    """The empty-history guard must not break the happy path."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+    (out_dir / "grid.bin").write_bytes(b"OLD-GRID-BYTES-18")
+    (out_dir / "lots.json").write_text('{"lots":[{"i":0,"id":"OLD"}]}', encoding="utf-8")
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir)
+    conn.close()
+
+    assert (out_dir / "grid.bin").read_bytes() != b"OLD-GRID-BYTES-18"
+    lots_doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert [l["id"] for l in lots_doc["lots"]] == ["A"]
+
+
+def test_publish_artifacts_stamps_both_files_with_one_identity(tmp_path):
+    """grid.bin and lots.json are two independent renames, and the row order is
+    recomputed every tick. The client's only defence against pairing a fresh
+    grid with stale metadata is that both carry the same generation stamp."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    _seed(conn, date(2026, 9, 4), lot="B")
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(conn, [_make_lot("A"), _make_lot("B")], out_dir)
+    conn.close()
+
+    header = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    for field in ("generated_at", "base_data_ts", "n_lots", "roster_id"):
+        assert doc[field] == header[field], f"{field} disagrees across the pair"
+    assert doc["n_lots"] == len(doc["lots"]) == 2
+    assert doc["roster_id"] == artifacts.roster_id([l["id"] for l in doc["lots"]]), (
+        "the roster must hash the rows actually published"
+    )
+    assert doc["v"] == artifacts.VERSION
+
+
+def test_publish_artifacts_keeps_the_roster_id_across_ticks(tmp_path):
+    """lots.json is cached for a week while grid.bin is republished every five
+    minutes. If the roster stamp moved with generated_at, a client enforcing the
+    pairing check would have to re-fetch it every tick or drop the check."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    _seed(conn, date(2026, 9, 4), lot="B")
+    out_dir = tmp_path / "artifacts"
+    lots = [_make_lot("A"), _make_lot("B")]
+
+    scheduler.publish_artifacts(conn, lots, out_dir)
+    first = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
+    _seed(conn, date(2026, 9, 5), lot="A")   # a later tick, same two lots
+    _seed(conn, date(2026, 9, 5), lot="B")
+    scheduler.publish_artifacts(conn, lots, out_dir)
+    second = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
+    conn.close()
+
+    assert second["base_data_ts"] > first["base_data_ts"], "a genuinely newer publish"
+    assert second["roster_id"] == first["roster_id"], "an unchanged roster keeps its id"
+
+
+def test_publish_artifacts_changes_the_roster_id_when_the_rows_shift(tmp_path):
+    """A lot joining at index 0 shifts every later row; n_lots would also catch
+    this one, but the stamp that must move is the roster."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    for lot_id in ("A", "B", "C"):
+        _seed(conn, date(2026, 9, 4), lot=lot_id)
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(conn, [_make_lot("B"), _make_lot("C")], out_dir)
+    before = artifacts.decode_header((out_dir / "grid.bin").read_bytes())["roster_id"]
+    scheduler.publish_artifacts(
+        conn, [_make_lot("A"), _make_lot("B"), _make_lot("C")], out_dir
+    )
+    after = artifacts.decode_header((out_dir / "grid.bin").read_bytes())["roster_id"]
+    conn.close()
+
+    assert before != after
+
+
+def _publish(conn, out_dir, lot_ids):
+    scheduler.publish_artifacts(conn, [_make_lot(i) for i in lot_ids], out_dir)
+
+
+def test_publish_artifacts_refuses_a_collapsed_lot_count(tmp_path, caplog):
+    """A store restored from a partial backup yields a plausible handful of
+    lots. Publishing it would take most of the city's parking off the map."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    ids = [f"L{i:03d}" for i in range(10)]
+    for lot_id in ids:
+        _seed(conn, date(2026, 9, 4), lot=lot_id)
+    out_dir = tmp_path / "artifacts"
+    _publish(conn, out_dir, ids)                       # a healthy 10-lot grid
+    good_grid = (out_dir / "grid.bin").read_bytes()
+    good_lots = (out_dir / "lots.json").read_bytes()
+
+    thin = store.connect(tmp_path / "thin.sqlite")     # only 4 of the 10 survive
+    for lot_id in ids[:4]:
+        _seed(thin, date(2026, 9, 4), lot=lot_id)
+    with caplog.at_level(logging.ERROR, logger="parkcast.scheduler"):
+        _publish(thin, out_dir, ids[:4])
+    conn.close()
+    thin.close()
+
+    assert (out_dir / "grid.bin").read_bytes() == good_grid, "the good grid must survive"
+    assert (out_dir / "lots.json").read_bytes() == good_lots
+    assert "refusing to publish" in caplog.text
+    assert list(out_dir.glob("*.tmp")) == []
+
+
+def test_publish_artifacts_allows_a_lot_count_above_the_floor(tmp_path):
+    """Lots do legitimately come and go -- the guard must only catch a collapse."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    ids = [f"L{i:03d}" for i in range(10)]
+    for lot_id in ids:
+        _seed(conn, date(2026, 9, 4), lot=lot_id)
+    out_dir = tmp_path / "artifacts"
+    _publish(conn, out_dir, ids)
+
+    fewer = store.connect(tmp_path / "fewer.sqlite")   # 6 of 10, above the 50% floor
+    for lot_id in ids[:6]:
+        _seed(fewer, date(2026, 9, 4), lot=lot_id)
+    _publish(fewer, out_dir, ids[:6])
+    conn.close()
+    fewer.close()
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert doc["n_lots"] == 6
+    assert artifacts.decode_header((out_dir / "grid.bin").read_bytes())["n_lots"] == 6
+
+
+def test_publish_artifacts_publishes_when_there_is_no_readable_baseline(tmp_path):
+    """No grid.bin yet, or bytes that are not a grid: nothing to compare, so the
+    guard must not block the first publish or a recovery from a corrupt file."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+    (out_dir / "grid.bin").write_bytes(b"not a grid header at all, truly")
+
+    _publish(conn, out_dir, ["A"])
+    conn.close()
+
+    header = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
+    assert header["magic"] == artifacts.MAGIC and header["n_lots"] == 1
