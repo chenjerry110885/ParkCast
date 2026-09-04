@@ -497,6 +497,165 @@ git commit -m "feat(forecast): blend persistence into climatology by horizon"
 
 ---
 
+### Task 3b: Stop double-counting the hot/cold overlap
+
+`load_history` unions the hot SQLite store with the cold Parquet corpus, but the two overlap: the
+hot store retains 48 hours, and those same days have already been compacted. `compact_day` snaps
+timestamps to the 5-minute slot grid while the hot store keeps the true `data_ts`, so the duplicates
+carry *different* timestamps and are invisible to a dedup check.
+
+Measured on real data: history reported 145,430 observations where the truth is 73,800. Every
+reading in the 48-hour window is counted twice, giving the most recent two days double weight in
+climatology — the exact baseline Plan 4's model must beat. A biased baseline makes that comparison
+meaningless.
+
+**Files:**
+- Modify: `src/parkcast/forecast.py`
+- Modify: `tests/test_forecast.py`
+
+**Interfaces:**
+- Consumes: `compact.SLOT_SECONDS`, `compact.day_bounds`, `config.TAIPEI_TZ`
+- Produces: `_snap_to_slot(ts: int) -> int`; `load_history` gains overlap exclusion
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# appended to tests/test_forecast.py
+from datetime import date
+
+from parkcast.compact import compact_day, day_bounds
+
+
+def test_cold_observations_covered_by_the_hot_store_are_not_counted_twice(conn, tmp_path):
+    """The same reading must not appear once at its true ts and once slot-snapped."""
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    # True feed timestamps sit at slot boundary + 180s, exactly as the real feed does.
+    for slot in range(10):
+        write(conn, start + slot * 300 + 180, free=5)
+    compact_day(conn, day, tmp_path)
+
+    hot_only = load_history(conn)
+    with_cold = load_history(conn, cold_dir=tmp_path)
+    assert len(with_cold.by_lot["A"]) == len(hot_only.by_lot["A"]), (
+        "cold rows already covered by the hot window must be skipped"
+    )
+
+
+def test_cold_observations_older_than_the_hot_window_are_kept(conn, tmp_path):
+    """Genuinely older history is the whole reason to read the cold store."""
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    for slot in range(10):
+        write(conn, start + slot * 300 + 180, free=5)
+    compact_day(conn, day, tmp_path)
+
+    # A second, older Parquet day that the hot store does not cover.
+    older = date(2026, 9, 3)
+    older_start, _ = day_bounds(older)
+    other = store.connect(tmp_path / "older.sqlite")
+    for slot in range(10):
+        store.insert_snapshot(
+            other,
+            FeedSnapshot(older_start + slot * 300 + 180, older_start + slot * 300 + 380,
+                         (Observation("A", 5, None),)),
+            {"A": 50},
+        )
+    compact_day(other, older, tmp_path)
+    other.close()
+
+    h = load_history(conn, cold_dir=tmp_path)
+    assert len(h.by_lot["A"]) == 20, "10 hot + 10 genuinely older cold"
+
+
+def test_snap_to_slot_rounds_down_to_the_grid():
+    from parkcast.forecast import _snap_to_slot
+
+    start, _ = day_bounds(date(2026, 9, 4))
+    assert _snap_to_slot(start + 180) == start
+    assert _snap_to_slot(start + 300) == start + 300
+    assert _snap_to_slot(start + 599) == start + 300
+
+
+def test_all_cold_is_kept_when_the_hot_store_is_empty(conn, tmp_path):
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    other = store.connect(tmp_path / "src.sqlite")
+    for slot in range(10):
+        store.insert_snapshot(
+            other,
+            FeedSnapshot(start + slot * 300 + 180, start + slot * 300 + 380,
+                         (Observation("A", 5, None),)),
+            {"A": 50},
+        )
+    compact_day(other, day, tmp_path)
+    other.close()
+
+    h = load_history(conn, cold_dir=tmp_path)  # conn is empty
+    assert len(h.by_lot["A"]) == 10
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k "cold or snap" -v`
+Expected: the two overlap tests FAIL (20 entries instead of 10), and `_snap_to_slot` fails to import.
+
+- [ ] **Step 3: Add the snapping helper and the cutoff to `src/parkcast/forecast.py`**
+
+```python
+def _snap_to_slot(ts: int) -> int:
+    """Round a timestamp down to the 5-minute slot grid the cold store uses.
+
+    compact_day writes slot-aligned timestamps, so comparing a hot timestamp
+    against cold ones is only exact once the hot side is snapped the same way.
+    """
+    from datetime import datetime
+
+    from parkcast.compact import SLOT_SECONDS, day_bounds
+
+    day = datetime.fromtimestamp(ts, config.TAIPEI_TZ).date()
+    start, _ = day_bounds(day)
+    return start + ((ts - start) // SLOT_SECONDS) * SLOT_SECONDS
+```
+
+Then in `load_history`, before reading the cold store, compute the cutoff and filter:
+
+```python
+    row = conn.execute("SELECT MIN(data_ts) FROM observations").fetchone()
+    earliest_hot = row[0]
+    cold_cutoff = _snap_to_slot(earliest_hot) if earliest_hot is not None else None
+
+    if cold_dir is not None:
+        for lot_id, ts, free in _read_cold(cold_dir):
+            # The hot store is authoritative for anything it still retains; taking
+            # the cold copy too would count the same reading twice at a different
+            # timestamp, silently double-weighting the most recent 48 hours.
+            if cold_cutoff is None or ts < cold_cutoff:
+                by_lot[lot_id].append((ts, free))
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -v`
+Expected: all pass, 4 new.
+
+- [ ] **Step 5: Verify against real data**
+
+```bash
+.venv/Scripts/python -c "import sqlite3; from pathlib import Path; from parkcast import config, store; from parkcast.forecast import load_history; c=store.connect(config.DB_PATH); h=load_history(c, cold_dir=config.PARQUET_DIR); print('observations:', sum(len(v) for v in h.by_lot.values()))"
+```
+
+Expected: roughly the hot-store row count, not double it.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/parkcast/forecast.py tests/test_forecast.py
+git commit -m "fix(forecast): stop double-counting the hot/cold overlap"
+```
+
+---
+
 ### Task 4: Build the forecast grid
 
 **Files:**
