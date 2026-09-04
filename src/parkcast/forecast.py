@@ -94,8 +94,10 @@ class Climatology:
     """P = the historical fraction of readings where this lot had a space.
 
     Falls back lot+bucket -> lot -> global, so a lot with thin history still
-    gets an answer grounded in something rather than a coin flip. A bucket is
-    only trusted once it has CLIMATOLOGY_MIN_SUPPORT observations behind it.
+    gets an answer grounded in something rather than a coin flip. Both the
+    bucket and lot tiers are only trusted once they have CLIMATOLOGY_MIN_SUPPORT
+    observations behind them; the global tier is ungated beyond having any
+    observation at all, since it is the fallback of last resort.
     """
 
     def __init__(self, history: History) -> None:

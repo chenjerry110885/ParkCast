@@ -98,6 +98,55 @@ def test_climatology_is_none_with_no_history_at_all(conn):
     assert Climatology(load_history(conn)).predict("A", 1000, 30) is None
 
 
+def test_climatology_prefers_the_bucket_rate_over_the_lot_rate(conn):
+    """Pins the fallback order itself: lot+bucket must be tried before lot.
+
+    Ten weeks of "always free" in one bucket (bucket rate 1.0) are mixed with ten
+    weeks of "always full" in a different bucket, which drags the lot's overall
+    rate down to 0.5. A lot-first (rather than bucket-first) implementation would
+    return 0.5 here instead of 1.0 -- both tiers clear CLIMATOLOGY_MIN_SUPPORT, so
+    a passing test can only be explained by the bucket tier winning.
+    """
+    target_base = 1788537600
+    other_base = target_base + 6 * 3600  # a fixed offset lands in a different bucket
+
+    assert week_bucket(other_base) != week_bucket(target_base), \
+        "test setup requires the two groups of writes to land in different buckets"
+
+    for week in range(10):
+        write(conn, target_base + week * 7 * 86400, free=5)  # always a space
+        write(conn, other_base + week * 7 * 86400, free=0)   # always full
+
+    predict_ts = target_base + 15 * 7 * 86400
+    assert week_bucket(predict_ts) == week_bucket(target_base), \
+        "test setup requires the prediction target to land in the 'always free' bucket"
+
+    c = Climatology(load_history(conn))
+    assert c.predict("A", predict_ts, 30) == pytest.approx(1.0), \
+        "the bucket rate (1.0) must win; a lot-first order would return the lot rate (0.5)"
+
+
+def test_climatology_falls_back_to_the_lot_rate_not_the_global_rate(conn):
+    """Pins the second fallback step: an empty bucket must reach for the lot's own
+    history next, not skip straight to the rate pooled across every lot.
+    """
+    predict_ts = 1788537600  # bucket 96; none of lot A's writes below land here
+
+    lot_a_ts = [1000 + i * 300 for i in range(10)]
+    for ts in lot_a_ts:
+        assert week_bucket(ts) != week_bucket(predict_ts), \
+            "test setup requires lot A's history to miss the predicted bucket"
+        write(conn, ts, lot="A", free=5)  # A always has a space: lot rate 1.0
+
+    for i in range(10):
+        write(conn, 1000 + i * 300, lot="B", free=0)  # B is always full
+
+    c = Climatology(load_history(conn))
+    # Global rate across both lots is (10 + 0) / 20 == 0.5 -- what a bucket-then-
+    # global-only fallback (no lot tier) would return instead of the lot's own 1.0.
+    assert c.predict("A", predict_ts, 30) == pytest.approx(1.0)
+
+
 def test_read_cold_missing_dir_returns_normally(conn, tmp_path):
     """cold_dir need not exist yet -- the first daily Parquet file is hours away."""
     h = load_history(conn, cold_dir=tmp_path / "does-not-exist")
