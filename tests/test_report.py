@@ -48,6 +48,33 @@ def test_frozen_lot_detected_after_long_unchanged_run(conn):
     assert "FINE" not in frozen
 
 
+def test_sensor_that_seizes_mid_day_is_detected(conn):
+    """The realistic failure: works, then freezes. Earlier variation must not hide it."""
+    for slot in range(100):
+        write(conn, slot, lot="SEIZED", free=slot)
+    for slot in range(100, 200):
+        write(conn, slot, lot="SEIZED", free=7)
+    assert "SEIZED" in find_frozen_lots(conn, date(2026, 9, 4), min_run=72)
+
+
+def test_sensor_frozen_early_then_recovering_is_detected(conn):
+    """Mirror case: a long frozen run followed by normal variation."""
+    for slot in range(100):
+        write(conn, slot, lot="RECOVERED", free=7)
+    for slot in range(100, 200):
+        write(conn, slot, lot="RECOVERED", free=slot)
+    assert "RECOVERED" in find_frozen_lots(conn, date(2026, 9, 4), min_run=72)
+
+
+def test_a_run_just_under_the_threshold_is_not_flagged(conn):
+    """Pins the boundary: 71 identical readings is not yet suspicious, 72 is."""
+    for slot in range(71):
+        write(conn, slot, lot="ALMOST", free=7)
+    assert find_frozen_lots(conn, date(2026, 9, 4), min_run=72) == []
+    write(conn, 71, lot="ALMOST", free=7)
+    assert find_frozen_lots(conn, date(2026, 9, 4), min_run=72) == ["ALMOST"]
+
+
 def test_short_unchanged_run_is_not_frozen(conn):
     """A genuinely quiet lot overnight should not be flagged."""
     for slot in range(20):

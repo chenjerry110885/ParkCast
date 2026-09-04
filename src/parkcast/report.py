@@ -18,23 +18,39 @@ class DayReport:
 
 
 def find_frozen_lots(conn, day: date, *, min_run: int = 72) -> list[str]:
-    """Lots whose value never changed across at least `min_run` observations.
+    """Lots with a RUN of at least `min_run` consecutive identical observations.
 
-    72 slots is six hours. A lot that never moves for six hours is far more
-    likely to have a broken sensor than to be genuinely static, and undetected
-    it becomes a confidently wrong prediction.
+    72 observations is six hours at the 5-minute cadence. A lot that never moves
+    for six hours is far more likely to have a broken sensor than to be genuinely
+    static, and undetected it becomes a confidently wrong prediction.
+
+    The run matters, not the whole day: the realistic failure is a sensor that
+    works, then seizes. Asking merely "was this lot constant all day" misses that
+    entirely, because the earlier varying readings hide the later frozen ones.
     """
     start, end = day_bounds(day)
+    # Gap-and-islands: the difference between a row's overall rank and its rank
+    # within its own value is constant exactly across a run of identical values,
+    # so grouping on it yields one group per run.
     rows = conn.execute(
         """
-        SELECT lot_id, COUNT(*) AS n, COUNT(DISTINCT free_car) AS distinct_values
-        FROM observations
-        WHERE data_ts >= ? AND data_ts < ? AND free_car IS NOT NULL
-        GROUP BY lot_id
+        WITH ordered AS (
+            SELECT lot_id, free_car,
+                   ROW_NUMBER() OVER (PARTITION BY lot_id ORDER BY data_ts) -
+                   ROW_NUMBER() OVER (PARTITION BY lot_id, free_car ORDER BY data_ts) AS island
+            FROM observations
+            WHERE data_ts >= ? AND data_ts < ? AND free_car IS NOT NULL
+        ),
+        runs AS (
+            SELECT lot_id, COUNT(*) AS run_len
+            FROM ordered
+            GROUP BY lot_id, free_car, island
+        )
+        SELECT lot_id FROM runs GROUP BY lot_id HAVING MAX(run_len) >= ?
         """,
-        (start, end),
+        (start, end, min_run),
     ).fetchall()
-    return [lot_id for lot_id, n, distinct in rows if n >= min_run and distinct == 1]
+    return [lot_id for (lot_id,) in rows]
 
 
 def build_report(conn, day: date) -> DayReport:
