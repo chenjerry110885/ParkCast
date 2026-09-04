@@ -5,7 +5,7 @@ import pytest
 from parkcast import store
 from parkcast.compact import compact_day, day_bounds
 from parkcast.feed import FeedSnapshot, Observation
-from parkcast.forecast import Climatology, Persistence, load_history, week_bucket
+from parkcast.forecast import Blend, Climatology, Persistence, load_history, week_bucket
 
 
 @pytest.fixture
@@ -182,3 +182,57 @@ def test_read_cold_round_trips_through_compact_day(conn, tmp_path):
     hot.close()
 
     assert h.by_lot["A"] == [(start, 5), (start + 300, 3)]
+
+
+def test_blend_is_persistence_at_the_shortest_horizon(conn):
+    """At h=0 the current reading is the whole answer."""
+    for i in range(10):
+        write(conn, 1000 + i * 300, free=0)   # climatology says 0.0
+    write(conn, 4000, free=5)                  # but right now there is a space
+    b = Blend(load_history(conn))
+    assert b.predict("A", 4000, 0) == pytest.approx(1.0)
+
+
+def test_blend_moves_toward_climatology_as_the_horizon_grows(conn):
+    """Hold target_ts fixed and vary only the horizon, so the climatology term is
+    identical in both calls and the difference isolates the decay weight."""
+    for i in range(10):
+        write(conn, 1000 + i * 300, free=0)
+    write(conn, 4000, free=5)
+    b = Blend(load_history(conn))
+    clim = Climatology(load_history(conn)).predict("A", 4000, 0)
+    near, far = b.predict("A", 4000, 5), b.predict("A", 4000, 120)
+    assert near > far, "confidence in the current reading must decay with horizon"
+    assert abs(far - clim) < abs(near - clim), "the far horizon sits closer to climatology"
+
+
+def test_blend_halves_the_persistence_weight_every_half_life(conn):
+    for i in range(10):
+        write(conn, 1000 + i * 300, free=0)
+    write(conn, 4000, free=5)
+    b = Blend(load_history(conn))
+    # climatology ~= 10/11; persistence = 1.0. With w = 0.5**(h/30):
+    # P(h) = w*1.0 + (1-w)*clim, so P(30) - clim should be half of P(0) - clim.
+    clim = Climatology(load_history(conn)).predict("A", 4000, 0)
+    p0, p30 = b.predict("A", 4000, 0), b.predict("A", 4000, 30)
+    assert (p30 - clim) == pytest.approx((p0 - clim) / 2, abs=1e-6)
+
+
+def test_blend_uses_whichever_component_is_available(conn):
+    write(conn, 1000, free=5)
+    b = Blend(load_history(conn))
+    assert b.predict("A", 1300, 5) is not None
+    assert b.predict("UNSEEN", 1300, 5) is not None, "falls back to climatology alone"
+
+
+def test_blend_is_none_with_no_history(conn):
+    assert Blend(load_history(conn)).predict("A", 1000, 5) is None
+
+
+def test_blend_never_leaves_the_unit_interval(conn):
+    for i in range(20):
+        write(conn, 1000 + i * 300, free=i % 2)
+    b = Blend(load_history(conn))
+    for h in range(0, 125, 5):
+        p = b.predict("A", 7000 + h * 60, h)
+        assert 0.0 <= p <= 1.0, f"horizon {h} produced {p}"

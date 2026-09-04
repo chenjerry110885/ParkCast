@@ -134,3 +134,27 @@ class Persistence:
     def predict(self, lot_id: str, target_ts: int, horizon_min: int) -> float | None:
         free = self._current.get(lot_id)
         return None if free is None else (1.0 if free >= 1 else 0.0)
+
+
+class Blend:
+    """Persistence decaying exponentially toward climatology as the horizon grows.
+
+    The current reading is strong evidence about the next few minutes and
+    almost none about two hours from now. Weighting it by 0.5**(h/half_life)
+    expresses exactly that, and degrades to whichever component is available
+    when the other has no answer.
+    """
+
+    def __init__(self, history: History) -> None:
+        self._persistence = Persistence(history)
+        self._climatology = Climatology(history)
+
+    def predict(self, lot_id: str, target_ts: int, horizon_min: int) -> float | None:
+        near = self._persistence.predict(lot_id, target_ts, horizon_min)
+        far = self._climatology.predict(lot_id, target_ts, horizon_min)
+        if near is None:
+            return far
+        if far is None:
+            return near
+        weight = 0.5 ** (horizon_min / config.BLEND_HALF_LIFE_MIN)
+        return weight * near + (1.0 - weight) * far
