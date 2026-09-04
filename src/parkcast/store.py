@@ -25,7 +25,12 @@ def connect(path: Path | str) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, isolation_level=None)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    # FULL, not NORMAL: NORMAL leaves a committed tick in an unsynced WAL, and
+    # tearing a container down loses those frames the same way a power cut
+    # would. Observed live -- a tick logged 1177 rows at 20:51:34 and only 1129
+    # survived a `docker compose up -d` 45 seconds later. One fsync per tick is
+    # one fsync per five minutes; the corpus is worth more than that.
+    conn.execute("PRAGMA synchronous=FULL")
     conn.executescript(_SCHEMA)
     return conn
 
