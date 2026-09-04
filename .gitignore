@@ -6,4 +6,5 @@ data/
 *.sqlite
 *.db
 dist/
+*.egg-info/
 .env
