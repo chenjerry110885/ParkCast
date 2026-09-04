@@ -42,7 +42,13 @@ class _Rows(list):
 
 
 class _HostileConn:
-    """Returns every SELECT in an order chosen to break an unsorted reader."""
+    """Returns every SELECT in an order chosen to break an unsorted reader.
+
+    Only two queries are answered. `latest_ts` and `current` are derived from
+    the assembled series, not queried, so any third SELECT here means that
+    derivation has silently gone back to the hot store -- which is exactly what
+    made both come back empty for a backtest cutoff older than 48 hours.
+    """
 
     def __init__(self, rows):  # rows: (lot_id, data_ts, free_car)
         self._rows = list(rows)
@@ -50,12 +56,9 @@ class _HostileConn:
     def execute(self, sql, params=()):
         if "MIN(data_ts)" in sql:
             return _Rows([(min(ts for _, ts, _ in self._rows),)])
-        if "MAX(data_ts)" in sql:
-            return _Rows([(max(ts for _, ts, _ in self._rows),)])
         if "data_ts, free_car" in sql:  # the by_lot scan
             return _Rows(sorted(self._rows, key=lambda r: -r[1]))
-        latest = max(ts for _, ts, _ in self._rows)
-        return _Rows([(lot, free) for lot, ts, free in self._rows if ts == latest])
+        raise AssertionError(f"load_history issued an unexpected query: {sql}")
 
 
 def test_by_lot_series_are_sorted_ascending_by_timestamp():
@@ -66,6 +69,16 @@ def test_by_lot_series_are_sorted_ascending_by_timestamp():
         stamps = [ts for ts, _ in series]
         assert stamps == sorted(stamps), f"{lot_id} came back out of order"
     assert h.by_lot["A"] == [(1000, 5), (2000, 3), (3000, 1)]
+
+
+def test_latest_ts_and_current_are_derived_not_queried():
+    """Pinned against the same stub: the newest reading and the lots that
+    reported it come out of `by_lot`, so a store the hot query cannot see (a
+    cold-only backtest window) still produces both."""
+    rows = [("A", 3000, 1), ("A", 1000, 5), ("B", 3000, 0), ("C", 2500, 7)]
+    h = load_history(_HostileConn(rows))
+    assert h.latest_ts == 3000
+    assert h.current == {"A": 1, "B": 0}, "C did not report in the newest tick"
 
 
 def test_by_lot_is_sorted_across_the_cold_hot_boundary(conn, tmp_path):
@@ -98,7 +111,24 @@ def test_history_excludes_missing_readings(conn):
     write(conn, 1300, free=None)
     h = load_history(conn)
     assert h.by_lot["A"] == [(1000, 5)], "NULL readings are absent, never coerced to 0"
-    assert "A" not in h.current, "a lot whose newest reading is NULL has no current value"
+    # With no other lot reporting, the newest tick that carried *any* reading is
+    # 1000, so that is what latest_ts (and therefore base_data_ts) describes --
+    # the honest answer, rather than claiming the freshness of an all-NULL tick.
+    assert h.latest_ts == 1000
+    assert h.current == {"A": 5}
+
+
+def test_a_lot_whose_newest_reading_is_null_has_no_current_value(conn):
+    """The live shape of the case above: ~1,000 lots report each tick, so a lot
+    that returned -9 is simply absent from `current` and Persistence declines to
+    answer for it rather than reaching back to a stale reading."""
+    write(conn, 1000, lot="A", free=5)
+    write(conn, 1300, lot="A", free=None)
+    write(conn, 1300, lot="B", free=7)
+    h = load_history(conn)
+    assert h.latest_ts == 1300
+    assert h.current == {"B": 7}
+    assert Persistence(h).predict("A", 1600, 5) is None
 
 
 # --- before_ts: the train side of a time split -------------------------------
@@ -144,6 +174,77 @@ def test_before_ts_filters_the_cold_store_too(conn, tmp_path):
     cutoff = start + 5 * 300
     h = load_history(conn, cold_dir=tmp_path, before_ts=cutoff)   # conn is empty
     assert [ts for ts, _ in h.by_lot["A"]] == [start + i * 300 for i in range(5)]
+
+
+# --- latest_ts and current must follow the history, not the hot store --------
+#
+# The hot store keeps 48 hours. Every historical cutoff a backtest uses is
+# older than that, so a hot-store query for the newest tick matched nothing:
+# `current` came back {} and `Persistence.predict` returned None for every lot,
+# deleting one of the two baselines spec section 8 requires the model to beat --
+# with no error, exactly the asymmetry `before_ts` exists to remove.
+
+
+def _cold_day(tmp_path, day, *, lot="A", free=5, slots=10):
+    """Write one Parquet day and return its slot timestamps."""
+    start, _ = day_bounds(day)
+    other = store.connect(tmp_path / f"src-{day}-{lot}.sqlite")
+    for slot in range(slots):
+        store.insert_snapshot(
+            other,
+            FeedSnapshot(start + slot * 300, start + slot * 300 + 200,
+                         (Observation(lot, free, None),)),
+            {lot: 50},
+        )
+    compact_day(other, day, tmp_path)
+    other.close()
+    return [start + slot * 300 for slot in range(slots)]
+
+
+def test_current_is_populated_from_a_cold_only_history(conn, tmp_path):
+    """The regression: an empty hot store plus a cold corpus must still yield a
+    working Persistence, or the backtest silently compares against climatology
+    alone and reports a 'win' the model never had to earn."""
+    stamps = _cold_day(tmp_path, date(2026, 9, 4))
+
+    h = load_history(conn, cold_dir=tmp_path)   # conn is empty: pruned past 48h
+    assert h.latest_ts == stamps[-1], "the newest cold reading, not 0"
+    assert h.current == {"A": 5}
+    assert Persistence(h).predict("A", stamps[-1] + 600, 10) == 1.0, (
+        "the persistence baseline must not evaporate for a historical cutoff"
+    )
+
+
+def test_before_ts_still_governs_current_over_a_cold_only_history(conn, tmp_path):
+    """The fix must not reopen the leak: nothing at or after the cutoff may
+    reach `current`, cold store or not."""
+    stamps = _cold_day(tmp_path, date(2026, 9, 4))
+    cutoff = stamps[5]
+
+    h = load_history(conn, cold_dir=tmp_path, before_ts=cutoff)
+    assert h.latest_ts == stamps[4], "latest_ts must stop strictly before the cutoff"
+    assert h.current == {"A": 5}
+    assert max(ts for ts, _ in h.by_lot["A"]) < cutoff
+
+
+def test_current_matches_the_hot_store_query_it_replaced(conn):
+    """The live path is claimed to be unchanged, so it is checked rather than
+    asserted: with the hot store holding the newest tick, deriving `current`
+    from `by_lot` must agree with the MAX(data_ts) query it replaced, exactly.
+    """
+    for i in range(5):
+        write(conn, 1000 + i * 300, lot="A", free=i)       # includes free=0
+        write(conn, 1000 + i * 300, lot="B", free=5)
+    write(conn, 1000 + 5 * 300, lot="A", free=0)           # C-style partial tick
+    h = load_history(conn)
+
+    latest = conn.execute("SELECT MAX(data_ts) FROM observations").fetchone()[0]
+    expected = dict(conn.execute(
+        "SELECT lot_id, free_car FROM observations "
+        "WHERE data_ts = ? AND free_car IS NOT NULL", (latest,)
+    ))
+    assert h.latest_ts == latest
+    assert h.current == expected == {"A": 0}, "0 is a reading, not a missing one"
 
 
 def test_before_ts_none_keeps_everything(conn):

@@ -55,6 +55,12 @@ def load_history(
     newest tick before the cutoff, not the newest tick overall, so a forecaster
     built from this history cannot see a single label it will be scored on. See
     the train/test contract in the module docstring.
+
+    `latest_ts` and `current` are read off the assembled series rather than
+    queried separately, so they follow the history wherever it came from: a
+    cutoff older than the 48-hour hot window still yields a working
+    `Persistence`, instead of an empty `current` that quietly removes one of
+    the two baselines from the comparison.
     """
     by_lot: dict[str, list[tuple[int, int]]] = defaultdict(list)
 
@@ -98,15 +104,22 @@ def load_history(
     for series in by_lot.values():
         series.sort()
 
-    row = conn.execute(f"SELECT MAX(data_ts) FROM observations{where}", params).fetchone()
-    latest_ts = row[0] or 0
+    # Derived from the assembled series, not from a second query against the hot
+    # store. The hot store is pruned to 48 hours, so for any backtest cutoff
+    # older than that -- which is every historical cutoff Plan 4 will use -- the
+    # hot query matched nothing: `latest_ts` came back 0 and `current` empty,
+    # `Persistence.predict` returned None for every lot, and the model was
+    # silently compared against climatology alone. Spec section 8 requires it to
+    # beat both. `by_lot` spans hot and cold alike, so deriving from it reaches
+    # the cold corpus without a second read of anything.
+    #
+    # Live, this is the same answer: the hot store always holds the newest tick,
+    # so the newest reading in `by_lot` is the newest reading in the store.
+    latest_ts = max((series[-1][0] for series in by_lot.values()), default=0)
     current = {
-        lot_id: free
-        for lot_id, free in conn.execute(
-            "SELECT lot_id, free_car FROM observations "
-            "WHERE data_ts = ? AND free_car IS NOT NULL",
-            (latest_ts,),
-        )
+        lot_id: series[-1][1]
+        for lot_id, series in by_lot.items()
+        if series[-1][0] == latest_ts
     }
     return History(latest_ts, current, dict(by_lot))
 
