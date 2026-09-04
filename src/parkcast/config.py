@@ -22,6 +22,13 @@ HTTP_TIMEOUT_SEC = 30
 
 HOT_RETENTION_SEC = 48 * 3600
 
+# Consecutive slots that may end without a fresh tick before the collector
+# gives up and exits non-zero. 12 slots is one hour. Exiting lets Docker's
+# restart policy fire and turns a silent stall into a visible restart count;
+# looping forever on a feed that changed shape collects nothing while looking
+# healthy.
+MAX_EXHAUSTED_SLOTS = 12
+
 # Taipei bounding box for coordinate sanity checks.
 LAT_MIN, LAT_MAX = 24.5, 25.5
 LON_MIN, LON_MAX = 121.0, 122.5

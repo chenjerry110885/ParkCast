@@ -1,9 +1,12 @@
+import logging
 from datetime import date, datetime, timezone
 
 import pytest
 
-from parkcast import config, scheduler
+from parkcast import config, scheduler, store
 from parkcast.collector import TickResult
+from parkcast.compact import day_bounds
+from parkcast.feed import FeedSnapshot, Observation
 from parkcast.scheduler import next_poll_ts, taipei_date
 
 
@@ -209,6 +212,16 @@ def test_run_forever_slot_targets_stay_300s_apart_despite_exhausted_retries(monk
     assert targets[2] - targets[1] == 300
 
 
+def _no_archive(conn, day):
+    """A do-nothing archive hook.
+
+    The default is the real archive_day, which writes under config.PARQUET_DIR
+    -- the live cold store. Any test whose virtual clock crosses Taipei
+    midnight must inject this (or a spy) so the suite never reaches it.
+    Compaction itself is covered by the archive tests below.
+    """
+
+
 # --- daily metadata refresh --------------------------------------------------
 
 
@@ -232,7 +245,7 @@ def test_refresh_not_called_while_the_day_is_unchanged(monkeypatch):
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {"A": 1}, collect=collect, sleep=clock.sleep,
-                               now_fn=clock.now_fn, refresh_metadata=lambda d: calls.append(d) or {})
+                               now_fn=clock.now_fn, archive=_no_archive, refresh_metadata=lambda d: calls.append(d) or {})
     assert calls == [], "refresh must not fire within a single Taipei day"
 
 
@@ -259,7 +272,7 @@ def test_refresh_rebind_is_observable_at_the_call_site(monkeypatch):
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
-                               now_fn=clock.now_fn, refresh_metadata=refresh)
+                               now_fn=clock.now_fn, archive=_no_archive, refresh_metadata=refresh)
 
     assert {"OLD": 1} in seen, "the slot(s) before the refresh landed should still see the original map"
     assert {"NEW": 42} in seen, "later slots must see the refreshed map, proving it was rebound"
@@ -292,7 +305,7 @@ def test_failed_refresh_is_retried_on_a_later_slot(monkeypatch):
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
-                               now_fn=clock.now_fn, refresh_metadata=refresh)
+                               now_fn=clock.now_fn, archive=_no_archive, refresh_metadata=refresh)
 
     assert refresh_calls == [date(2026, 9, 5), date(2026, 9, 5)], (
         f"expected two refresh attempts, both for the new day, got {refresh_calls}"
@@ -325,7 +338,7 @@ def test_persistently_failing_refresh_never_corrupts_capacities(monkeypatch):
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
-                               now_fn=clock.now_fn, refresh_metadata=boom)
+                               now_fn=clock.now_fn, archive=_no_archive, refresh_metadata=boom)
 
     assert all(c == {"OLD": 1} for c in seen), f"stale capacities beat no capacities, got {seen}"
 
@@ -354,6 +367,256 @@ def test_successful_refresh_fires_exactly_once_for_the_day(monkeypatch):
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
-                               now_fn=clock.now_fn, refresh_metadata=refresh)
+                               now_fn=clock.now_fn, archive=_no_archive, refresh_metadata=refresh)
 
     assert refresh_calls == [date(2026, 9, 5)], f"expected exactly one refresh call for the day, got {refresh_calls}"
+
+
+# --- daily compaction into the cold store ------------------------------------
+#
+# Without this hook nothing ever calls compact_day, so `data/cold/` stays empty
+# and prune -- which runs every slot against a 48h window -- silently makes the
+# whole system a rolling two-day buffer that throws the training corpus away.
+
+
+def _seed(conn, day, lot="A", free=10, motor=None):
+    start, _ = day_bounds(day)
+    store.insert_snapshot(
+        conn, FeedSnapshot(start, start + 200, (Observation(lot, free, motor),)), {lot: 50}
+    )
+
+
+def test_previous_day_is_compacted_when_the_taipei_day_rolls_over(monkeypatch):
+    """The rollover is the only moment the finished day is both complete and unpruned."""
+    archived = []
+    ticks = []
+    # 23:59:30 Taipei: the first slot lands at 00:01:30 the next day.
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        ticks.append(clock.now)
+        if len(ticks) >= 3:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn,
+                              archive=lambda conn, day: archived.append(day))
+
+    assert archived == [date(2026, 9, 4)], "exactly the day that just ended, exactly once"
+
+
+def test_no_compaction_while_the_day_is_still_running(monkeypatch):
+    """Compacting a day in progress would write a file that can never be completed."""
+    archived = []
+    ticks = []
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 2, 0, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def collect(conn, capacities):
+        ticks.append(clock.now)
+        if len(ticks) >= 4:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn,
+                              archive=lambda conn, day: archived.append(day))
+
+    assert archived == []
+
+
+def test_compaction_runs_before_prune(monkeypatch):
+    """Prune is the only thing that destroys rows; compaction must get them first.
+
+    There is a full day of headroom today (48h retention, 24h day), but the
+    order is what keeps that true if retention is ever tightened, and it is
+    what lets a startup catch-up salvage a day near the 48h edge.
+    """
+    events = []
+    ticks = []
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+
+    def fake_prune(conn, cutoff_ts):
+        events.append("prune")
+        return 0
+
+    monkeypatch.setattr(scheduler.store, "prune", fake_prune)
+
+    def collect(conn, capacities):
+        ticks.append(clock.now)
+        if len(ticks) >= 3:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn,
+                              archive=lambda conn, day: events.append("archive"))
+
+    assert events[:2] == ["archive", "prune"]
+
+
+def test_failed_compaction_is_retried_for_the_same_day_and_collection_continues(monkeypatch):
+    """A compaction failure must cost a retry, never the day itself.
+
+    If the watermark advanced regardless of the outcome, one bad slot would
+    lose a day permanently -- prune deletes it 24 hours later and the feed
+    cannot be replayed.
+    """
+    attempts = []
+    ticks = []
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    def flaky_archive(conn, day):
+        attempts.append(day)
+        if len(attempts) == 1:
+            raise OSError("no space left on device")
+
+    def collect(conn, capacities):
+        ticks.append(clock.now)
+        if len(ticks) >= 4:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn, archive=flaky_archive)
+
+    assert attempts == [date(2026, 9, 4), date(2026, 9, 4)], (
+        "the same day must be retried, then archived exactly once more"
+    )
+    assert len(ticks) == 4, "collection must continue through a compaction failure"
+
+
+def test_startup_catches_up_days_a_restart_left_unarchived(tmp_path, monkeypatch):
+    """A restart between midnight and the first rollover must not lose the day.
+
+    run_forever only archives rollovers it witnesses, so a container that comes
+    back at 00:05 would never compact the day that just ended -- and prune
+    takes it 48 hours later. The watermark therefore starts at the oldest day
+    still in the hot store, not at today.
+    """
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 3))
+
+    archived = []
+    ticks = []
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+    clock = _VirtualClock(int(datetime(2026, 9, 5, 2, 0, tzinfo=timezone.utc).timestamp()))
+
+    def collect(c, capacities):
+        ticks.append(clock.now)
+        if len(ticks) >= 2:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    try:
+        with pytest.raises(_StopLoop):
+            scheduler.run_forever(conn, {}, collect=collect, sleep=clock.sleep,
+                                  now_fn=clock.now_fn,
+                                  archive=lambda c, day: archived.append(day))
+    finally:
+        conn.close()
+
+    assert archived == [date(2026, 9, 3), date(2026, 9, 4)], (
+        "every completed day still in the hot store must be caught up, in order"
+    )
+
+
+def test_archive_day_writes_the_cold_file_and_logs_the_report(tmp_path, caplog):
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), motor=3)
+    out_dir = tmp_path / "cold"
+
+    with caplog.at_level(logging.INFO, logger="parkcast.scheduler"):
+        scheduler.archive_day(conn, date(2026, 9, 4), out_dir)
+    conn.close()
+
+    assert (out_dir / "2026-09-04.parquet").exists()
+    assert "data quality" in caplog.text, "the day's report must reach the log"
+
+
+def test_archive_day_refuses_to_rewrite_an_existing_cold_file(tmp_path):
+    """Compaction only ever sees the 48h hot window.
+
+    Re-running it for an older day -- which the startup catch-up does after
+    every restart -- would replace a complete Parquet file with whatever
+    fraction of that day prune has not yet deleted.
+    """
+    out_dir = tmp_path / "cold"
+    out_dir.mkdir()
+    existing = out_dir / "2026-09-04.parquet"
+    existing.write_bytes(b"the complete day, written yesterday")
+
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4))
+    scheduler.archive_day(conn, date(2026, 9, 4), out_dir)
+    conn.close()
+
+    assert existing.read_bytes() == b"the complete day, written yesterday"
+
+
+# --- stalled-collection watchdog ---------------------------------------------
+
+
+def test_exits_non_zero_after_an_hour_of_exhausted_slots(monkeypatch):
+    """A feed that changed shape must not be logged about forever in silence.
+
+    run_forever catches Exception per attempt and loops, so the process never
+    exits and `restart: unless-stopped` never fires. Exiting turns an
+    invisible stall into a rising restart count.
+    """
+    clock = _VirtualClock(1788484080)
+    attempts = []
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+
+    expected = config.MAX_EXHAUSTED_SLOTS * (1 + len(config.RETRY_DELAYS_SEC))
+
+    def stalled(conn, capacities):
+        attempts.append(clock.now)
+        # Safety net: a loop that never exits must fail this test, not hang it.
+        if len(attempts) > 2 * expected:
+            raise _StopLoop()
+        return TickResult(data_ts=1788484080, rows_written=0, advanced=False)
+
+    with pytest.raises(SystemExit) as exc:
+        scheduler.run_forever(None, {}, collect=stalled, sleep=clock.sleep,
+                              now_fn=clock.now_fn, archive=_no_archive)
+
+    assert exc.value.code, "must exit non-zero, or Docker will not restart it"
+    assert len(attempts) == expected, (
+        f"expected exactly {config.MAX_EXHAUSTED_SLOTS} exhausted slots before exit"
+    )
+
+
+def test_one_good_tick_resets_the_exhausted_slot_counter(monkeypatch):
+    """The threshold counts CONSECUTIVE failures.
+
+    A feed that drops one slot an hour is healthy; without the reset the
+    counter would creep up over days and eventually kill a working collector.
+    """
+    clock = _VirtualClock(1788484080)
+    slots = []
+    monkeypatch.setattr(scheduler.store, "prune", lambda c, t: slots.append(t) or 0)
+
+    limit = config.MAX_EXHAUSTED_SLOTS
+
+    def collect(conn, capacities):
+        slot = len(slots)
+        if slot == limit - 1:
+            return TickResult(data_ts=slot, rows_written=1, advanced=True)
+        if slot >= 2 * limit - 1:
+            raise _StopLoop()
+        return TickResult(data_ts=0, rows_written=0, advanced=False)
+
+    # Reaching _StopLoop at all proves SystemExit never fired: without the
+    # reset, a run of 11 exhausted slots either side of one good tick would
+    # trip the threshold.
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn, archive=_no_archive)

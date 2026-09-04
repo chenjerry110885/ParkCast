@@ -80,6 +80,10 @@ def latest_data_ts(conn: sqlite3.Connection) -> int | None:
     return conn.execute("SELECT MAX(data_ts) FROM observations").fetchone()[0]
 
 
+def oldest_data_ts(conn: sqlite3.Connection) -> int | None:
+    return conn.execute("SELECT MIN(data_ts) FROM observations").fetchone()[0]
+
+
 def prune(conn: sqlite3.Connection, cutoff_ts: int) -> int:
     cursor = conn.execute("DELETE FROM observations WHERE data_ts < ?", (cutoff_ts,))
     return cursor.rowcount
