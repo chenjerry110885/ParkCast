@@ -306,7 +306,14 @@ def test_climatology_uses_the_lot_bucket_rate(conn):
     for week, free in enumerate((5, 5, 0)):
         write(conn, 1788537600 + week * 7 * 86400, free=free)
     c = Climatology(load_history(conn))
-    assert c.predict("A", 1788537600 + 21 * 86400, 30) == pytest.approx(2 / 3)
+    # The whole chain, spelled out, because every tier here holds the same three
+    # observations: Jeffreys on the global tier, then lot toward global, then
+    # bucket toward lot. A raw 2/3 at every level would be the unsmoothed answer.
+    glob = (2 + 0.5) / (3 + 1)
+    lot_rate = (2 + 20 * glob) / (3 + 20)
+    assert c.predict("A", 1788537600 + 21 * 86400, 30) == pytest.approx(
+        (2 + 8 * lot_rate) / (3 + 8)
+    )
 
 
 def test_climatology_falls_back_to_the_lot_rate_when_the_bucket_is_thin(conn):
@@ -320,10 +327,23 @@ def test_climatology_falls_back_to_the_lot_rate_when_the_bucket_is_thin(conn):
 
 
 def test_climatology_falls_back_to_the_global_rate_for_an_unseen_lot(conn):
+    """The global tier carries a Jeffreys prior, so it is (hits + 0.5)/(n + 1)
+    rather than the raw fraction.
+
+    A corpus of ten hits out of ten would otherwise hand an unseen lot exactly
+    1.0 -- a certainty from a tier with nothing above it to shrink toward, and
+    one that then propagates down every tier beneath it. "Never a certainty"
+    was a property of the corpus we happen to have; this makes it a property of
+    the function, at the cost of ~4.5 points on a ten-observation store and
+    nothing measurable on a real one.
+    """
     for i in range(10):
         write(conn, 1000 + i * 300, lot="A", free=5)
     c = Climatology(load_history(conn))
-    assert c.predict("BRAND_NEW", 1000, 30) == pytest.approx(1.0)
+    assert c.predict("BRAND_NEW", 1000, 30) == pytest.approx(10.5 / 11)
+    assert c.predict("BRAND_NEW", 1000, 30) < 1.0, (
+        "a degenerate global rate must not reach the client as a certainty"
+    )
 
 
 def test_climatology_is_none_with_no_history_at_all(conn):
@@ -431,12 +451,18 @@ def test_climatology_shrinks_a_lone_observation_most_of_the_way_to_its_parent(co
 
 
 def test_climatology_is_a_no_op_when_every_tier_agrees(conn):
-    """Shrinkage toward a parent that already matches must not shift the mean."""
+    """Shrinkage toward a parent that already matches must not shift the mean.
+
+    A balanced corpus is the setup where that is exactly true of all three
+    tiers: at a rate of 0.5 the Jeffreys prior on the global tier is itself a
+    no-op ((2 + 0.5)/(4 + 1) == 0.5), so any movement in the answer is
+    shrinkage doing something it should not.
+    """
     base = 1788537600
-    for week, free in enumerate((5, 5, 0)):
+    for week, free in enumerate((5, 5, 0, 0)):
         write(conn, base + week * 7 * 86400, free=free)
     c = Climatology(load_history(conn))
-    assert c.predict("A", base + 21 * 86400, 30) == pytest.approx(2 / 3)
+    assert c.predict("A", base + 28 * 86400, 30) == pytest.approx(0.5)
 
 
 def test_climatology_bucket_and_lot_priors_are_configured(conn):

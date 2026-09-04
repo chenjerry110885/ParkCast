@@ -205,8 +205,13 @@ class Climatology:
     rather than a cliff. A hard gate on top would only discard smoothed
     evidence that is already mostly its parent's.
 
-    The global tier stays raw: it is the fallback of last resort and has
-    nothing above it to shrink toward.
+    The global tier has nothing above it to shrink toward, so it takes a
+    Jeffreys prior instead: (hits + 0.5) / (n + 1). Without it an unseen lot
+    returns the raw citywide fraction, and a corpus that happened to be all
+    hits -- a fresh store, a quiet night, a feed that briefly reported every
+    lot free -- would hand back exactly 1.0 and propagate that certainty down
+    every tier beneath it. "Never a certainty" was an empirical property of the
+    current corpus; the prior makes it a property of the function.
     """
 
     def __init__(self, history: History) -> None:
@@ -225,7 +230,10 @@ class Climatology:
     def predict(self, lot_id: str, target_ts: int, horizon_min: int) -> float | None:
         if not self._global[1]:
             return None
-        rate = self._global[0] / self._global[1]
+        # Jeffreys, i.e. _shrink(self._global, 0.5, 1.0): the uniform-ish prior
+        # a tier with no parent shrinks toward. Structurally bounds the whole
+        # chain away from 0 and 1 rather than relying on the corpus to be mixed.
+        rate = (self._global[0] + 0.5) / (self._global[1] + 1)
 
         lot = self._lot.get(lot_id)
         if lot is None:
