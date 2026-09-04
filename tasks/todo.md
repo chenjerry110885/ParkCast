@@ -968,12 +968,11 @@ git commit -m "feat: add sqlite hot store with idempotent upserts"
 - Create: `tests/test_collector.py`
 
 **Interfaces:**
-- Consumes: `config`, `feed.parse_availability`, `metadata.parse_metadata`, `metadata.capacity_map`, `store.*`
+- Consumes: `config`, `feed.parse_availability`, `store.*`
 - Produces:
   - `TickResult(data_ts: int, rows_written: int, advanced: bool)` — frozen dataclass
   - `fetch_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC) -> dict`
   - `collect_once(conn, capacities, *, now: int | None = None, fetch=fetch_json) -> TickResult`
-  - `load_capacities(*, fetch=fetch_json) -> dict[str, int | None]`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1049,7 +1048,6 @@ import requests
 
 from parkcast import config, store
 from parkcast.feed import parse_availability
-from parkcast.metadata import capacity_map, parse_metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -1063,10 +1061,6 @@ def fetch_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC) -> dict:
     response = requests.get(url, timeout=timeout)
     response.raise_for_status()
     return response.json()
-
-
-def load_capacities(*, fetch=fetch_json) -> dict[str, int | None]:
-    return capacity_map(parse_metadata(fetch(config.METADATA_URL)))
 
 
 def collect_once(
@@ -1256,10 +1250,9 @@ This is the day-one milestone. Once this task lands, data starts accumulating an
 **Files:**
 - Create: `src/parkcast/__main__.py`, `docker/Dockerfile`, `docker/docker-compose.yml`, `.dockerignore`
 - Modify: `.gitignore` (confirm `data/` is ignored — it already is)
-- Note: `load_capacities` from Task 7 is superseded here by the snapshotting path; leave it in place for tests.
 
 **Interfaces:**
-- Consumes: `collector.load_capacities`, `scheduler.run_forever`, `store.connect`, `config.DB_PATH`
+- Consumes: `collector.fetch_json`, `metadata.snapshot_metadata`, `metadata.parse_metadata`, `metadata.capacity_map`, `scheduler.run_forever`, `store.connect`, `config.DB_PATH`, `config.PARQUET_DIR`
 - Produces: a console entry point runnable as `python -m parkcast`
 
 - [ ] **Step 1: Write `src/parkcast/__main__.py`**
@@ -1299,7 +1292,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: Smoke-test one real tick locally**
 
 ```bash
-.venv/Scripts/python -c "from parkcast import config, store; from parkcast.collector import collect_once, load_capacities; c=store.connect(config.DB_PATH); caps=load_capacities(); print(collect_once(c, caps))"
+.venv/Scripts/python -c "from parkcast import config, store; from parkcast.collector import collect_once, fetch_json; from parkcast.metadata import capacity_map, parse_metadata; c=store.connect(config.DB_PATH); caps=capacity_map(parse_metadata(fetch_json(config.METADATA_URL))); print(collect_once(c, caps))"
 ```
 
 Expected: a `TickResult` with `rows_written` above 1000 and `advanced=True`. Run it a second time; expect `rows_written=0, advanced=False`.
