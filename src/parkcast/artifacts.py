@@ -43,13 +43,27 @@ def decode_header(blob: bytes) -> dict:
     }
 
 
-def build_lots_json(lots: Sequence[Lot]) -> bytes:
+def build_lots_json(
+    lots: Sequence[Lot], *, generated_at: int, base_data_ts: int, n_lots: int
+) -> bytes:
     """Compact metadata, index-aligned with the grid's rows.
+
+    Carries the same three identity fields as the grid header. Row order is
+    dynamic -- a lot joins the set on its first usable reading and leaves after
+    a 48h all-null window -- and the two files are written independently, so a
+    client that pairs a fresh grid with a stale lots.json would read every lot
+    after the inserted row under its neighbour's name and map pin. Stamping
+    both lets the client detect that and refuse the pair instead.
 
     Short keys and unescaped UTF-8: at ~1,100 lots this is the difference
     between a 234 KB file and something several times larger.
     """
+    if len(lots) != n_lots:
+        raise ValueError(f"n_lots is {n_lots} but {len(lots)} lots were given")
     payload = {
+        "generated_at": generated_at,
+        "base_data_ts": base_data_ts,
+        "n_lots": n_lots,
         "lots": [
             {
                 "i": i, "id": lot.id, "n": lot.name, "a": lot.area,
@@ -65,7 +79,10 @@ def build_lots_json(lots: Sequence[Lot]) -> bytes:
 def publish(out_dir: Path, *, grid_blob: bytes, lots_blob: bytes) -> None:
     """Write both artifacts, each via a temp file and rename.
 
-    A reader polling grid.bin must never observe a partial write.
+    A reader polling grid.bin must never observe a partial write. The pair is
+    not atomic *together* -- a client can still fetch one file either side of a
+    republish -- which is why both blobs carry the same generation stamp for the
+    client to compare.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

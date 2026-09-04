@@ -99,15 +99,19 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
         )
         return
     grid = build_grid(forecaster, [lot.id for lot in ordered], history.latest_ts)
+    # One set of identity values for both files: the row order is recomputed
+    # every tick, so a client pairing this grid with an older lots.json must be
+    # able to tell. Computed once here rather than twice, so they cannot drift.
+    generated_at = int(time.time())
+    identity = {
+        "generated_at": generated_at,
+        "base_data_ts": history.latest_ts,
+        "n_lots": len(ordered),
+    }
     artifacts.publish(
         out_dir,
-        grid_blob=artifacts.encode_grid(
-            grid,
-            generated_at=int(time.time()),
-            base_data_ts=history.latest_ts,
-            n_lots=len(ordered),
-        ),
-        lots_blob=artifacts.build_lots_json(ordered),
+        grid_blob=artifacts.encode_grid(grid, **identity),
+        lots_blob=artifacts.build_lots_json(ordered, **identity),
     )
     log.info("published %s lots x %s horizons", len(ordered), config.HORIZON_COUNT)
 

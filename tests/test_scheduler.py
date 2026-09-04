@@ -4,7 +4,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from parkcast import config, scheduler, store
+from parkcast import artifacts, config, scheduler, store
 from parkcast.collector import TickResult
 from parkcast.compact import day_bounds
 from parkcast.feed import FeedSnapshot, Observation
@@ -736,3 +736,22 @@ def test_publish_artifacts_still_overwrites_on_a_normal_publish(tmp_path):
     assert (out_dir / "grid.bin").read_bytes() != b"OLD-GRID-BYTES-18"
     lots_doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
     assert [l["id"] for l in lots_doc["lots"]] == ["A"]
+
+
+def test_publish_artifacts_stamps_both_files_with_one_identity(tmp_path):
+    """grid.bin and lots.json are two independent renames, and the row order is
+    recomputed every tick. The client's only defence against pairing a fresh
+    grid with stale metadata is that both carry the same generation stamp."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    _seed(conn, date(2026, 9, 4), lot="B")
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(conn, [_make_lot("A"), _make_lot("B")], out_dir)
+    conn.close()
+
+    header = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    for field in ("generated_at", "base_data_ts", "n_lots"):
+        assert doc[field] == header[field], f"{field} disagrees across the pair"
+    assert doc["n_lots"] == len(doc["lots"]) == 2
