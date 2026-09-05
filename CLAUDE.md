@@ -53,6 +53,19 @@ flatter itself.
 Plan 3 expected-cost ranker needs a numeric hourly rate parsed out of it — treat that as real work,
 not a field read.
 
+### Collection runs locally, and the corpus has time-correlated gaps
+
+The collector runs in Docker on the dev machine, not a cloud host. Decision taken 2026-09-05 under a
+hard "no cost, no new attack surface" constraint: GCP's always-free tier requires a billing account
+with a card and its budget alerts explicitly *do not* cap spending; Oracle's always-free tier
+documents idle reclamation that this workload trips on every criterion.
+
+**Consequence that must be disclosed, not hidden.** Whenever the machine sleeps, collection stops.
+2026-09-05 lost ~10.7 hours (~129 ticks) that way. These gaps are **time-correlated**, not random —
+hours the machine is habitually asleep will have thin or empty climatology buckets. Plan 4 must
+report per-bucket support alongside its skill numbers, and the README must state the limitation.
+`restart: unless-stopped` already brings the collector back on boot, so only genuine downtime is lost.
+
 **Non-negotiable:** the collector runs from day one. Every day it is not running is a
 training day that cannot be recovered.
 
