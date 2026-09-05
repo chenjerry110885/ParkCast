@@ -79,9 +79,13 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
     Lots are ordered by id and filtered to those with at least one usable
     observation, so grid rows and lots.json indices line up exactly.
 
-    Refuses to publish a set that is empty, or that has collapsed to less than
-    MIN_PUBLISH_LOT_FRACTION of what is already published: stale artifacts beat
-    artifacts that have lost most of the city.
+    Refuses to publish a set that is empty, one that has collapsed to less than
+    MIN_PUBLISH_LOT_FRACTION of what is already published, or one with no
+    reading behind it to forecast from: stale artifacts beat artifacts that have
+    lost most of the city, and beat artifacts dated 1970.
+
+    Every refusal returns rather than raises. Publishing sits downstream of
+    collection and must never be able to stop it.
     """
     history = load_history(conn, cold_dir=config.PARQUET_DIR)
     forecaster = Blend(history)
@@ -105,6 +109,22 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
             "no lots survived the history filter (%s candidate lots, %s with "
             "history); leaving existing artifacts untouched",
             len(lots), len(history.counts.lot),
+        )
+        return
+
+    if history.latest_ts == 0:
+        # A full roster with nothing to forecast from. `ordered` is filtered on
+        # `counts.lot`, which spans the cold corpus, but `latest_ts` comes off
+        # `recent`, which is hot-only on this path -- so a hot window in which
+        # every free_car is NULL (a citywide -9 from the feed, or a fresh hot
+        # store restored beside an intact cold one) passes both guards above
+        # while leaving the base timestamp at 0. `build_grid` would then evaluate
+        # every horizon against Thursday 1970-01-01 Taipei -- a real climatology
+        # bucket, so the bytes look plausible -- and stamp `base_data_ts: 0` on
+        # the result, telling every client the reading is 56 years stale.
+        log.error(
+            "no usable reading behind %s lots (latest_ts is 0: the hot window is "
+            "entirely NULL); leaving existing artifacts untouched", len(ordered),
         )
         return
 
