@@ -2,7 +2,7 @@ from datetime import date
 
 import pytest
 
-from parkcast import store
+from parkcast import config, store
 from parkcast.compact import compact_day, day_bounds
 from parkcast.feed import FeedSnapshot, Observation
 from parkcast.forecast import Blend, Climatology, Persistence, load_history, week_bucket
@@ -25,12 +25,12 @@ def test_history_separates_current_from_past(conn):
     h = load_history(conn)
     assert h.latest_ts == 1300
     assert h.current == {"A": 9}, "current must be the newest tick only"
-    assert h.by_lot["A"] == [(1000, 5), (1300, 9)], "by_lot keeps the full ordered series"
+    assert h.recent["A"] == [(1000, 5), (1300, 9)], "recent keeps the full ordered series"
 
 
-# --- by_lot is sorted by us, not by the database ----------------------------
+# --- recent is sorted by us, not by the database ----------------------------
 #
-# The query that fills by_lot carries no ORDER BY: on the live store the index
+# The query that fills recent carries no ORDER BY: on the live store the index
 # is non-covering, so ordering in SQL cost 11.19s against 0.16s for the same
 # 85,735 rows. Ordering is a property of History, so it is pinned here against
 # a connection that hands back rows in the worst order it can.
@@ -49,24 +49,24 @@ class _HostileConn:
         self._rows = list(rows)
 
     def execute(self, sql, params=()):
-        if "data_ts, free_car" in sql:  # the by_lot scan
+        if "data_ts, free_car" in sql:  # the recent scan
             return sorted(self._rows, key=lambda r: -r[1])
         raise AssertionError(f"load_history issued an unexpected query: {sql}")
 
 
-def test_by_lot_series_are_sorted_ascending_by_timestamp():
+def test_recent_series_are_sorted_ascending_by_timestamp():
     rows = [("A", 3000, 1), ("A", 1000, 5), ("A", 2000, 3),
             ("B", 2500, 0), ("B", 500, 7)]
     h = load_history(_HostileConn(rows))
-    for lot_id, series in h.by_lot.items():
+    for lot_id, series in h.recent.items():
         stamps = [ts for ts, _ in series]
         assert stamps == sorted(stamps), f"{lot_id} came back out of order"
-    assert h.by_lot["A"] == [(1000, 5), (2000, 3), (3000, 1)]
+    assert h.recent["A"] == [(1000, 5), (2000, 3), (3000, 1)]
 
 
 def test_latest_ts_and_current_are_derived_not_queried():
     """Pinned against the same stub: the newest reading and the lots that
-    reported it come out of `by_lot`, so a store the hot query cannot see (a
+    reported it come out of `recent`, so a store the hot query cannot see (a
     cold-only backtest window) still produces both."""
     rows = [("A", 3000, 1), ("A", 1000, 5), ("B", 3000, 0), ("C", 2500, 7)]
     h = load_history(_HostileConn(rows))
@@ -74,8 +74,9 @@ def test_latest_ts_and_current_are_derived_not_queried():
     assert h.current == {"A": 1, "B": 0}, "C did not report in the newest tick"
 
 
-def test_by_lot_is_sorted_across_the_cold_hot_boundary(conn, tmp_path):
-    """Cold rows are appended before hot ones, so the two blocks must interleave
+def test_recent_is_sorted_across_the_cold_hot_boundary(conn, tmp_path):
+    """Cold rows are read before hot ones, so on the backtest path -- the only
+    path where `recent` spans both stores -- the two blocks must interleave
     correctly rather than merely being sorted within themselves."""
     day = date(2026, 9, 3)
     start, _ = day_bounds(day)
@@ -94,7 +95,8 @@ def test_by_lot_is_sorted_across_the_cold_hot_boundary(conn, tmp_path):
     for slot in range(5):
         write(conn, later + slot * 300 + 180, free=3)
 
-    stamps = [ts for ts, _ in load_history(conn, cold_dir=tmp_path).by_lot["A"]]
+    h = load_history(conn, cold_dir=tmp_path, before_ts=later + 86400)
+    stamps = [ts for ts, _ in h.recent["A"]]
     assert stamps == sorted(stamps)
     assert len(stamps) == 10
 
@@ -103,7 +105,7 @@ def test_history_excludes_missing_readings(conn):
     write(conn, 1000, free=5)
     write(conn, 1300, free=None)
     h = load_history(conn)
-    assert h.by_lot["A"] == [(1000, 5)], "NULL readings are absent, never coerced to 0"
+    assert h.recent["A"] == [(1000, 5)], "NULL readings are absent, never coerced to 0"
     # With no other lot reporting, the newest tick that carried *any* reading is
     # 1000, so that is what latest_ts (and therefore base_data_ts) describes --
     # the honest answer, rather than claiming the freshness of an all-NULL tick.
@@ -136,7 +138,7 @@ def test_before_ts_excludes_observations_at_or_after_the_cutoff(conn):
     for ts in (1000, 1300, 1600, 1900):
         write(conn, ts, free=5)
     h = load_history(conn, before_ts=1600)
-    assert h.by_lot["A"] == [(1000, 5), (1300, 5)], "the cutoff is strict: >= is excluded"
+    assert h.recent["A"] == [(1000, 5), (1300, 5)], "the cutoff is strict: >= is excluded"
 
 
 def test_before_ts_current_is_the_newest_tick_before_the_cutoff(conn):
@@ -166,7 +168,7 @@ def test_before_ts_filters_the_cold_store_too(conn, tmp_path):
 
     cutoff = start + 5 * 300
     h = load_history(conn, cold_dir=tmp_path, before_ts=cutoff)   # conn is empty
-    assert [ts for ts, _ in h.by_lot["A"]] == [start + i * 300 for i in range(5)]
+    assert [ts for ts, _ in h.recent["A"]] == [start + i * 300 for i in range(5)]
 
 
 # --- latest_ts and current must follow the history, not the hot store --------
@@ -194,13 +196,18 @@ def _cold_day(tmp_path, day, *, lot="A", free=5, slots=10):
     return [start + slot * 300 for slot in range(slots)]
 
 
-def test_current_is_populated_from_a_cold_only_history(conn, tmp_path):
+def test_current_is_populated_from_a_cold_only_backtest(conn, tmp_path):
     """The regression: an empty hot store plus a cold corpus must still yield a
     working Persistence, or the backtest silently compares against climatology
-    alone and reports a 'win' the model never had to earn."""
+    alone and reports a 'win' the model never had to earn.
+
+    A backtest is the only way this store shape is reached: `recent` is fed from
+    the cold stream exactly when a cutoff is given, because that is when the hot
+    store may hold nothing. Live, hot always holds the newest 48 hours."""
     stamps = _cold_day(tmp_path, date(2026, 9, 4))
 
-    h = load_history(conn, cold_dir=tmp_path)   # conn is empty: pruned past 48h
+    # conn is empty: pruned past 48h, as it is for every cutoff Plan 4 will use.
+    h = load_history(conn, cold_dir=tmp_path, before_ts=stamps[-1] + 1)
     assert h.latest_ts == stamps[-1], "the newest cold reading, not 0"
     assert h.current == {"A": 5}
     assert Persistence(h).predict("A", stamps[-1] + 600, 10) == 1.0, (
@@ -217,13 +224,13 @@ def test_before_ts_still_governs_current_over_a_cold_only_history(conn, tmp_path
     h = load_history(conn, cold_dir=tmp_path, before_ts=cutoff)
     assert h.latest_ts == stamps[4], "latest_ts must stop strictly before the cutoff"
     assert h.current == {"A": 5}
-    assert max(ts for ts, _ in h.by_lot["A"]) < cutoff
+    assert max(ts for ts, _ in h.recent["A"]) < cutoff
 
 
 def test_current_matches_the_hot_store_query_it_replaced(conn):
     """The live path is claimed to be unchanged, so it is checked rather than
     asserted: with the hot store holding the newest tick, deriving `current`
-    from `by_lot` must agree with the MAX(data_ts) query it replaced, exactly.
+    from `recent` must agree with the MAX(data_ts) query it replaced, exactly.
     """
     for i in range(5):
         write(conn, 1000 + i * 300, lot="A", free=i)       # includes free=0
@@ -243,7 +250,7 @@ def test_current_matches_the_hot_store_query_it_replaced(conn):
 def test_before_ts_none_keeps_everything(conn):
     for ts in (1000, 1300, 1600):
         write(conn, ts, free=5)
-    assert len(load_history(conn).by_lot["A"]) == 3
+    assert len(load_history(conn).recent["A"]) == 3
     assert load_history(conn).latest_ts == 1600
 
 
@@ -504,14 +511,14 @@ def test_published_grid_bytes_are_mostly_probabilities(conn):
 def test_read_cold_missing_dir_returns_normally(conn, tmp_path):
     """cold_dir need not exist yet -- the first daily Parquet file is hours away."""
     h = load_history(conn, cold_dir=tmp_path / "does-not-exist")
-    assert h.by_lot == {}
+    assert h.recent == {}
 
 
 def test_read_cold_empty_dir_returns_normally(conn, tmp_path):
     cold_dir = tmp_path / "cold"
     cold_dir.mkdir()
     h = load_history(conn, cold_dir=cold_dir)
-    assert h.by_lot == {}
+    assert h.recent == {}
 
 
 def test_read_cold_skips_files_with_a_non_iso_date_stem(conn, tmp_path):
@@ -519,7 +526,7 @@ def test_read_cold_skips_files_with_a_non_iso_date_stem(conn, tmp_path):
     cold_dir.mkdir()
     (cold_dir / "not-a-date.parquet").write_bytes(b"garbage, never parsed as parquet")
     h = load_history(conn, cold_dir=cold_dir)
-    assert h.by_lot == {}
+    assert h.recent == {}
 
 
 def test_read_cold_round_trips_through_compact_day(conn, tmp_path):
@@ -532,10 +539,11 @@ def test_read_cold_round_trips_through_compact_day(conn, tmp_path):
     compact_day(conn, day, cold_dir)
 
     hot = store.connect(tmp_path / "hot.sqlite")  # empty hot store
-    h = load_history(hot, cold_dir=cold_dir)
+    h = load_history(hot, cold_dir=cold_dir, before_ts=start + 600)
     hot.close()
 
-    assert h.by_lot["A"] == [(start, 5), (start + 300, 3)]
+    assert h.recent["A"] == [(start, 5), (start + 300, 3)]
+    assert h.counts.lot["A"] == [2, 2]
 
 
 def test_blend_is_persistence_at_the_shortest_horizon(conn):
@@ -603,8 +611,8 @@ def test_cold_observations_covered_by_the_hot_store_are_not_counted_twice(conn, 
 
     hot_only = load_history(conn)
     with_cold = load_history(conn, cold_dir=tmp_path)
-    assert len(with_cold.by_lot["A"]) == len(hot_only.by_lot["A"]), (
-        "cold rows already covered by the hot window must be skipped"
+    assert with_cold.counts.lot["A"] == hot_only.counts.lot["A"] == [10, 10], (
+        "a day held by both stores must be counted once, not twice"
     )
 
 
@@ -631,7 +639,7 @@ def test_cold_observations_older_than_the_hot_window_are_kept(conn, tmp_path):
     other.close()
 
     h = load_history(conn, cold_dir=tmp_path)
-    assert len(h.by_lot["A"]) == 20, "10 hot + 10 genuinely older cold"
+    assert h.counts.lot["A"] == [20, 20], "10 hot + 10 genuinely older cold"
 
 
 def test_taipei_day_start_agrees_with_day_bounds():
@@ -665,22 +673,56 @@ def test_compacted_days_ignores_files_that_are_not_a_day(tmp_path):
     assert compacted_days(tmp_path) == frozenset()
 
 
-def test_hot_rows_on_a_day_cold_owns_are_dropped_not_the_cold_ones(conn, tmp_path):
-    """The direction of the overlap rule, pinned: the cold copy is the one kept,
-    so a day's contribution stops depending on what the hot store still holds."""
+def test_hot_rows_on_a_day_cold_owns_are_counted_once_and_only_once(conn, tmp_path):
+    """The overlap rule, pinned where it now lives: in the counts.
+
+    Both stores hold the same three readings -- cold slot-aligned, hot at the
+    true feed timestamps -- and the corpus totals must say three, not six. The
+    tail is exempt from the rule (see the test below), so it is the counts that
+    carry it.
+    """
     day = date(2026, 9, 4)
     start, _ = day_bounds(day)
     for slot in range(3):
         write(conn, start + slot * 300 + 180, free=5)   # true feed timestamps
     compact_day(conn, day, tmp_path)
 
-    stamps = [ts for ts, _ in load_history(conn, cold_dir=tmp_path).by_lot["A"]]
-    assert stamps == [start, start + 300, start + 600], (
-        "the slot-aligned cold timestamps survive; the hot originals are skipped"
+    h = load_history(conn, cold_dir=tmp_path)
+    assert h.counts.lot["A"] == [3, 3], "the cold copy counts; the hot one does not"
+    assert h.counts.glob == [3, 3]
+
+
+def test_recent_ignores_the_ownership_rule_and_takes_the_hot_copy(conn, tmp_path):
+    """The serving path fills `recent` from the hot store with no ownership skip.
+
+    This is what keeps the map alive across a midnight rollover: cold owns the
+    day just compacted, so skipping it would empty `recent` -- and with it
+    `current`, `latest_ts` and every Persistence answer -- for hours. Re-seeing
+    an observation in a tail is harmless; re-counting one in a rate is not.
+    """
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    for slot in range(3):
+        write(conn, start + slot * 300 + 180, free=5)
+    compact_day(conn, day, tmp_path)          # cold now owns the whole day
+
+    h = load_history(conn, cold_dir=tmp_path)
+    stamps = [ts for ts, _ in h.recent["A"]]
+    assert stamps == [start + 180, start + 480, start + 780], (
+        "the hot originals, not the slot-aligned cold copies"
     )
+    assert h.latest_ts == start + 780
+    assert Persistence(h).predict("A", start + 1080, 5) == 1.0
 
 
-def test_all_cold_is_kept_when_the_hot_store_is_empty(conn, tmp_path):
+def test_a_cold_only_lot_keeps_its_counts_but_has_no_recent_tail(conn, tmp_path):
+    """The serving path does not re-stream cold, so a lot the hot store has
+    pruned past keeps its climatology but loses its current reading.
+
+    Live this shape does not arise -- hot holds 48 hours and every lot reports
+    every tick. It is pinned so the split between `counts` (whole corpus) and
+    `recent` (hot tail) is explicit rather than incidental.
+    """
     day = date(2026, 9, 4)
     start, _ = day_bounds(day)
     other = store.connect(tmp_path / "src.sqlite")
@@ -695,7 +737,9 @@ def test_all_cold_is_kept_when_the_hot_store_is_empty(conn, tmp_path):
     other.close()
 
     h = load_history(conn, cold_dir=tmp_path)  # conn is empty
-    assert len(h.by_lot["A"]) == 10
+    assert h.counts.lot["A"] == [10, 10], "climatology still sees the cold corpus"
+    assert h.recent == {}, "the tail comes from the hot store, which is empty"
+    assert Climatology(h).predict("A", start, 30) is not None
 
 
 from parkcast.forecast import Counts
@@ -839,3 +883,105 @@ def test_a_compacted_day_survives_the_hot_store_pruning_past_it(conn, tmp_path):
     assert h.counts.glob == [2, 3], (
         "the compacted day must still be counted after hot prunes past it"
     )
+
+
+# --- the retained tail is bounded; the counts are not ------------------------
+#
+# Holding every observation reached 1.2 GB by day 30 for a series nothing reads
+# past its end. `recent` is now the newest config.HISTORY_TAIL readings per lot
+# and `counts` carries the corpus, so memory stops tracking corpus age without
+# narrowing what climatology learned.
+
+
+def test_recent_is_bounded_to_the_tail(conn):
+    """Memory must not grow with corpus age - this is the whole point of Plan 2b."""
+    for i in range(config.HISTORY_TAIL * 3):
+        write(conn, 1000 + i * 300, free=5)
+    h = load_history(conn)
+    assert len(h.recent["A"]) == config.HISTORY_TAIL
+
+
+def test_recent_keeps_the_NEWEST_observations_not_the_oldest(conn):
+    for i in range(config.HISTORY_TAIL * 2):
+        write(conn, 1000 + i * 300, free=i % 7)
+    h = load_history(conn)
+    stamps = [ts for ts, _ in h.recent["A"]]
+    assert stamps == sorted(stamps), "still ordered"
+    assert max(stamps) == 1000 + (config.HISTORY_TAIL * 2 - 1) * 300
+    assert h.latest_ts == max(stamps)
+
+
+def test_recent_keeps_the_newest_by_timestamp_not_by_arrival_order():
+    """The hot scan carries no ORDER BY, so which rows survive the bound cannot
+    depend on the order the storage engine hands them over.
+
+    The same hostile connection as above, but with more rows than the tail: a
+    `deque(maxlen=...)` would keep the oldest here, and every existing fixture
+    is too small to notice.
+    """
+    n = config.HISTORY_TAIL * 2
+    rows = [("A", 1000 + i * 300, i % 7) for i in range(n)]
+    h = load_history(_HostileConn(rows))          # returned newest-first
+    stamps = [ts for ts, _ in h.recent["A"]]
+    assert stamps == sorted(ts for _, ts, _ in rows)[-config.HISTORY_TAIL:]
+    assert h.latest_ts == 1000 + (n - 1) * 300
+
+
+def test_counts_cover_the_whole_corpus_not_just_the_tail(conn):
+    """Truncating `recent` must not truncate what climatology learned."""
+    n = config.HISTORY_TAIL * 3
+    for i in range(n):
+        write(conn, 1000 + i * 300, free=5)
+    h = load_history(conn)
+    assert len(h.recent["A"]) == config.HISTORY_TAIL
+    assert h.counts.lot["A"] == [n, n], "every observation still counted"
+
+
+def test_climatology_learns_from_the_whole_corpus_not_the_retained_tail(conn):
+    """The other half of the same rule, at the forecaster: a Climatology rebuilt
+    from `recent` would be trained on the last two hours of the city."""
+    n = config.HISTORY_TAIL
+    for i in range(2 * n):
+        write(conn, 1000 + i * 300, free=0)       # always full...
+    for i in range(2 * n, 3 * n):
+        write(conn, 1000 + i * 300, free=5)       # ...until the retained tail
+    h = load_history(conn)
+    assert len(h.recent["A"]) == n
+
+    # An unseen lot reads the global tier straight off the corpus counts: n hits
+    # in 3n observations, Jeffreys-smoothed. From the tail alone it would be
+    # n/n, i.e. ~0.98 -- the corpus says the opposite.
+    assert Climatology(h).predict("UNSEEN", 1000, 30) == pytest.approx(
+        (n + 0.5) / (3 * n + 1)
+    )
+
+
+def test_the_serving_path_does_not_reread_the_cold_store(conn, tmp_path, monkeypatch):
+    """A warm tick must not touch a Parquet file at all.
+
+    The counts come from the folded cache and the tail comes from the hot store,
+    so there is nothing left for a second pass over the cold corpus to supply --
+    and that pass cost a full re-read of every day, every five minutes.
+    """
+    import pyarrow.parquet as pq
+
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5, 2: 0})
+    write(conn, day_bounds(date(2026, 9, 5))[0] + 180, free=5)
+    load_history(conn, cold_dir=tmp_path)          # cold tick: folds the file
+
+    reads = []
+    real = pq.read_table
+    monkeypatch.setattr(pq, "read_table", lambda *a, **k: reads.append(a) or real(*a, **k))
+    h = load_history(conn, cold_dir=tmp_path)
+
+    assert reads == [], "a warm serving tick must read no Parquet at all"
+    assert h.counts.glob == [3, 4], "and must still see the whole corpus"
+
+
+def test_a_backtest_cutoff_does_not_poison_the_serving_cache(conn, tmp_path):
+    """A `before_ts` load must not leave the shared cold cache truncated."""
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5, 2: 5})
+    start, _ = day_bounds(date(2026, 9, 4))
+    load_history(conn, cold_dir=tmp_path, before_ts=start + 300)
+    full = load_history(conn, cold_dir=tmp_path)
+    assert full.counts.glob[1] == 3, "the serving path must still see every observation"

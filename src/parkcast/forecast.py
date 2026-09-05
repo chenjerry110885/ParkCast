@@ -24,6 +24,7 @@ those same counts.
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
+from heapq import heappush, heappushpop
 from pathlib import Path
 from typing import Protocol
 
@@ -34,7 +35,11 @@ from parkcast import config
 class History:
     latest_ts: int
     current: dict[str, int]                     # newest reading per lot
-    by_lot: dict[str, list[tuple[int, int]]]    # (data_ts, free_car), ordered
+    # The newest `config.HISTORY_TAIL` observations per lot, (data_ts, free_car),
+    # ordered. A bounded tail, NOT the corpus: holding every observation reached
+    # 1.2 GB by day 30 for a series nothing reads past its end. Climatology gets
+    # the whole corpus through `counts` instead.
+    recent: dict[str, list[tuple[int, int]]]
     # Hits/totals over the whole corpus, cold and hot alike. Forward-referenced
     # because `Counts` lives beside `week_bucket`, which it calls.
     counts: "Counts"
@@ -60,16 +65,42 @@ def load_history(
     built from this history cannot see a single label it will be scored on. See
     the train/test contract in the module docstring.
 
-    `latest_ts` and `current` are read off the assembled series rather than
-    queried separately, so they follow the history wherever it came from: a
-    cutoff older than the 48-hour hot window still yields a working
-    `Persistence`, instead of an empty `current` that quietly removes one of
-    the two baselines from the comparison.
+    `latest_ts` and `current` are read off the retained tail rather than queried
+    separately, so they follow the history wherever it came from: a cutoff older
+    than the 48-hour hot window still yields a working `Persistence`, instead of
+    an empty `current` that quietly removes one of the two baselines from the
+    comparison.
+
+    What is retained, and why it differs by path
+    -------------------------------------------
+    `counts` covers the whole corpus; `recent` is only the newest
+    `config.HISTORY_TAIL` observations per lot. The two are fed differently:
+
+    * `counts` applies the date-ownership rule -- cold owns every day it holds a
+      Parquet file for, so the hot copy of such a day is skipped. Counting a
+      reading twice, at its true timestamp and again slot-snapped, would skew a
+      rate.
+    * `recent` is a tail, not a tally, so re-seeing an observation is harmless
+      and the ownership skip does NOT apply to it.
+
+    On the serving path (no cutoff) the cold counts come from a cache that folds
+    each Parquet file exactly once, so cold is not re-streamed and cannot feed
+    `recent` -- which is fine, because the hot store always holds 48 hours and
+    the tail is 2. Filling `recent` from hot *without* the ownership skip is
+    load-bearing here: for the first hours after each midnight rollover cold owns
+    the day just compacted, and skipping it would leave `recent` -- and with it
+    `current`, `latest_ts` and every Persistence answer -- nearly empty.
+
+    On the backtest path the cache is bypassed and the hot store may hold nothing
+    at all for an old cutoff, so `recent` is filled from the full cold+hot stream.
     """
-    by_lot: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    # A bounded min-heap per lot rather than a list to be truncated later: the
+    # bound is what stops memory growing with corpus age, so it has to bind while
+    # the corpus streams past, not after it has been assembled.
+    tails: dict[str, list[tuple[int, int]]] = defaultdict(list)
 
     # Spliced in only when a cutoff is asked for. A data_ts range predicate on
-    # the by_lot scan tempts the planner back onto idx_obs_data_ts, which is the
+    # the hot scan tempts the planner back onto idx_obs_data_ts, which is the
     # slow non-covering plan the scan below exists to avoid; backtests run
     # offline and can afford it, the 5-minute publish cannot.
     cut = "" if before_ts is None else " AND data_ts < :before"
@@ -82,12 +113,12 @@ def load_history(
         from parkcast.compact import day_bounds  # local: compact imports pyarrow
 
         # Cold owns every Taipei day it holds a Parquet file for, and the hot
-        # scan below skips those days. The overlap used to be resolved the other
-        # way round -- keep all of hot, drop the cold rows it covers -- but that
-        # cutoff was derived from the hot store's own contents and slid forward
-        # as the store pruned, which makes the cold counts uncacheable. See
-        # `ColdCountCache` for the failure that causes. Ownership never moves
-        # once a file exists, so a day can be folded in exactly once.
+        # scan below skips those days when counting. The overlap used to be
+        # resolved the other way round -- keep all of hot, drop the cold rows it
+        # covers -- but that cutoff was derived from the hot store's own contents
+        # and slid forward as the store pruned, which makes the cold counts
+        # uncacheable. See `ColdCountCache` for the failure that causes.
+        # Ownership never moves once a file exists, so a day is folded in once.
         owned = frozenset(day_bounds(day)[0] for day in compacted_days(cold_dir))
 
         # The shared cache is valid only for the unfiltered serving path: a
@@ -96,53 +127,68 @@ def load_history(
         cache = _COLD_CACHE if before_ts is None else ColdCountCache()
         cold_counts = cache.counts_through(cold_dir, before_ts)
 
-        for lot_id, ts, free in _read_cold(cold_dir):
-            # The cutoff has to bind here too, or a backtest would train on the
-            # cold copy of exactly the days it is scored against.
-            if before_ts is not None and ts >= before_ts:
-                continue
-            by_lot[lot_id].append((ts, free))
+        if before_ts is not None:
+            # Backtest only. The serving path deliberately does not read the
+            # Parquet files a second time here: the cache has already folded
+            # them, and re-streaming them for a tail the hot store can supply on
+            # its own cost a whole extra pass over the cold corpus every tick.
+            for lot_id, ts, free in _read_cold(cold_dir):
+                # The cutoff has to bind here too, or a backtest would train on
+                # the cold copy of exactly the days it is scored against.
+                if ts >= before_ts:
+                    continue
+                _keep_newest(tails[lot_id], ts, free)
 
     hot_counts = Counts()
 
     # Deliberately unordered. `idx_obs_data_ts` is non-covering, so ORDER BY
     # data_ts turns a table scan into one random primary-key lookup per row:
     # measured on the live store at 85,735 rows, 11.19s with the ORDER BY
-    # against 0.16s without, and the cost grows with the window. The sort below
-    # is what actually guarantees the order, and it has to run anyway because
-    # cold rows are read before hot ones.
+    # against 0.16s without, and the cost grows with the window. Ordering is
+    # `_keep_newest`'s job, and it does not depend on the order rows arrive in.
     for lot_id, ts, free in conn.execute(
         f"SELECT lot_id, data_ts, free_car FROM observations "
         f"WHERE free_car IS NOT NULL{cut}", params
     ):
+        _keep_newest(tails[lot_id], ts, free)
         # Taking the hot copy of a day cold already owns would count the same
         # reading twice at two timestamps, silently double-weighting it.
-        if owned and _taipei_day_start(ts) in owned:
-            continue
-        by_lot[lot_id].append((ts, free))
-        hot_counts.add(lot_id, ts, free)
+        if not (owned and _taipei_day_start(ts) in owned):
+            hot_counts.add(lot_id, ts, free)
 
-    for series in by_lot.values():
-        series.sort()
+    recent = {lot_id: sorted(heap) for lot_id, heap in tails.items()}
 
-    # Derived from the assembled series, not from a second query against the hot
+    # Derived from the retained tail, not from a second query against the hot
     # store. The hot store is pruned to 48 hours, so for any backtest cutoff
     # older than that -- which is every historical cutoff Plan 4 will use -- the
     # hot query matched nothing: `latest_ts` came back 0 and `current` empty,
     # `Persistence.predict` returned None for every lot, and the model was
     # silently compared against climatology alone. Spec section 8 requires it to
-    # beat both. `by_lot` spans hot and cold alike, so deriving from it reaches
-    # the cold corpus without a second read of anything.
-    #
-    # Live, this is the same answer: the hot store always holds the newest tick,
-    # so the newest reading in `by_lot` is the newest reading in the store.
-    latest_ts = max((series[-1][0] for series in by_lot.values()), default=0)
+    # beat both. On the backtest path `recent` spans cold and hot alike, so
+    # deriving from it reaches the cold corpus without a second read of anything.
+    latest_ts = max((series[-1][0] for series in recent.values()), default=0)
     current = {
         lot_id: series[-1][1]
-        for lot_id, series in by_lot.items()
+        for lot_id, series in recent.items()
         if series[-1][0] == latest_ts
     }
-    return History(latest_ts, current, dict(by_lot), cold_counts.combined(hot_counts))
+    return History(latest_ts, current, recent, cold_counts.combined(hot_counts))
+
+
+def _keep_newest(heap: list[tuple[int, int]], ts: int, free: int) -> None:
+    """Add one observation to a lot's tail, evicting the oldest past the bound.
+
+    A min-heap keyed by timestamp rather than a `deque(maxlen=...)`: the hot scan
+    carries no ORDER BY (see `load_history`), so arrival order is the storage
+    engine's business, and on the backtest path the cold stream is spliced in
+    ahead of it. A deque would keep the last rows to *arrive*, which is only
+    incidentally the newest. This keeps the newest by timestamp whatever the
+    order, in exactly `config.HISTORY_TAIL` slots per lot.
+    """
+    if len(heap) < config.HISTORY_TAIL:
+        heappush(heap, (ts, free))
+    else:
+        heappushpop(heap, (ts, free))
 
 
 _TAIPEI_OFFSET = 8 * 3600
@@ -356,17 +402,15 @@ class Climatology:
     """
 
     def __init__(self, history: History) -> None:
-        self._bucket: dict[tuple[str, int], list[int]] = defaultdict(lambda: [0, 0])
-        self._lot: dict[str, list[int]] = defaultdict(lambda: [0, 0])
-        self._global = [0, 0]
-
-        for lot_id, series in history.by_lot.items():
-            for ts, free in series:
-                hit = 1 if free >= 1 else 0
-                for counter in (self._bucket[(lot_id, week_bucket(ts))],
-                                self._lot[lot_id], self._global):
-                    counter[0] += hit
-                    counter[1] += 1
+        # Read, not recomputed. `load_history` accumulates these as the corpus
+        # streams past, which is what lets the observations behind them be
+        # dropped; re-deriving them here from `history.recent` would silently
+        # narrow climatology to the last two hours. The counters are shared
+        # rather than copied -- 36k buckets on the live store -- and `predict`
+        # only reads them.
+        self._bucket = history.counts.bucket
+        self._lot = history.counts.lot
+        self._global = history.counts.glob
 
     def predict(self, lot_id: str, target_ts: int, horizon_min: int) -> float | None:
         if not self._global[1]:

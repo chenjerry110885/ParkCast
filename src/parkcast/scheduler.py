@@ -85,21 +85,26 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
     """
     history = load_history(conn, cold_dir=config.PARQUET_DIR)
     forecaster = Blend(history)
+    # `counts.lot`, not `recent`: the filter asks "has this lot ever produced a
+    # usable observation", which is a question about the whole corpus. `recent`
+    # is a two-hour tail, so filtering on it would drop any lot whose history
+    # lives only in the cold store -- lots that still get an honest
+    # climatology-only forecast and belong on the map.
     ordered = sorted(
-        (lot for lot in lots if lot.id in history.by_lot), key=lambda lot: lot.id
+        (lot for lot in lots if lot.id in history.counts.lot), key=lambda lot: lot.id
     )
     if not ordered:
         # Reachable with a perfectly good `lots` argument too: an empty
         # `history` (e.g. right after a metadata-blob outage left `_lots`
         # empty at startup, or a fresh store with no observations yet) makes
-        # every lot fail the `history.by_lot` filter. Writing a header-only
+        # every lot fail the history filter. Writing a header-only
         # grid.bin and an empty lots.json would blank the whole site to zero
         # parking lots until the next day-rollover refresh. Stale artifacts
         # beat empty ones, so leave whatever is already published alone.
         log.warning(
             "no lots survived the history filter (%s candidate lots, %s with "
             "history); leaving existing artifacts untouched",
-            len(lots), len(history.by_lot),
+            len(lots), len(history.counts.lot),
         )
         return
 

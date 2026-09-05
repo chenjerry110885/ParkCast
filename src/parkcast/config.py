@@ -49,6 +49,14 @@ CLIMATOLOGY_BUCKET_PRIOR = 8  # bucket shrinks toward the lot rate
 CLIMATOLOGY_LOT_PRIOR = 20    # lot shrinks toward the citywide rate
 BLEND_HALF_LIFE_MIN = 30      # persistence weight halves every 30 min of horizon
 
+# Observations retained per lot in `History.recent`: 2 hours at the 5-minute
+# cadence. Only the newest reading is actually consumed today (Persistence, and
+# the freshness stamp on the artifacts), but a short tail is what a lag feature
+# will need and it costs nothing. Climatology reads `History.counts`, which
+# covers the whole corpus, so this bound does not truncate what it learns --
+# which is the point: memory stops growing with corpus age.
+HISTORY_TAIL = 24
+
 ARTIFACT_DIR = DATA_DIR / "artifacts"
 # Refuse to publish a grid holding less than this fraction of the lots the
 # currently published grid holds. A partially restored store that yields 40 lots

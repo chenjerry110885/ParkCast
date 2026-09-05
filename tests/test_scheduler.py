@@ -881,3 +881,35 @@ def test_publish_artifacts_publishes_when_there_is_no_readable_baseline(tmp_path
 
     header = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
     assert header["magic"] == artifacts.MAGIC and header["n_lots"] == 1
+
+
+def test_publish_artifacts_keeps_a_lot_whose_history_is_only_in_the_cold_store(
+    tmp_path, monkeypatch
+):
+    """The row filter asks whether a lot has ever produced a usable observation,
+    which is a question about the whole corpus, not about the retained tail.
+
+    `History.recent` is a two-hour tail fed from the hot store, so filtering on
+    it would silently drop every lot the hot store has pruned past -- lots that
+    still get an honest climatology-only forecast and belong on the map.
+    """
+    from parkcast.compact import compact_day
+
+    cold = tmp_path / "cold"
+    monkeypatch.setattr(config, "PARQUET_DIR", cold)
+
+    src = store.connect(tmp_path / "src.sqlite")
+    _seed(src, date(2026, 9, 3), lot="COLDONLY")
+    compact_day(src, date(2026, 9, 3), cold)
+    src.close()
+
+    conn = store.connect(tmp_path / "t.sqlite")   # hot holds only lot A
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+
+    scheduler.publish_artifacts(conn, [_make_lot("A"), _make_lot("COLDONLY")], out_dir)
+    conn.close()
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert [l["id"] for l in doc["lots"]] == ["A", "COLDONLY"]

@@ -22,9 +22,9 @@ def test_end_to_end_over_real_observations(tmp_path):
 
     history = load_history(conn)
     assert history.latest_ts > 0
-    assert len(history.by_lot) > 500, "expected a citywide history"
+    assert len(history.recent) > 500, "expected a citywide history"
 
-    lot_ids = sorted(history.by_lot)
+    lot_ids = sorted(history.recent)
     grid = build_grid(Blend(history), lot_ids, history.latest_ts)
     blob = encode_grid(grid, generated_at=history.latest_ts + 30,
                        base_data_ts=history.latest_ts, lot_ids=lot_ids)
