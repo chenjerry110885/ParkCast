@@ -12,6 +12,20 @@ from parkcast.metadata import Lot
 from parkcast.scheduler import next_poll_ts, taipei_date
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cold_store(tmp_path, monkeypatch):
+    """Keep this module off the live Parquet corpus.
+
+    `publish_artifacts` reads `config.PARQUET_DIR`, so without this the suite
+    loads whatever the collector has archived on this machine -- slow,
+    non-deterministic, and, now that cold owns every day it holds a file for,
+    silently swallowing the hot observations these tests seed on 2026-09-04,
+    which is a real collected day. The cold store has its own tests; these are
+    about the scheduler.
+    """
+    monkeypatch.setattr(config, "PARQUET_DIR", tmp_path / "cold-isolated")
+
+
 def minute_of(ts: int) -> int:
     return (ts // 60) % 60
 

@@ -36,16 +36,11 @@ def test_history_separates_current_from_past(conn):
 # a connection that hands back rows in the worst order it can.
 
 
-class _Rows(list):
-    def fetchone(self):
-        return self[0]
-
-
 class _HostileConn:
     """Returns every SELECT in an order chosen to break an unsorted reader.
 
-    Only two queries are answered. `latest_ts` and `current` are derived from
-    the assembled series, not queried, so any third SELECT here means that
+    Only one query is answered. `latest_ts` and `current` are derived from the
+    assembled series, not queried, so any second SELECT here means that
     derivation has silently gone back to the hot store -- which is exactly what
     made both come back empty for a backtest cutoff older than 48 hours.
     """
@@ -54,10 +49,8 @@ class _HostileConn:
         self._rows = list(rows)
 
     def execute(self, sql, params=()):
-        if "MIN(data_ts)" in sql:
-            return _Rows([(min(ts for _, ts, _ in self._rows),)])
         if "data_ts, free_car" in sql:  # the by_lot scan
-            return _Rows(sorted(self._rows, key=lambda r: -r[1]))
+            return sorted(self._rows, key=lambda r: -r[1])
         raise AssertionError(f"load_history issued an unexpected query: {sql}")
 
 
@@ -641,13 +634,50 @@ def test_cold_observations_older_than_the_hot_window_are_kept(conn, tmp_path):
     assert len(h.by_lot["A"]) == 20, "10 hot + 10 genuinely older cold"
 
 
-def test_snap_to_slot_rounds_down_to_the_grid():
-    from parkcast.forecast import _snap_to_slot
+def test_taipei_day_start_agrees_with_day_bounds():
+    """The hot scan runs this per observation instead of building a datetime, so
+    the arithmetic shortcut has to give the same answer as the calendar."""
+    from parkcast.forecast import _taipei_day_start
 
-    start, _ = day_bounds(date(2026, 9, 4))
-    assert _snap_to_slot(start + 180) == start
-    assert _snap_to_slot(start + 300) == start + 300
-    assert _snap_to_slot(start + 599) == start + 300
+    for day in (date(2026, 1, 1), date(2026, 9, 4), date(2026, 12, 31)):
+        start, end = day_bounds(day)
+        assert _taipei_day_start(start) == start
+        assert _taipei_day_start(start + 180) == start
+        assert _taipei_day_start(end - 1) == start
+        assert _taipei_day_start(end) == end, "midnight belongs to the next day"
+
+
+def test_compacted_days_lists_the_days_with_a_parquet_file(tmp_path):
+    from parkcast.forecast import compacted_days
+
+    assert compacted_days(tmp_path) == frozenset()
+    _write_parquet_day(tmp_path, date(2026, 9, 3), {0: 5})
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5})
+    assert compacted_days(tmp_path) == {date(2026, 9, 3), date(2026, 9, 4)}
+
+
+def test_compacted_days_ignores_files_that_are_not_a_day(tmp_path):
+    """A stray file must not claim ownership of a day, nor raise."""
+    from parkcast.forecast import compacted_days
+
+    (tmp_path / "not-a-date.parquet").write_bytes(b"garbage")
+    (tmp_path / "2026-09-04.sqlite").write_bytes(b"not parquet")
+    assert compacted_days(tmp_path) == frozenset()
+
+
+def test_hot_rows_on_a_day_cold_owns_are_dropped_not_the_cold_ones(conn, tmp_path):
+    """The direction of the overlap rule, pinned: the cold copy is the one kept,
+    so a day's contribution stops depending on what the hot store still holds."""
+    day = date(2026, 9, 4)
+    start, _ = day_bounds(day)
+    for slot in range(3):
+        write(conn, start + slot * 300 + 180, free=5)   # true feed timestamps
+    compact_day(conn, day, tmp_path)
+
+    stamps = [ts for ts, _ in load_history(conn, cold_dir=tmp_path).by_lot["A"]]
+    assert stamps == [start, start + 300, start + 600], (
+        "the slot-aligned cold timestamps survive; the hot originals are skipped"
+    )
 
 
 def test_all_cold_is_kept_when_the_hot_store_is_empty(conn, tmp_path):
@@ -707,3 +737,105 @@ def test_combined_keeps_keys_present_in_only_one_side():
     b = Counts(); b.add("B", 1000, 5)
     merged = a.combined(b)
     assert merged.lot["A"] == [1, 1] and merged.lot["B"] == [1, 1]
+
+
+from parkcast.forecast import ColdCountCache
+
+
+def _write_parquet_day(tmp_path, day, free_by_slot, lot="A"):
+    """Compact a throwaway store into one daily Parquet file."""
+    start, _ = day_bounds(day)
+    src = store.connect(tmp_path / f"src-{day}.sqlite")
+    for slot, free in free_by_slot.items():
+        ts = start + slot * 300 + 180
+        store.insert_snapshot(
+            src, FeedSnapshot(ts, ts + 200, (Observation(lot, free, None),)), {lot: 50}
+        )
+    compact_day(src, day, tmp_path)
+    src.close()
+
+
+def test_cache_folds_each_file_exactly_once(tmp_path):
+    """A second call must not double-count - that would silently skew every rate."""
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5, 2: 0})
+    cache = ColdCountCache()
+    first = cache.counts_through(tmp_path, None)
+    second = cache.counts_through(tmp_path, None)
+    assert first.glob == [2, 3]
+    assert second.glob == [2, 3], "re-reading the same files must not double-count"
+
+
+def test_cache_folds_in_a_newly_appearing_day(tmp_path):
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5})
+    cache = ColdCountCache()
+    assert cache.counts_through(tmp_path, None).glob == [2, 2]
+    _write_parquet_day(tmp_path, date(2026, 9, 5), {0: 0})
+    assert cache.counts_through(tmp_path, None).glob == [2, 3], (
+        "a new day must be folded in without re-reading the old ones"
+    )
+
+
+def test_cache_does_not_reread_files_it_has_seen(tmp_path, monkeypatch):
+    """The whole point: per-tick cost must not grow with corpus age."""
+    import pyarrow.parquet as pq
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5})
+    cache = ColdCountCache()
+    cache.counts_through(tmp_path, None)
+
+    reads = []
+    real = pq.read_table
+    monkeypatch.setattr(pq, "read_table", lambda *a, **k: reads.append(a) or real(*a, **k))
+    cache.counts_through(tmp_path, None)
+    assert reads == [], "an already-folded file must never be read again"
+
+
+def test_cache_rereads_a_rewritten_day(tmp_path):
+    """Identity is name + mtime + size, so a recompacted day is not trusted stale."""
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5})
+    cache = ColdCountCache()
+    assert cache.counts_through(tmp_path, None).glob == [2, 2]
+
+    (tmp_path / "src-2026-09-04.sqlite").unlink()
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5, 2: 5, 3: 5})
+    assert cache.counts_through(tmp_path, None).glob == [6, 6], (
+        "the rewritten file is folded in again, on top of what it already gave"
+    )
+
+
+def test_cache_respects_before_ts(tmp_path):
+    start, _ = day_bounds(date(2026, 9, 4))
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5, 2: 5})
+    counts = ColdCountCache().counts_through(tmp_path, before_ts=start + 300)
+    assert counts.glob == [1, 1], "only the slot strictly before the cutoff counts"
+
+
+def test_cache_keeps_directories_apart(tmp_path):
+    """One cache, two cold stores: neither may inherit the other's totals."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    _write_parquet_day(a, date(2026, 9, 4), {0: 5, 1: 5})
+    _write_parquet_day(b, date(2026, 9, 4), {0: 0})
+    cache = ColdCountCache()
+    assert cache.counts_through(a, None).glob == [2, 2]
+    assert cache.counts_through(b, None).glob == [0, 1]
+    assert cache.counts_through(a, None).glob == [2, 2], "unchanged by the other dir"
+
+
+def test_a_compacted_day_survives_the_hot_store_pruning_past_it(conn, tmp_path):
+    """The bug a timestamp cutoff would have caused: a day folded while it was
+    still in the hot window must not vanish once the hot window moves past it."""
+    day = date(2026, 9, 4)
+    _write_parquet_day(tmp_path, day, {0: 5, 1: 5, 2: 0})
+
+    # Fold while a hot store still covers that day...
+    start, _ = day_bounds(day)
+    write(conn, start + 180, free=5)
+    load_history(conn, cold_dir=tmp_path)
+
+    # ...then with the hot store empty, as if it had pruned past the day.
+    empty = store.connect(tmp_path / "empty.sqlite")
+    h = load_history(empty, cold_dir=tmp_path)
+    empty.close()
+    assert h.counts.glob == [2, 3], (
+        "the compacted day must still be counted after hot prunes past it"
+    )

@@ -23,6 +23,7 @@ those same counts.
 """
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Protocol
 
@@ -34,6 +35,9 @@ class History:
     latest_ts: int
     current: dict[str, int]                     # newest reading per lot
     by_lot: dict[str, list[tuple[int, int]]]    # (data_ts, free_car), ordered
+    # Hits/totals over the whole corpus, cold and hot alike. Forward-referenced
+    # because `Counts` lives beside `week_bucket`, which it calls.
+    counts: "Counts"
 
 
 class Forecaster(Protocol):
@@ -69,25 +73,37 @@ def load_history(
     # slow non-covering plan the scan below exists to avoid; backtests run
     # offline and can afford it, the 5-minute publish cannot.
     cut = "" if before_ts is None else " AND data_ts < :before"
-    where = "" if before_ts is None else " WHERE data_ts < :before"
     params = {} if before_ts is None else {"before": before_ts}
 
-    row = conn.execute(f"SELECT MIN(data_ts) FROM observations{where}", params).fetchone()
-    earliest_hot = row[0]
-    cold_cutoff = _snap_to_slot(earliest_hot) if earliest_hot is not None else None
+    cold_counts = Counts()
+    owned: frozenset[int] = frozenset()
 
     if cold_dir is not None:
+        from parkcast.compact import day_bounds  # local: compact imports pyarrow
+
+        # Cold owns every Taipei day it holds a Parquet file for, and the hot
+        # scan below skips those days. The overlap used to be resolved the other
+        # way round -- keep all of hot, drop the cold rows it covers -- but that
+        # cutoff was derived from the hot store's own contents and slid forward
+        # as the store pruned, which makes the cold counts uncacheable. See
+        # `ColdCountCache` for the failure that causes. Ownership never moves
+        # once a file exists, so a day can be folded in exactly once.
+        owned = frozenset(day_bounds(day)[0] for day in compacted_days(cold_dir))
+
+        # The shared cache is valid only for the unfiltered serving path: a
+        # backtest cutoff must neither leave truncated counts behind for the
+        # collector nor inherit the collector's uncut ones.
+        cache = _COLD_CACHE if before_ts is None else ColdCountCache()
+        cold_counts = cache.counts_through(cold_dir, before_ts)
+
         for lot_id, ts, free in _read_cold(cold_dir):
-            # The hot store is authoritative for anything it still retains; taking
-            # the cold copy too would count the same reading twice at a different
-            # timestamp, silently double-weighting the most recent 48 hours.
-            if cold_cutoff is not None and ts >= cold_cutoff:
-                continue
             # The cutoff has to bind here too, or a backtest would train on the
             # cold copy of exactly the days it is scored against.
             if before_ts is not None and ts >= before_ts:
                 continue
             by_lot[lot_id].append((ts, free))
+
+    hot_counts = Counts()
 
     # Deliberately unordered. `idx_obs_data_ts` is non-covering, so ORDER BY
     # data_ts turns a table scan into one random primary-key lookup per row:
@@ -99,7 +115,12 @@ def load_history(
         f"SELECT lot_id, data_ts, free_car FROM observations "
         f"WHERE free_car IS NOT NULL{cut}", params
     ):
+        # Taking the hot copy of a day cold already owns would count the same
+        # reading twice at two timestamps, silently double-weighting it.
+        if owned and _taipei_day_start(ts) in owned:
+            continue
         by_lot[lot_id].append((ts, free))
+        hot_counts.add(lot_id, ts, free)
 
     for series in by_lot.values():
         series.sort()
@@ -121,41 +142,64 @@ def load_history(
         for lot_id, series in by_lot.items()
         if series[-1][0] == latest_ts
     }
-    return History(latest_ts, current, dict(by_lot))
+    return History(latest_ts, current, dict(by_lot), cold_counts.combined(hot_counts))
 
 
-def _snap_to_slot(ts: int) -> int:
-    """Round a timestamp down to the 5-minute slot grid the cold store uses.
+_TAIPEI_OFFSET = 8 * 3600
+_SECONDS_PER_DAY = 24 * 3600
 
-    compact_day writes slot-aligned timestamps, so comparing a hot timestamp
-    against cold ones is only exact once the hot side is snapped the same way.
+
+def _taipei_day_start(ts: int) -> int:
+    """Epoch second of Taipei midnight on the day containing `ts`.
+
+    Taipei is a fixed UTC+8 with no DST, so this is exact integer arithmetic and
+    agrees with `compact.day_bounds` for the corresponding date -- without a
+    `datetime` per observation. The hot scan runs it ~85,000 times a tick.
     """
-    from datetime import datetime
+    return ((ts + _TAIPEI_OFFSET) // _SECONDS_PER_DAY) * _SECONDS_PER_DAY - _TAIPEI_OFFSET
 
-    from parkcast.compact import SLOT_SECONDS, day_bounds
 
-    day = datetime.fromtimestamp(ts, config.TAIPEI_TZ).date()
-    start, _ = day_bounds(day)
-    return start + ((ts - start) // SLOT_SECONDS) * SLOT_SECONDS
+def compacted_days(cold_dir: Path) -> frozenset[date]:
+    """The Taipei dates the cold store owns -- one per daily Parquet file.
+
+    Cheap by construction: the day is the file name, so this never opens a file
+    and its cost is one directory listing regardless of corpus age.
+    """
+    days = set()
+    for path in Path(cold_dir).glob("*.parquet"):
+        try:
+            days.add(date.fromisoformat(path.stem))
+        except ValueError:
+            continue        # not one of ours; `_read_parquet_day` skips it too
+    return frozenset(days)
 
 
 def _read_cold(cold_dir: Path):
     """Yield (lot_id, data_ts, free_car) from daily Parquet files, skipping nulls."""
+    for path in sorted(Path(cold_dir).glob("*.parquet")):
+        yield from _read_parquet_day(path)
+
+
+def _read_parquet_day(path: Path):
+    """Yield (lot_id, data_ts, free_car) from one daily Parquet file.
+
+    A stem that is not an ISO date is not a day this project wrote, so it is
+    skipped rather than parsed: one stray file in the cold directory must not be
+    able to break a publish.
+    """
     import pyarrow.parquet as pq
 
     from parkcast.compact import SLOTS_PER_DAY, SLOT_SECONDS, day_bounds
-    from datetime import date
 
-    for path in sorted(Path(cold_dir).glob("*.parquet")):
-        try:
-            day = date.fromisoformat(path.stem)
-        except ValueError:
-            continue
-        start, _ = day_bounds(day)
-        for row in pq.read_table(path, columns=["lot_id", "free_car"]).to_pylist():
-            for slot, free in enumerate(row["free_car"]):
-                if free is not None and slot < SLOTS_PER_DAY:
-                    yield row["lot_id"], start + slot * SLOT_SECONDS, free
+    try:
+        day = date.fromisoformat(path.stem)
+    except ValueError:
+        return
+    start, _ = day_bounds(day)
+    for row in pq.read_table(path, columns=["lot_id", "free_car"]).to_pylist():
+        for slot, free in enumerate(row["free_car"]):
+            if free is not None and slot < SLOTS_PER_DAY:
+                yield row["lot_id"], start + slot * SLOT_SECONDS, free
 
 
 BUCKETS_PER_WEEK = 7 * 24 * 60 // config.CLIMATOLOGY_BUCKET_MIN
@@ -209,6 +253,63 @@ class Counts:
                 target[0] += counter[0]; target[1] += counter[1]
             merged.glob[0] += src.glob[0]; merged.glob[1] += src.glob[1]
         return merged
+
+
+class ColdCountCache:
+    """Counts for the cold corpus, folded in once per file.
+
+    A completed day's Parquet never changes, so its contribution to the
+    climatology counts is fixed. Re-reading every file on every tick cost
+    1.44 s per daily file -- 526 s per tick after a year, against a 300 s
+    slot. Folding each file exactly once makes the per-tick cost flat.
+
+    A file is identified by name, mtime and size, so a rewritten day is
+    re-read rather than silently trusted.
+
+    The overlap with the hot store is resolved by DATE OWNERSHIP, not by a
+    timestamp cutoff: cold owns every day that has a Parquet file, and the hot
+    stream skips those days. A day's ownership never changes once its file
+    exists, which is what makes folding-once correct.
+
+    A timestamp cutoff would NOT be safe here. The old cutoff was the earliest
+    hot observation, which slides forward as the store prunes. Day D's file is
+    written at midnight while hot still covers D, so every row would be skipped
+    as "already hot" and the file marked folded -- and 48 hours later, when hot
+    has pruned D, those rows would be owed but never re-read. Every day would
+    be silently lost from climatology in turn.
+
+    Counts are held per directory. Production has exactly one cold directory,
+    but a single accumulator would answer for whichever directories it happened
+    to have been asked about -- so a second directory's totals would arrive
+    carrying the first one's, which is wrong rather than merely wasteful.
+    """
+
+    def __init__(self) -> None:
+        self._by_dir: dict[Path, tuple[Counts, set[tuple[str, int, int]]]] = {}
+
+    def counts_through(self, cold_dir: Path, before_ts: int | None) -> Counts:
+        key = Path(cold_dir)
+        entry = self._by_dir.get(key)
+        if entry is None:
+            entry = self._by_dir[key] = (Counts(), set())
+        counts, folded = entry
+
+        for path in sorted(key.glob("*.parquet")):
+            stat = path.stat()
+            file_key = (path.name, stat.st_mtime_ns, stat.st_size)
+            if file_key in folded:
+                continue
+            for lot_id, ts, free in _read_parquet_day(path):
+                if before_ts is not None and ts >= before_ts:
+                    continue
+                counts.add(lot_id, ts, free)
+            folded.add(file_key)
+        return counts
+
+
+# The serving path's cache, shared across ticks. Only ever used when `before_ts`
+# is None -- see `load_history`.
+_COLD_CACHE = ColdCountCache()
 
 
 def _shrink(counter: list[int], prior_rate: float, strength: float) -> float:
