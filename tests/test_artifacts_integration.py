@@ -1,7 +1,6 @@
 """End-to-end check against a snapshot of the live database, when one exists."""
 import json
-import shutil
-from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -14,10 +13,30 @@ from parkcast.metadata import Lot
 LIVE_DB = config.DB_PATH
 
 
+def _snapshot(dest) -> None:
+    """Copy the live store via SQLite's own backup API, not a file copy.
+
+    The live database is in WAL mode and a collector may be writing to it
+    every 5 minutes. A plain file copy can land mid-write and capture a torn
+    snapshot -- this test flaked once for exactly that reason. `backup` takes
+    a consistent snapshot instead, and the source is opened read-only so this
+    never touches the live database read-write.
+    """
+    src = sqlite3.connect(f"file:{LIVE_DB}?mode=ro", uri=True)
+    try:
+        dst = sqlite3.connect(dest)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+
 @pytest.mark.skipif(not LIVE_DB.exists(), reason="no collected data on this machine")
 def test_end_to_end_over_real_observations(tmp_path):
     copy = tmp_path / "snap.sqlite"
-    shutil.copy(LIVE_DB, copy)
+    _snapshot(copy)
     conn = store.connect(copy)
 
     history = load_history(conn)
