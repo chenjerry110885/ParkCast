@@ -429,11 +429,25 @@ Expected: failures on `recent`, the tail bound, and `counts`.
 
 - [ ] **Step 4: Rework `load_history` and `Climatology`**
 
-`load_history` streams every observation once — cold (via the cache when `before_ts is None`, else
-a fresh cache) then hot — feeding `Counts` as it goes and keeping only the last
-`config.HISTORY_TAIL` per lot in `recent`. Use a `deque(maxlen=...)` per lot so the bound is
-enforced by the data structure rather than by remembering to trim, then materialise each to a
-sorted list.
+`load_history` feeds `Counts` from the cold cache plus a stream of the hot store (skipping days cold
+owns), and fills `recent` with the last `config.HISTORY_TAIL` observations per lot. Use a
+`deque(maxlen=...)` per lot so the bound is enforced by the data structure rather than by remembering
+to trim, then materialise each to a sorted list.
+
+**Where `recent` is sourced from, and why it differs by path.** Once the cold counts are cached they
+are not re-streamed, so cold observations cannot feed `recent` on a normal tick. That is fine on the
+serving path: the hot store always holds 48 hours and the tail is 2 hours, so hot alone is always
+sufficient — and `recent` must therefore be filled from the hot store WITHOUT the date-ownership
+skip, or it would be nearly empty for the first hours after each midnight rollover (cold owns the
+day just compacted, so the ownership skip would drop almost everything hot still holds).
+
+The ownership skip applies to `Counts` only, where double-counting would actually skew a rate.
+`recent` is a tail, not a tally, so re-seeing an observation there is harmless.
+
+On the backtest path (`before_ts` set, cache bypassed) the hot store may hold nothing at all for an
+old cutoff, so `recent` is filled from the full cold+hot stream. This preserves the existing property
+that a backtest cutoff older than the 48-hour window still yields a Persistence baseline — there is
+already a test for that and it must keep passing.
 
 `latest_ts` and `current` continue to derive from `recent` (a `before_ts` backtest whose cutoff
 predates the 48-hour hot window must still have a Persistence baseline — that property has a test
