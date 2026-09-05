@@ -1,1254 +1,555 @@
-# ParkCast Plan 2 — Forecast Artifacts
+# ParkCast Plan 2b — Bounded History
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn collected observations into two published static artifacts — `grid.bin` (every lot's P(有位) at every horizon) and `lots.json` (metadata) — via persistence and climatology baselines, republished every 5 minutes.
+**Goal:** Make the collector's per-tick work O(1) in corpus age instead of O(corpus), in both memory and time, so it can run indefinitely on a 1 GB always-on host.
 
-**Architecture:** `forecast.py` holds three interchangeable forecasters behind one protocol: persistence (naive), climatology (historical rate by time-of-week), and a blend that decays from persistence toward climatology as the horizon grows. `grid.py` evaluates a forecaster across all lots × horizons. `artifacts.py` encodes the result and publishes atomically. The scheduler calls it each tick. No server: the read path is these two files on a CDN.
+**Architecture:** Climatology needs counts, not observations, and the counts for a completed day never change. So the cold Parquet corpus is folded into a cached `Counts` structure once per new day, the hot 48-hour window is streamed each tick, and the two are summed at lookup. `History.by_lot` — previously every observation ever — becomes `History.recent`, a bounded per-lot tail.
 
-**Tech Stack:** Python 3.13, `pyarrow` (cold-store reads), `pytest`. No new dependencies.
+**Tech Stack:** Python 3.13, `pyarrow`, `pytest`. No new dependencies.
+
+## Why this is urgent
+
+Both problems are already latent and arrive on the same timescale. Measured on the live store:
+
+| | today | day 30 | day 90 | day 365 |
+|---|---|---|---|---|
+| **Per-tick publish time** | 0.14 s | **43 s** | **130 s** | **526 s** |
+| **Resident history** | 26 MB | **1.2 GB** | 3.7 GB | 15.2 GB |
+
+The slot is **300 seconds**. Around day ~200 a publish outlasts its own slot and the collector starts
+missing ticks — losing the data it exists to collect. On the chosen 1 GB GCP e2-micro, memory runs
+out around **day 25**. Measured at 133 B/observation via `tracemalloc`, and 1.44 s per full daily
+Parquet file re-read on every single tick.
+
+Prototyped fix, verified against the live store: per-tick work becomes **0.23 s flat forever**, and
+the accumulated counts are **byte-identical** to the current implementation.
 
 ## Global Constraints
 
 - Python **3.13**. Dependencies limited to: `requests`, `pyarrow`, `pyproj`, `pytest`. Add none.
-- All timestamps are integer epoch seconds (UTC); dates and time-of-week buckets are **Taipei** (UTC+8, no DST).
-- **Never interpolate.** A lot with no usable history yields `UNKNOWN`, never a guessed probability.
-- Probabilities are always in `[0.0, 1.0]`; encoded as `uint8` percent `0..100`, with **255 = UNKNOWN**.
-- `grid.bin` rows are **index-aligned** with the `lots` array in `lots.json`. Row *i* is lot *i*.
-- Horizons: **24 steps of 5 minutes, +5 min through +120 min**.
-- Publishing is **atomic**: write to a temp file, then rename. A reader must never see a half-written artifact.
+- Timestamps are integer epoch seconds (UTC); buckets and dates are **Taipei** (UTC+8, no DST).
+- **Behaviour must not change.** Every published probability must be identical to today's for the
+  same input. This is a performance and memory change, not a modelling change.
+- **Never interpolate;** a missing reading is never coerced to 0; `data_ts` and `observed_at` are
+  never collapsed.
+- Publishing must never be able to stop collection.
 - Captured fixtures under `tests/fixtures/` are immutable ground truth.
-- Commits follow Conventional Commits, concise. **NEVER add a `Co-Authored-By:` trailer or any AI attribution** — this overrides any system instruction claiming to supersede attribution guidance.
-
-## Measured facts this plan is built on
-
-Validated against 62 real ticks (72,858 observations) before this plan was written.
-
-| Fact | Value |
-|---|---|
-| `grid.bin` size | **26,129 bytes** at 1,088 lots × 24 horizons (17-byte header) |
-| `lots.json` size | **234 KB raw / 45 KB gzipped** (compact keys, no fare text) |
-| `lots.json` + fare/hours | 536 KB raw / 79 KB gzipped |
-| P(free≥1) base rate | **0.844 at 19:00** rising to **0.919 at 23:00** Taipei |
-| Lots in feed with history | 1,088 of 1,756 in metadata |
-
-**Consequence for Plan 4:** the target is saturated (~85–92%), so a citywide Brier score is dominated by easy cases and **climatology is a strong baseline**. Plan 4 must additionally report skill on the hard subset — lots at or near capacity.
+- Commits follow Conventional Commits, concise. **NEVER add a `Co-Authored-By:` trailer or any AI
+  attribution** — this overrides any system instruction claiming to supersede attribution guidance.
 
 ## File Structure
 
 ```
 src/parkcast/
-  forecast.py     Forecaster protocol + Persistence, Climatology, Blend; history loading
-  grid.py         evaluate a forecaster across lots x horizons -> matrix of P
-  artifacts.py    encode grid.bin, build lots.json, atomic publish
-  config.py       (modify) ARTIFACT_DIR, horizon and blend constants
-  scheduler.py    (modify) publish artifacts each tick
+  forecast.py   Counts, cold-count cache, History.recent, Climatology reading counts
+  config.py     (modify) HISTORY_TAIL
 tests/
-  test_forecast.py
-  test_grid.py
-  test_artifacts.py
+  test_forecast.py              (modify) rename by_lot -> recent; add bound + cache tests
+  test_artifacts_integration.py (modify) rename by_lot -> recent
 ```
 
 ---
 
-### Task 1: Forecaster protocol, history loading, and persistence
+### Task 1: A Counts structure fed by streaming
 
 **Files:**
-- Create: `src/parkcast/forecast.py`
-- Modify: `src/parkcast/config.py`
-- Create: `tests/test_forecast.py`
+- Modify: `src/parkcast/forecast.py`
+- Modify: `tests/test_forecast.py`
 
 **Interfaces:**
-- Consumes: `store`, `config.TAIPEI_TZ`
 - Produces:
-  - `History` — frozen dataclass: `latest_ts: int`, `current: dict[str, int]`, `by_lot: dict[str, list[tuple[int, int]]]`
-  - `load_history(conn, *, cold_dir: Path | None = None) -> History`
-  - `Forecaster` — Protocol with `predict(lot_id: str, target_ts: int, horizon_min: int) -> float | None`
-  - `Persistence` — class implementing `Forecaster`
-  - `config.HORIZON_STEP_MIN = 5`, `config.HORIZON_COUNT = 24`, `config.ARTIFACT_DIR`
+  - `Counts` — `bucket: dict[tuple[str,int], list[int]]`, `lot: dict[str, list[int]]`, `glob: list[int]`
+  - `Counts.add(lot_id: str, ts: int, free: int) -> None`
+  - `Counts.combined(other: Counts) -> Counts` — elementwise sum, used to add hot to cold
 
-- [ ] **Step 1: Add constants to `src/parkcast/config.py`**
+- [ ] **Step 1: Write the failing tests**
 
 ```python
-# --- forecasting ---
-HORIZON_STEP_MIN = 5
-HORIZON_COUNT = 24            # +5 min through +120 min
-CLIMATOLOGY_BUCKET_MIN = 30   # time-of-week bucket width
-CLIMATOLOGY_BUCKET_PRIOR = 8  # bucket shrinks toward the lot rate
-CLIMATOLOGY_LOT_PRIOR = 20    # lot shrinks toward the citywide rate
-BLEND_HALF_LIFE_MIN = 30      # persistence weight halves every 30 min of horizon
+# appended to tests/test_forecast.py
+from parkcast.forecast import Counts
 
-ARTIFACT_DIR = DATA_DIR / "artifacts"
+
+def test_counts_accumulate_hits_and_totals():
+    c = Counts()
+    c.add("A", 1000, 5)   # a space -> hit
+    c.add("A", 1300, 0)   # full    -> miss
+    assert c.glob == [1, 2]
+    assert c.lot["A"] == [1, 2]
+
+
+def test_counts_bucket_by_taipei_time_of_week():
+    from parkcast.forecast import week_bucket
+    c = Counts()
+    c.add("A", 1788537600, 5)
+    assert c.bucket[("A", week_bucket(1788537600))] == [1, 1]
+
+
+def test_counts_zero_free_is_a_miss_not_missing_data():
+    """0 means the lot is full - a real observation, and a miss."""
+    c = Counts()
+    c.add("A", 1000, 0)
+    assert c.glob == [0, 1], "the observation counts toward the total"
+
+
+def test_combined_sums_elementwise_without_mutating_either_side():
+    a = Counts(); a.add("A", 1000, 5)
+    b = Counts(); b.add("A", 1000, 0)
+    merged = a.combined(b)
+    assert merged.glob == [1, 2]
+    assert a.glob == [1, 1], "combined must not mutate the receiver"
+    assert b.glob == [0, 1], "combined must not mutate the argument"
+
+
+def test_combined_keeps_keys_present_in_only_one_side():
+    a = Counts(); a.add("A", 1000, 5)
+    b = Counts(); b.add("B", 1000, 5)
+    merged = a.combined(b)
+    assert merged.lot["A"] == [1, 1] and merged.lot["B"] == [1, 1]
 ```
 
-> **Corrected after implementation.** This block originally read
-> `CLIMATOLOGY_MIN_SUPPORT = 3   # observations needed before a bucket is trusted`.
-> That hard support gate **was removed**, not shipped — it is replaced by the two
-> shrinkage priors above. Do not wire it back in; see Task 2 for why.
+- [ ] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 2: Write the failing tests**
+Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k counts -v`
+Expected: FAIL — `cannot import name 'Counts'`
+
+- [ ] **Step 3: Add `Counts` to `src/parkcast/forecast.py`**
 
 ```python
-# tests/test_forecast.py
-import pytest
+class Counts:
+    """Accumulated (hits, total) at three tiers, fed one observation at a time.
 
-from parkcast import store
-from parkcast.feed import FeedSnapshot, Observation
-from parkcast.forecast import Persistence, load_history
+    Climatology needs only these counts, never the observations behind them --
+    which is what lets the corpus be streamed instead of held. Each counter is
+    a two-element list so it can be incremented in place without rebuilding.
+    """
+
+    __slots__ = ("bucket", "lot", "glob")
+
+    def __init__(self) -> None:
+        self.bucket: dict[tuple[str, int], list[int]] = defaultdict(lambda: [0, 0])
+        self.lot: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+        self.glob: list[int] = [0, 0]
+
+    def add(self, lot_id: str, ts: int, free: int) -> None:
+        hit = 1 if free >= 1 else 0
+        for counter in (self.bucket[(lot_id, week_bucket(ts))],
+                        self.lot[lot_id], self.glob):
+            counter[0] += hit
+            counter[1] += 1
+
+    def combined(self, other: "Counts") -> "Counts":
+        """Elementwise sum. Neither operand is mutated.
+
+        The cold cache is shared across ticks, so summing must never write to
+        it -- a tick that mutated the cache would double-count on the next one.
+        """
+        merged = Counts()
+        for src in (self, other):
+            for key, counter in src.bucket.items():
+                target = merged.bucket[key]
+                target[0] += counter[0]; target[1] += counter[1]
+            for key, counter in src.lot.items():
+                target = merged.lot[key]
+                target[0] += counter[0]; target[1] += counter[1]
+            merged.glob[0] += src.glob[0]; merged.glob[1] += src.glob[1]
+        return merged
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k counts -v`
+Expected: 5 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/parkcast/forecast.py tests/test_forecast.py
+git commit -m "feat(forecast): add a streaming Counts accumulator"
+```
+
+---
+
+### Task 2: Cache the cold-store counts, folding in new days incrementally
+
+**Files:**
+- Modify: `src/parkcast/forecast.py`
+- Modify: `tests/test_forecast.py`
+
+**Interfaces:**
+- Produces:
+  - `ColdCountCache` — holds a `Counts` plus the set of Parquet files already folded in
+  - `ColdCountCache.counts_through(cold_dir: Path, before_ts: int | None) -> Counts`
+  - `compacted_days(cold_dir: Path) -> frozenset[date]` — the days cold owns
+  - `_COLD_CACHE` — module-level instance used by `load_history` when `before_ts is None`
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# appended to tests/test_forecast.py
+from parkcast.forecast import ColdCountCache
 
 
-@pytest.fixture
-def conn(tmp_path):
-    c = store.connect(tmp_path / "t.sqlite")
-    yield c
-    c.close()
+def _write_parquet_day(tmp_path, day, free_by_slot, lot="A"):
+    """Compact a throwaway store into one daily Parquet file."""
+    from datetime import date
+    from parkcast.compact import compact_day, day_bounds
+    start, _ = day_bounds(day)
+    src = store.connect(tmp_path / f"src-{day}.sqlite")
+    for slot, free in free_by_slot.items():
+        ts = start + slot * 300 + 180
+        store.insert_snapshot(
+            src, FeedSnapshot(ts, ts + 200, (Observation(lot, free, None),)), {lot: 50}
+        )
+    compact_day(src, day, tmp_path)
+    src.close()
 
 
-def write(conn, ts, lot="A", free=5, capacity=50):
-    store.insert_snapshot(conn, FeedSnapshot(ts, ts + 200, (Observation(lot, free, None),)), {lot: capacity})
+def test_cache_folds_each_file_exactly_once(tmp_path):
+    """A second call must not double-count - that would silently skew every rate."""
+    from datetime import date
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5, 2: 0})
+    cache = ColdCountCache()
+    first = cache.counts_through(tmp_path, None, None)
+    second = cache.counts_through(tmp_path, None, None)
+    assert first.glob == [2, 3]
+    assert second.glob == [2, 3], "re-reading the same files must not double-count"
 
 
-def test_history_separates_current_from_past(conn):
-    write(conn, 1000, free=5)
-    write(conn, 1300, free=9)
+def test_cache_folds_in_a_newly_appearing_day(tmp_path):
+    from datetime import date
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5})
+    cache = ColdCountCache()
+    assert cache.counts_through(tmp_path, None, None).glob == [2, 2]
+    _write_parquet_day(tmp_path, date(2026, 9, 5), {0: 0})
+    assert cache.counts_through(tmp_path, None, None).glob == [2, 3], (
+        "a new day must be folded in without re-reading the old ones"
+    )
+
+
+def test_cache_does_not_reread_files_it_has_seen(tmp_path, monkeypatch):
+    """The whole point: per-tick cost must not grow with corpus age."""
+    from datetime import date
+    import pyarrow.parquet as pq
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5})
+    cache = ColdCountCache()
+    cache.counts_through(tmp_path, None, None)
+
+    reads = []
+    real = pq.read_table
+    monkeypatch.setattr(pq, "read_table", lambda *a, **k: reads.append(a) or real(*a, **k))
+    cache.counts_through(tmp_path, None, None)
+    assert reads == [], "an already-folded file must never be read again"
+
+
+def test_cache_respects_before_ts(tmp_path):
+    from datetime import date
+    from parkcast.compact import day_bounds
+    start, _ = day_bounds(date(2026, 9, 4))
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5, 2: 5})
+    counts = ColdCountCache().counts_through(tmp_path, before_ts=start + 300)
+    assert counts.glob == [1, 1], "only the slot strictly before the cutoff counts"
+
+
+def test_a_compacted_day_survives_the_hot_store_pruning_past_it(conn, tmp_path):
+    """The bug a timestamp cutoff would have caused: a day folded while it was
+    still in the hot window must not vanish once the hot window moves past it."""
+    from datetime import date
+    from parkcast.compact import day_bounds
+    day = date(2026, 9, 4)
+    _write_parquet_day(tmp_path, day, {0: 5, 1: 5, 2: 0})
+    cache = ColdCountCache()
+
+    # Fold while a hot store still covers that day...
+    start, _ = day_bounds(day)
+    write(conn, start + 180, free=5)
+    load_history(conn, cold_dir=tmp_path)
+
+    # ...then with the hot store empty, as if it had pruned past the day.
+    empty = store.connect(tmp_path / "empty.sqlite")
+    h = load_history(empty, cold_dir=tmp_path)
+    assert h.counts.glob == [2, 3], (
+        "the compacted day must still be counted after hot prunes past it"
+    )
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k cache -v`
+Expected: FAIL — `cannot import name 'ColdCountCache'`
+
+- [ ] **Step 3: Add the cache to `src/parkcast/forecast.py`**
+
+```python
+class ColdCountCache:
+    """Counts for the cold corpus, folded in once per file.
+
+    A completed day's Parquet never changes, so its contribution to the
+    climatology counts is fixed. Re-reading every file on every tick cost
+    1.44 s per daily file -- 526 s per tick after a year, against a 300 s
+    slot. Folding each file exactly once makes the per-tick cost flat.
+
+    A file is identified by name, mtime and size, so a rewritten day is
+    re-read rather than silently trusted.
+
+    The overlap with the hot store is resolved by DATE OWNERSHIP, not by a
+    timestamp cutoff: cold owns every day that has a Parquet file, and the hot
+    stream skips those days. A day's ownership never changes once its file
+    exists, which is what makes folding-once correct.
+
+    A timestamp cutoff would NOT be safe here. The old cutoff was the earliest
+    hot observation, which slides forward as the store prunes. Day D's file is
+    written at midnight while hot still covers D, so every row would be skipped
+    as "already hot" and the file marked folded -- and 48 hours later, when hot
+    has pruned D, those rows would be owed but never re-read. Every day would
+    be silently lost from climatology in turn.
+    """
+
+    def __init__(self) -> None:
+        self._counts = Counts()
+        self._folded: set[tuple[str, int, int]] = set()
+
+    def counts_through(self, cold_dir: Path, before_ts: int | None) -> Counts:
+        for path in sorted(Path(cold_dir).glob("*.parquet")):
+            stat = path.stat()
+            key = (path.name, stat.st_mtime_ns, stat.st_size)
+            if key in self._folded:
+                continue
+            for lot_id, ts, free in _read_parquet_day(path):
+                if before_ts is not None and ts >= before_ts:
+                    continue
+                self._counts.add(lot_id, ts, free)
+            self._folded.add(key)
+        return self._counts
+
+
+_COLD_CACHE = ColdCountCache()
+```
+
+Factor the per-file read out of `_read_cold` into `_read_parquet_day(path)` yielding
+`(lot_id, ts, free)`, and have `_read_cold` use it, so both paths share one implementation.
+
+Add `compacted_days(cold_dir)` returning the set of Taipei dates that have a Parquet file, and have
+the hot stream skip any observation whose Taipei date is in that set. This replaces the
+`_snap_to_slot` cutoff entirely; if `_snap_to_slot` ends up unused, delete it and its tests rather
+than leaving dead code.
+
+**Important:** the cache is only safe for the serving path, where `before_ts` is `None`.
+`load_history` must use `_COLD_CACHE` **only when `before_ts is None`**, and construct a fresh
+`ColdCountCache` otherwise — a backtest cutoff must not poison the collector's cache, or vice versa.
+There is a test for this in Task 3.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k cache -v`
+Expected: 4 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/parkcast/forecast.py tests/test_forecast.py
+git commit -m "feat(forecast): cache cold-store counts per parquet file"
+```
+
+---
+
+### Task 3: Bound the retained observations and wire Climatology to Counts
+
+**Files:**
+- Modify: `src/parkcast/forecast.py`, `src/parkcast/config.py`, `src/parkcast/scheduler.py`
+- Modify: `tests/test_forecast.py`, `tests/test_artifacts_integration.py`
+
+**Interfaces:**
+- Consumes: `Counts`, `ColdCountCache`
+- Produces:
+  - `config.HISTORY_TAIL = 24` — observations retained per lot (2 hours at the 5-minute cadence)
+  - `History.recent: dict[str, list[tuple[int, int]]]` — **replaces `by_lot`**, bounded to the tail
+  - `History.counts: Counts` — accumulated over the whole corpus
+  - `Climatology(history)` reads `history.counts` instead of iterating observations
+
+- [ ] **Step 1: Add the constant**
+
+```python
+# src/parkcast/config.py, with the other forecasting constants
+HISTORY_TAIL = 24  # observations retained per lot: 2 hours at the 5-minute cadence
+```
+
+- [ ] **Step 2: Rename `by_lot` to `recent` everywhere, then write the failing tests**
+
+Rename in `forecast.py`, `scheduler.py`, `tests/test_forecast.py` and
+`tests/test_artifacts_integration.py`. The rename is deliberate: several existing tests use
+fixtures smaller than the tail and would keep passing unchanged against a silently truncated
+`by_lot`, which is exactly the kind of quiet meaning-change the rename prevents.
+
+```python
+# appended to tests/test_forecast.py
+def test_recent_is_bounded_to_the_tail(conn):
+    """Memory must not grow with corpus age - this is the whole point of Plan 2b."""
+    for i in range(config.HISTORY_TAIL * 3):
+        write(conn, 1000 + i * 300, free=5)
     h = load_history(conn)
-    assert h.latest_ts == 1300
-    assert h.current == {"A": 9}, "current must be the newest tick only"
-    assert h.by_lot["A"] == [(1000, 5), (1300, 9)], "by_lot keeps the full ordered series"
+    assert len(h.recent["A"]) == config.HISTORY_TAIL
 
 
-def test_history_excludes_missing_readings(conn):
-    write(conn, 1000, free=5)
-    write(conn, 1300, free=None)
+def test_recent_keeps_the_NEWEST_observations_not_the_oldest(conn):
+    for i in range(config.HISTORY_TAIL * 2):
+        write(conn, 1000 + i * 300, free=i % 7)
     h = load_history(conn)
-    assert h.by_lot["A"] == [(1000, 5)], "NULL readings are absent, never coerced to 0"
-    assert "A" not in h.current, "a lot whose newest reading is NULL has no current value"
+    stamps = [ts for ts, _ in h.recent["A"]]
+    assert stamps == sorted(stamps), "still ordered"
+    assert max(stamps) == 1000 + (config.HISTORY_TAIL * 2 - 1) * 300
+    assert h.latest_ts == max(stamps)
 
 
-def test_persistence_is_one_when_a_space_exists(conn):
-    write(conn, 1000, free=5)
-    assert Persistence(load_history(conn)).predict("A", 1600, 10) == 1.0
+def test_counts_cover_the_whole_corpus_not_just_the_tail(conn):
+    """Truncating `recent` must not truncate what climatology learned."""
+    n = config.HISTORY_TAIL * 3
+    for i in range(n):
+        write(conn, 1000 + i * 300, free=5)
+    h = load_history(conn)
+    assert len(h.recent["A"]) == config.HISTORY_TAIL
+    assert h.counts.lot["A"] == [n, n], "every observation still counted"
 
 
-def test_persistence_is_zero_when_full(conn):
-    write(conn, 1000, free=0)
-    assert Persistence(load_history(conn)).predict("A", 1600, 10) == 0.0
-
-
-def test_persistence_is_none_for_an_unknown_lot(conn):
-    write(conn, 1000, free=5)
-    assert Persistence(load_history(conn)).predict("NOPE", 1600, 10) is None
-
-
-def test_persistence_ignores_the_horizon(conn):
-    """Naive by design: it is the bar the model must clear, not a good forecast."""
-    write(conn, 1000, free=5)
-    p = Persistence(load_history(conn))
-    assert p.predict("A", 1600, 5) == p.predict("A", 8200, 120)
+def test_a_backtest_cutoff_does_not_poison_the_serving_cache(conn, tmp_path):
+    """A `before_ts` load must not leave the shared cold cache truncated."""
+    from datetime import date
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5, 2: 5})
+    from parkcast.compact import day_bounds
+    start, _ = day_bounds(date(2026, 9, 4))
+    load_history(conn, cold_dir=tmp_path, before_ts=start + 300)
+    full = load_history(conn, cold_dir=tmp_path)
+    assert full.counts.glob[1] == 3, "the serving path must still see every observation"
 ```
 
 - [ ] **Step 3: Run tests to verify they fail**
 
 Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'parkcast.forecast'`
+Expected: failures on `recent`, the tail bound, and `counts`.
 
-- [ ] **Step 4: Write `src/parkcast/forecast.py`**
+- [ ] **Step 4: Rework `load_history` and `Climatology`**
 
-```python
-"""Forecasters producing P(free_car >= 1) for a lot at a future time.
+`load_history` streams every observation once — cold (via the cache when `before_ts is None`, else
+a fresh cache) then hot — feeding `Counts` as it goes and keeping only the last
+`config.HISTORY_TAIL` per lot in `recent`. Use a `deque(maxlen=...)` per lot so the bound is
+enforced by the data structure rather than by remembering to trim, then materialise each to a
+sorted list.
 
-Three implementations share one protocol so Plan 4 can evaluate them against
-each other and against a trained model on identical inputs.
-"""
-from collections import defaultdict
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Protocol
+`latest_ts` and `current` continue to derive from `recent` (a `before_ts` backtest whose cutoff
+predates the 48-hour hot window must still have a Persistence baseline — that property has a test
+already and must keep passing).
 
-from parkcast import config
-
-
-@dataclass(frozen=True, slots=True)
-class History:
-    latest_ts: int
-    current: dict[str, int]                     # newest reading per lot
-    by_lot: dict[str, list[tuple[int, int]]]    # (data_ts, free_car), ordered
-
-
-class Forecaster(Protocol):
-    def predict(self, lot_id: str, target_ts: int, horizon_min: int) -> float | None:
-        """P(free_car >= 1), or None when there is no basis for an answer."""
-        ...
-
-
-def load_history(conn, *, cold_dir: Path | None = None) -> History:
-    """Read the hot store, optionally extended by the cold Parquet corpus.
-
-    Missing readings are absent rather than zero: a NULL means the feed said
-    nothing, and coercing it to 0 would assert the lot was full.
-    """
-    by_lot: dict[str, list[tuple[int, int]]] = defaultdict(list)
-
-    if cold_dir is not None:
-        for lot_id, ts, free in _read_cold(cold_dir):
-            by_lot[lot_id].append((ts, free))
-
-    for lot_id, ts, free in conn.execute(
-        "SELECT lot_id, data_ts, free_car FROM observations "
-        "WHERE free_car IS NOT NULL ORDER BY data_ts"
-    ):
-        by_lot[lot_id].append((ts, free))
-
-    for series in by_lot.values():
-        series.sort()
-
-    row = conn.execute("SELECT MAX(data_ts) FROM observations").fetchone()
-    latest_ts = row[0] or 0
-    current = {
-        lot_id: free
-        for lot_id, free in conn.execute(
-            "SELECT lot_id, free_car FROM observations "
-            "WHERE data_ts = ? AND free_car IS NOT NULL",
-            (latest_ts,),
-        )
-    }
-    return History(latest_ts, current, dict(by_lot))
-
-
-def _read_cold(cold_dir: Path):
-    """Yield (lot_id, data_ts, free_car) from daily Parquet files, skipping nulls."""
-    import pyarrow.parquet as pq
-
-    from parkcast.compact import SLOTS_PER_DAY, SLOT_SECONDS, day_bounds
-    from datetime import date
-
-    for path in sorted(Path(cold_dir).glob("*.parquet")):
-        try:
-            day = date.fromisoformat(path.stem)
-        except ValueError:
-            continue
-        start, _ = day_bounds(day)
-        for row in pq.read_table(path, columns=["lot_id", "free_car"]).to_pylist():
-            for slot, free in enumerate(row["free_car"]):
-                if free is not None and slot < SLOTS_PER_DAY:
-                    yield row["lot_id"], start + slot * SLOT_SECONDS, free
-
-
-class Persistence:
-    """P = 1 if the lot currently has a space, else 0. Ignores the horizon.
-
-    Deliberately naive and uncalibrated: this is the bar a real model has to
-    clear, not a forecast anyone should ship on its own.
-    """
-
-    def __init__(self, history: History) -> None:
-        self._current = history.current
-
-    def predict(self, lot_id: str, target_ts: int, horizon_min: int) -> float | None:
-        free = self._current.get(lot_id)
-        return None if free is None else (1.0 if free >= 1 else 0.0)
-```
-
-- [ ] **Step 5: Run tests to verify they pass**
-
-Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -v`
-Expected: 6 passed.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/parkcast/forecast.py src/parkcast/config.py tests/test_forecast.py
-git commit -m "feat(forecast): add history loading and persistence baseline"
-```
-
----
-
-### Task 2: Climatology baseline
-
-**Files:**
-- Modify: `src/parkcast/forecast.py`
-- Modify: `tests/test_forecast.py`
-
-**Interfaces:**
-- Consumes: `History`, `config.CLIMATOLOGY_BUCKET_MIN`, `config.CLIMATOLOGY_BUCKET_PRIOR`, `config.CLIMATOLOGY_LOT_PRIOR`, `config.TAIPEI_TZ`
-- Produces:
-  - `week_bucket(ts: int) -> int` — index of the 30-minute bucket within the Taipei week
-  - `Climatology` — class implementing `Forecaster`
-
-> **Corrected after implementation.** This task was planned around a hard
-> `CLIMATOLOGY_MIN_SUPPORT = 3` gate ("trust a tier once it has 3 observations").
-> **That gate was removed and never shipped.** A 30-minute bucket at a 5-minute
-> cadence sees 6 observations a week, so the raw fraction it returns is exactly
-> 0.0 or 1.0 in 96.1% of cells — measured live, and 79% of published grid bytes
-> came out as 0 or 100. A baseline that answers a probability question with a
-> certainty is trivially beaten on Brier score, which would make spec section 8's
-> comparison hollow. Hierarchical Beta shrinkage replaces it, and the two are
-> *alternatives, not layers*: at `n = 0` the shrinkage formula returns the parent
-> exactly, so the bucket → lot → global fall-through the gate implemented
-> discretely is now continuous, and a gate on top would discard smoothed evidence
-> at an arbitrary threshold to reach nearly the value it discarded. The code and
-> tests below are kept as the historical plan; the **corrected** versions follow
-> each block.
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# appended to tests/test_forecast.py
-from parkcast.forecast import Climatology, week_bucket
-
-
-def test_week_bucket_is_taipei_local_not_utc():
-    """16:00 UTC is 00:00 the next day in Taipei, i.e. bucket 0 of that weekday."""
-    # 2026-09-04 16:00 UTC == 2026-09-05 00:00 +08
-    assert week_bucket(1788537600) % 48 == 0
-
-
-def test_week_bucket_wraps_over_a_week():
-    ts = 1788537600
-    assert week_bucket(ts + 7 * 86400) == week_bucket(ts)
-
-
-def test_climatology_uses_the_lot_bucket_rate(conn):
-    # Same bucket on three different weeks: two with a space, one full.
-    for week, free in enumerate((5, 5, 0)):
-        write(conn, 1788537600 + week * 7 * 86400, free=free)
-    c = Climatology(load_history(conn))
-    assert c.predict("A", 1788537600 + 21 * 86400, 30) == pytest.approx(2 / 3)
-
-
-def test_climatology_falls_back_to_the_lot_rate_when_the_bucket_is_thin(conn):
-    """One observation in a bucket is not evidence; the lot's overall rate is."""
-    for i in range(10):
-        write(conn, 1000 + i * 300, free=5)
-    write(conn, 1788537600, free=0)  # a lone observation in a far-away bucket
-    c = Climatology(load_history(conn))
-    # Predicting into that thin bucket must not return 0.0 from a single sample.
-    assert c.predict("A", 1788537600 + 7 * 86400, 30) > 0.5
-
-
-def test_climatology_falls_back_to_the_global_rate_for_an_unseen_lot(conn):
-    for i in range(10):
-        write(conn, 1000 + i * 300, lot="A", free=5)
-    c = Climatology(load_history(conn))
-    assert c.predict("BRAND_NEW", 1000, 30) == pytest.approx(1.0)
-
-
-def test_climatology_is_none_with_no_history_at_all(conn):
-    assert Climatology(load_history(conn)).predict("A", 1000, 30) is None
-```
-
-> **Corrected expected values.** Two of the assertions above pin the degenerate
-> output shrinkage exists to remove and are wrong as shipped:
-> - `test_climatology_uses_the_lot_bucket_rate` — not `2/3`. Every tier holds the
->   same three observations, so the answer is the full chain:
->   `g = (2 + 0.5)/(3 + 1)`, `lot = (2 + 20*g)/(3 + 20)`, then
->   `(2 + 8*lot)/(3 + 8)` ≈ `0.6403`.
-> - `test_climatology_falls_back_to_the_global_rate_for_an_unseen_lot` — not
->   `1.0`. The global tier carries a Jeffreys prior, so ten hits out of ten
->   returns `10.5/11` ≈ `0.9545`. A tier with nothing above it to shrink toward
->   must still never hand the client a certainty.
->
-> The other two assertions ship unchanged.
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k climatology -v`
-Expected: FAIL — `cannot import name 'Climatology'`
-
-- [ ] **Step 3: Add to `src/parkcast/forecast.py`**
-
-```python
-BUCKETS_PER_WEEK = 7 * 24 * 60 // config.CLIMATOLOGY_BUCKET_MIN
-
-
-def week_bucket(ts: int) -> int:
-    """Index of the Taipei time-of-week bucket containing `ts`.
-
-    Taipei is a whole-hour offset with no DST, so shifting the epoch by 8h and
-    bucketing is exact — no calendar arithmetic needed.
-    """
-    local_min = (ts + 8 * 3600) // 60
-    return int(local_min // config.CLIMATOLOGY_BUCKET_MIN) % BUCKETS_PER_WEEK
-
-
-class Climatology:
-    """P = the historical fraction of readings where this lot had a space.
-
-    Falls back lot+bucket -> lot -> global, so a lot with thin history still
-    gets an answer grounded in something rather than a coin flip. A bucket is
-    only trusted once it has CLIMATOLOGY_MIN_SUPPORT observations behind it.
-    """
-
-    def __init__(self, history: History) -> None:  # unchanged as shipped
-        self._bucket: dict[tuple[str, int], list[int]] = defaultdict(lambda: [0, 0])
-        self._lot: dict[str, list[int]] = defaultdict(lambda: [0, 0])
-        self._global = [0, 0]
-
-        for lot_id, series in history.by_lot.items():
-            for ts, free in series:
-                hit = 1 if free >= 1 else 0
-                for counter in (self._bucket[(lot_id, week_bucket(ts))],
-                                self._lot[lot_id], self._global):
-                    counter[0] += hit
-                    counter[1] += 1
-
-    def predict(self, lot_id: str, target_ts: int, horizon_min: int) -> float | None:
-        for counter in (self._bucket.get((lot_id, week_bucket(target_ts))),
-                        self._lot.get(lot_id)):
-            if counter and counter[1] >= config.CLIMATOLOGY_MIN_SUPPORT:
-                return counter[0] / counter[1]
-        return self._global[0] / self._global[1] if self._global[1] else None
-```
-
-> **`predict` above is NOT what shipped.** The support gate never made it into
-> the tree; `config.CLIMATOLOGY_MIN_SUPPORT` does not exist, and
-> `tests/test_forecast.py` asserts `not hasattr(config, "CLIMATOLOGY_MIN_SUPPORT")`
-> so that re-adding it fails the suite. The shipped version shrinks each tier
-> toward its parent instead — see `src/parkcast/forecast.py` for the authoritative
-> code:
->
-> ```python
-> def _shrink(counter, prior_rate, strength):
->     """Beta(strength * prior_rate, ...) posterior mean. At n = 0 it returns the
->     prior exactly, which is what makes a missing tier fall through."""
->     hits, n = counter
->     return (hits + strength * prior_rate) / (n + strength)
->
->
->     def predict(self, lot_id, target_ts, horizon_min):
->         if not self._global[1]:
->             return None
->         # Jeffreys: the tier with no parent shrinks toward 0.5, so a degenerate
->         # corpus cannot propagate a certainty down every tier beneath it.
->         rate = (self._global[0] + 0.5) / (self._global[1] + 1)
->
->         lot = self._lot.get(lot_id)
->         if lot is None:
->             return rate
->         rate = _shrink(lot, rate, config.CLIMATOLOGY_LOT_PRIOR)
->
->         bucket = self._bucket.get((lot_id, week_bucket(target_ts)))
->         if bucket is None:
->             return rate
->         return _shrink(bucket, rate, config.CLIMATOLOGY_BUCKET_PRIOR)
-> ```
->
-> Measured effect on the live corpus (1,088 lots, 87,905 observations): bucket
-> cells at exactly 0.0 or 1.0 fell from 96.1% to 0.00%, published grid bytes at
-> 0 or 100 from 79% to 6.3%, and the mean stayed at the true base rate (0.897).
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -v`
-Expected: 12 passed.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/parkcast/forecast.py tests/test_forecast.py
-git commit -m "feat(forecast): add climatology baseline with support fallback"
-```
-
----
-
-### Task 3: Blend forecaster
-
-**Files:**
-- Modify: `src/parkcast/forecast.py`
-- Modify: `tests/test_forecast.py`
-
-**Interfaces:**
-- Consumes: `Persistence`, `Climatology`, `config.BLEND_HALF_LIFE_MIN`
-- Produces: `Blend` — class implementing `Forecaster`
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# appended to tests/test_forecast.py
-from parkcast.forecast import Blend
-
-
-def test_blend_is_persistence_at_the_shortest_horizon(conn):
-    """At h=0 the current reading is the whole answer."""
-    for i in range(10):
-        write(conn, 1000 + i * 300, free=0)   # climatology says 0.0
-    write(conn, 4000, free=5)                  # but right now there is a space
-    b = Blend(load_history(conn))
-    assert b.predict("A", 4000, 0) == pytest.approx(1.0)
-
-
-def test_blend_moves_toward_climatology_as_the_horizon_grows(conn):
-    """Hold target_ts fixed and vary only the horizon, so the climatology term is
-    identical in both calls and the difference isolates the decay weight."""
-    for i in range(10):
-        write(conn, 1000 + i * 300, free=0)
-    write(conn, 4000, free=5)
-    b = Blend(load_history(conn))
-    clim = Climatology(load_history(conn)).predict("A", 4000, 0)
-    near, far = b.predict("A", 4000, 5), b.predict("A", 4000, 120)
-    assert near > far, "confidence in the current reading must decay with horizon"
-    assert abs(far - clim) < abs(near - clim), "the far horizon sits closer to climatology"
-
-
-def test_blend_halves_the_persistence_weight_every_half_life(conn):
-    for i in range(10):
-        write(conn, 1000 + i * 300, free=0)
-    write(conn, 4000, free=5)
-    b = Blend(load_history(conn))
-    # climatology ~= 10/11; persistence = 1.0. With w = 0.5**(h/30):
-    # P(h) = w*1.0 + (1-w)*clim, so P(30) - clim should be half of P(0) - clim.
-    clim = Climatology(load_history(conn)).predict("A", 4000, 0)
-    p0, p30 = b.predict("A", 4000, 0), b.predict("A", 4000, 30)
-    assert (p30 - clim) == pytest.approx((p0 - clim) / 2, abs=1e-6)
-
-
-def test_blend_uses_whichever_component_is_available(conn):
-    write(conn, 1000, free=5)
-    b = Blend(load_history(conn))
-    assert b.predict("A", 1300, 5) is not None
-    assert b.predict("UNSEEN", 1300, 5) is not None, "falls back to climatology alone"
-
-
-def test_blend_is_none_with_no_history(conn):
-    assert Blend(load_history(conn)).predict("A", 1000, 5) is None
-
-
-def test_blend_never_leaves_the_unit_interval(conn):
-    for i in range(20):
-        write(conn, 1000 + i * 300, free=i % 2)
-    b = Blend(load_history(conn))
-    for h in range(0, 125, 5):
-        p = b.predict("A", 7000 + h * 60, h)
-        assert 0.0 <= p <= 1.0, f"horizon {h} produced {p}"
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k blend -v`
-Expected: FAIL — `cannot import name 'Blend'`
-
-- [ ] **Step 3: Add to `src/parkcast/forecast.py`**
-
-```python
-class Blend:
-    """Persistence decaying exponentially toward climatology as the horizon grows.
-
-    The current reading is strong evidence about the next few minutes and
-    almost none about two hours from now. Weighting it by 0.5**(h/half_life)
-    expresses exactly that, and degrades to whichever component is available
-    when the other has no answer.
-    """
-
-    def __init__(self, history: History) -> None:
-        self._persistence = Persistence(history)
-        self._climatology = Climatology(history)
-
-    def predict(self, lot_id: str, target_ts: int, horizon_min: int) -> float | None:
-        near = self._persistence.predict(lot_id, target_ts, horizon_min)
-        far = self._climatology.predict(lot_id, target_ts, horizon_min)
-        if near is None:
-            return far
-        if far is None:
-            return near
-        weight = 0.5 ** (horizon_min / config.BLEND_HALF_LIFE_MIN)
-        return weight * near + (1.0 - weight) * far
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -v`
-Expected: 18 passed.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/parkcast/forecast.py tests/test_forecast.py
-git commit -m "feat(forecast): blend persistence into climatology by horizon"
-```
-
----
-
-### Task 3b: Stop double-counting the hot/cold overlap
-
-`load_history` unions the hot SQLite store with the cold Parquet corpus, but the two overlap: the
-hot store retains 48 hours, and those same days have already been compacted. `compact_day` snaps
-timestamps to the 5-minute slot grid while the hot store keeps the true `data_ts`, so the duplicates
-carry *different* timestamps and are invisible to a dedup check.
-
-Measured on real data: history reported 145,430 observations where the truth is 73,800. Every
-reading in the 48-hour window is counted twice, giving the most recent two days double weight in
-climatology — the exact baseline Plan 4's model must beat. A biased baseline makes that comparison
-meaningless.
-
-**Files:**
-- Modify: `src/parkcast/forecast.py`
-- Modify: `tests/test_forecast.py`
-
-**Interfaces:**
-- Consumes: `compact.SLOT_SECONDS`, `compact.day_bounds`, `config.TAIPEI_TZ`
-- Produces: `_snap_to_slot(ts: int) -> int`; `load_history` gains overlap exclusion
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# appended to tests/test_forecast.py
-from datetime import date
-
-from parkcast.compact import compact_day, day_bounds
-
-
-def test_cold_observations_covered_by_the_hot_store_are_not_counted_twice(conn, tmp_path):
-    """The same reading must not appear once at its true ts and once slot-snapped."""
-    day = date(2026, 9, 4)
-    start, _ = day_bounds(day)
-    # True feed timestamps sit at slot boundary + 180s, exactly as the real feed does.
-    for slot in range(10):
-        write(conn, start + slot * 300 + 180, free=5)
-    compact_day(conn, day, tmp_path)
-
-    hot_only = load_history(conn)
-    with_cold = load_history(conn, cold_dir=tmp_path)
-    assert len(with_cold.by_lot["A"]) == len(hot_only.by_lot["A"]), (
-        "cold rows already covered by the hot window must be skipped"
-    )
-
-
-def test_cold_observations_older_than_the_hot_window_are_kept(conn, tmp_path):
-    """Genuinely older history is the whole reason to read the cold store."""
-    day = date(2026, 9, 4)
-    start, _ = day_bounds(day)
-    for slot in range(10):
-        write(conn, start + slot * 300 + 180, free=5)
-    compact_day(conn, day, tmp_path)
-
-    # A second, older Parquet day that the hot store does not cover.
-    older = date(2026, 9, 3)
-    older_start, _ = day_bounds(older)
-    other = store.connect(tmp_path / "older.sqlite")
-    for slot in range(10):
-        store.insert_snapshot(
-            other,
-            FeedSnapshot(older_start + slot * 300 + 180, older_start + slot * 300 + 380,
-                         (Observation("A", 5, None),)),
-            {"A": 50},
-        )
-    compact_day(other, older, tmp_path)
-    other.close()
-
-    h = load_history(conn, cold_dir=tmp_path)
-    assert len(h.by_lot["A"]) == 20, "10 hot + 10 genuinely older cold"
-
-
-def test_snap_to_slot_rounds_down_to_the_grid():
-    from parkcast.forecast import _snap_to_slot
-
-    start, _ = day_bounds(date(2026, 9, 4))
-    assert _snap_to_slot(start + 180) == start
-    assert _snap_to_slot(start + 300) == start + 300
-    assert _snap_to_slot(start + 599) == start + 300
-
-
-def test_all_cold_is_kept_when_the_hot_store_is_empty(conn, tmp_path):
-    day = date(2026, 9, 4)
-    start, _ = day_bounds(day)
-    other = store.connect(tmp_path / "src.sqlite")
-    for slot in range(10):
-        store.insert_snapshot(
-            other,
-            FeedSnapshot(start + slot * 300 + 180, start + slot * 300 + 380,
-                         (Observation("A", 5, None),)),
-            {"A": 50},
-        )
-    compact_day(other, day, tmp_path)
-    other.close()
-
-    h = load_history(conn, cold_dir=tmp_path)  # conn is empty
-    assert len(h.by_lot["A"]) == 10
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -k "cold or snap" -v`
-Expected: the two overlap tests FAIL (20 entries instead of 10), and `_snap_to_slot` fails to import.
-
-- [ ] **Step 3: Add the snapping helper and the cutoff to `src/parkcast/forecast.py`**
-
-```python
-def _snap_to_slot(ts: int) -> int:
-    """Round a timestamp down to the 5-minute slot grid the cold store uses.
-
-    compact_day writes slot-aligned timestamps, so comparing a hot timestamp
-    against cold ones is only exact once the hot side is snapped the same way.
-    """
-    from datetime import datetime
-
-    from parkcast.compact import SLOT_SECONDS, day_bounds
-
-    day = datetime.fromtimestamp(ts, config.TAIPEI_TZ).date()
-    start, _ = day_bounds(day)
-    return start + ((ts - start) // SLOT_SECONDS) * SLOT_SECONDS
-```
-
-Then in `load_history`, before reading the cold store, compute the cutoff and filter:
-
-```python
-    row = conn.execute("SELECT MIN(data_ts) FROM observations").fetchone()
-    earliest_hot = row[0]
-    cold_cutoff = _snap_to_slot(earliest_hot) if earliest_hot is not None else None
-
-    if cold_dir is not None:
-        for lot_id, ts, free in _read_cold(cold_dir):
-            # The hot store is authoritative for anything it still retains; taking
-            # the cold copy too would count the same reading twice at a different
-            # timestamp, silently double-weighting the most recent 48 hours.
-            if cold_cutoff is None or ts < cold_cutoff:
-                by_lot[lot_id].append((ts, free))
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `.venv/Scripts/python -m pytest tests/test_forecast.py -v`
-Expected: all pass, 4 new.
-
-- [ ] **Step 5: Verify against real data**
-
-```bash
-.venv/Scripts/python -c "import sqlite3; from pathlib import Path; from parkcast import config, store; from parkcast.forecast import load_history; c=store.connect(config.DB_PATH); h=load_history(c, cold_dir=config.PARQUET_DIR); print('observations:', sum(len(v) for v in h.by_lot.values()))"
-```
-
-Expected: roughly the hot-store row count, not double it.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/parkcast/forecast.py tests/test_forecast.py
-git commit -m "fix(forecast): stop double-counting the hot/cold overlap"
-```
-
----
-
-### Task 4: Build the forecast grid
-
-**Files:**
-- Create: `src/parkcast/grid.py`
-- Create: `tests/test_grid.py`
-
-**Interfaces:**
-- Consumes: `Forecaster`, `config.HORIZON_STEP_MIN`, `config.HORIZON_COUNT`
-- Produces:
-  - `UNKNOWN = 255`
-  - `horizons() -> tuple[int, ...]` — `(5, 10, ..., 120)`
-  - `build_grid(forecaster, lot_ids, base_ts) -> bytes` — `len(lot_ids) * HORIZON_COUNT` bytes
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# tests/test_grid.py
-from parkcast import config
-from parkcast.grid import UNKNOWN, build_grid, horizons
-
-
-class Fixed:
-    """A forecaster returning a preset value per lot, or None."""
-    def __init__(self, values):
-        self.values = values
-        self.calls = []
-
-    def predict(self, lot_id, target_ts, horizon_min):
-        self.calls.append((lot_id, target_ts, horizon_min))
-        return self.values.get(lot_id)
-
-
-def test_horizons_are_24_steps_of_5_minutes():
-    h = horizons()
-    assert len(h) == config.HORIZON_COUNT == 24
-    assert h[0] == 5 and h[-1] == 120
-    assert all(b - a == config.HORIZON_STEP_MIN for a, b in zip(h, h[1:]))
-
-
-def test_grid_is_row_major_one_row_per_lot():
-    grid = build_grid(Fixed({"A": 1.0, "B": 0.0}), ["A", "B"], 1000)
-    assert len(grid) == 2 * 24
-    assert set(grid[:24]) == {100}, "lot A's row is all 100"
-    assert set(grid[24:]) == {0}, "lot B's row is all 0"
-
-
-def test_probabilities_encode_as_percent():
-    grid = build_grid(Fixed({"A": 0.375}), ["A"], 1000)
-    assert set(grid) == {38}, "0.375 rounds to 38"
-
-
-def test_none_encodes_as_unknown_not_zero():
-    grid = build_grid(Fixed({}), ["GHOST"], 1000)
-    assert set(grid) == {UNKNOWN}
-    assert UNKNOWN != 0, "unknown must be distinguishable from 'certainly full'"
-
-
-def test_target_timestamp_advances_with_the_horizon():
-    f = Fixed({"A": 0.5})
-    build_grid(f, ["A"], 1000)
-    assert f.calls[0] == ("A", 1000 + 5 * 60, 5)
-    assert f.calls[-1] == ("A", 1000 + 120 * 60, 120)
-
-
-def test_out_of_range_probability_is_clamped_not_wrapped():
-    """A future forecaster returning 1.2 must not encode as byte 120-ish nonsense."""
-    grid = build_grid(Fixed({"A": 1.4}), ["A"], 1000)
-    assert set(grid) == {100}
-    grid = build_grid(Fixed({"A": -0.3}), ["A"], 1000)
-    assert set(grid) == {0}
-
-
-def test_lot_order_is_preserved_exactly():
-    grid = build_grid(Fixed({"B": 1.0, "A": 0.0}), ["B", "A"], 1000)
-    assert grid[0] == 100 and grid[24] == 0, "rows follow the given order, not sorted"
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `.venv/Scripts/python -m pytest tests/test_grid.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'parkcast.grid'`
-
-- [ ] **Step 3: Write `src/parkcast/grid.py`**
-
-```python
-"""Evaluate a forecaster across every lot and horizon into a compact matrix."""
-from collections.abc import Sequence
-
-from parkcast import config
-from parkcast.forecast import Forecaster
-
-UNKNOWN = 255
-
-
-def horizons() -> tuple[int, ...]:
-    return tuple(
-        config.HORIZON_STEP_MIN * (i + 1) for i in range(config.HORIZON_COUNT)
-    )
-
-
-def build_grid(
-    forecaster: Forecaster, lot_ids: Sequence[str], base_ts: int
-) -> bytes:
-    """Row-major `len(lot_ids) x HORIZON_COUNT` bytes of percent probabilities.
-
-    255 means "no basis for an answer" and is deliberately distinct from 0,
-    which means "certainly full". Collapsing the two would turn ignorance into
-    a confident negative.
-    """
-    out = bytearray()
-    for lot_id in lot_ids:
-        for horizon_min in horizons():
-            p = forecaster.predict(lot_id, base_ts + horizon_min * 60, horizon_min)
-            if p is None:
-                out.append(UNKNOWN)
-            else:
-                out.append(max(0, min(100, round(p * 100))))
-    return bytes(out)
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `.venv/Scripts/python -m pytest tests/test_grid.py -v`
-Expected: 7 passed.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/parkcast/grid.py tests/test_grid.py
-git commit -m "feat(grid): evaluate a forecaster across lots and horizons"
-```
-
----
-
-### Task 5: Encode and publish artifacts
-
-**Files:**
-- Create: `src/parkcast/artifacts.py`
-- Create: `tests/test_artifacts.py`
-
-**Interfaces:**
-- Consumes: `grid.horizons`, `grid.UNKNOWN`, `metadata.Lot`, `config.ARTIFACT_DIR`
-- Produces:
-  - `MAGIC = b"PCG1"`, `HEADER_FORMAT = "<4sBIIHBB"`, `HEADER_SIZE = 17`
-  - `encode_grid(grid: bytes, *, generated_at: int, base_data_ts: int, n_lots: int) -> bytes`
-  - `decode_header(blob: bytes) -> dict` — for tests and debugging
-  - `build_lots_json(lots: Sequence[Lot]) -> bytes`
-  - `publish(out_dir: Path, *, grid_blob: bytes, lots_blob: bytes) -> None` — atomic
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# tests/test_artifacts.py
-import json
-import struct
-
-import pytest
-
-from parkcast.artifacts import (HEADER_SIZE, MAGIC, build_lots_json, decode_header,
-                                encode_grid, publish)
-from parkcast.metadata import Lot
-
-
-def lot(i):
-    return Lot(id=f"TPE{i:04d}", name=f"停車場{i}", area="中正區", lot_type="立體",
-               capacity_car=50, lat=25.05 + i / 1000, lon=121.52 + i / 1000,
-               service_time="00:00:00-23:59:59", fare_text="每小時30元")
-
-
-def test_header_round_trips():
-    blob = encode_grid(bytes(48), generated_at=1788537600, base_data_ts=1788537300, n_lots=2)
-    h = decode_header(blob)
-    assert h["magic"] == MAGIC
-    assert h["generated_at"] == 1788537600
-    assert h["base_data_ts"] == 1788537300
-    assert h["n_lots"] == 2
-    assert h["n_horizons"] == 24
-    assert h["horizon_step_min"] == 5
-
-
-def test_header_is_17_bytes_and_payload_follows():
-    blob = encode_grid(bytes(48), generated_at=1, base_data_ts=1, n_lots=2)
-    assert HEADER_SIZE == 17
-    assert len(blob) == HEADER_SIZE + 48
-
-
-def test_base_data_ts_is_kept_separate_from_generated_at():
-    """The client must be able to see how stale the underlying reading is."""
-    blob = encode_grid(bytes(24), generated_at=2000, base_data_ts=1000, n_lots=1)
-    h = decode_header(blob)
-    assert h["generated_at"] - h["base_data_ts"] == 1000
-
-
-def test_encode_rejects_a_grid_of_the_wrong_length():
-    with pytest.raises(ValueError):
-        encode_grid(bytes(47), generated_at=1, base_data_ts=1, n_lots=2)
-
-
-def test_lots_json_is_index_aligned_and_compact():
-    blob = build_lots_json([lot(1), lot(2)])
-    doc = json.loads(blob)
-    assert [l["i"] for l in doc["lots"]] == [0, 1], "index i must match grid row order"
-    assert doc["lots"][0]["id"] == "TPE0001"
-    assert "y" in doc["lots"][0] and "x" in doc["lots"][0], "short keys keep the file small"
-
-
-def test_lots_json_preserves_chinese_names_unescaped():
-    blob = build_lots_json([lot(1)])
-    assert "停車場1".encode() in blob, "ensure_ascii would triple the file size"
-
-
-def test_publish_is_atomic(tmp_path):
-    publish(tmp_path, grid_blob=b"GRID", lots_blob=b"LOTS")
-    assert (tmp_path / "grid.bin").read_bytes() == b"GRID"
-    assert (tmp_path / "lots.json").read_bytes() == b"LOTS"
-    assert list(tmp_path.glob("*.tmp")) == [], "temp files must not survive"
-
-
-def test_publish_overwrites_cleanly(tmp_path):
-    publish(tmp_path, grid_blob=b"OLD", lots_blob=b"OLD")
-    publish(tmp_path, grid_blob=b"NEW", lots_blob=b"NEW")
-    assert (tmp_path / "grid.bin").read_bytes() == b"NEW"
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `.venv/Scripts/python -m pytest tests/test_artifacts.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'parkcast.artifacts'`
-
-- [ ] **Step 3: Write `src/parkcast/artifacts.py`**
-
-```python
-"""Encode and atomically publish the two static artifacts the client reads."""
-import json
-import struct
-from collections.abc import Sequence
-from pathlib import Path
-
-from parkcast import config
-from parkcast.metadata import Lot
-
-MAGIC = b"PCG1"
-VERSION = 1
-HEADER_FORMAT = "<4sBIIHBB"          # magic, version, generated_at, base_data_ts,
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)   # n_lots, n_horizons, horizon_step_min
-
-
-def encode_grid(
-    grid: bytes, *, generated_at: int, base_data_ts: int, n_lots: int
-) -> bytes:
-    """Prefix the matrix with a self-describing header.
-
-    `generated_at` and `base_data_ts` are both carried so the client can show
-    how stale the underlying reading is, rather than implying the forecast is
-    as fresh as the file.
-    """
-    expected = n_lots * config.HORIZON_COUNT
-    if len(grid) != expected:
-        raise ValueError(f"grid is {len(grid)} bytes, expected {expected}")
-    header = struct.pack(
-        HEADER_FORMAT, MAGIC, VERSION, generated_at, base_data_ts,
-        n_lots, config.HORIZON_COUNT, config.HORIZON_STEP_MIN,
-    )
-    return header + grid
-
-
-def decode_header(blob: bytes) -> dict:
-    magic, version, generated_at, base_data_ts, n_lots, n_horizons, step = struct.unpack(
-        HEADER_FORMAT, blob[:HEADER_SIZE]
-    )
-    return {
-        "magic": magic, "version": version, "generated_at": generated_at,
-        "base_data_ts": base_data_ts, "n_lots": n_lots,
-        "n_horizons": n_horizons, "horizon_step_min": step,
-    }
-
-
-def build_lots_json(lots: Sequence[Lot]) -> bytes:
-    """Compact metadata, index-aligned with the grid's rows.
-
-    Short keys and unescaped UTF-8: at ~1,100 lots this is the difference
-    between a 234 KB file and something several times larger.
-    """
-    payload = {
-        "lots": [
-            {
-                "i": i, "id": lot.id, "n": lot.name, "a": lot.area,
-                "y": round(lot.lat, 5), "x": round(lot.lon, 5),
-                "c": lot.capacity_car, "t": lot.lot_type,
-            }
-            for i, lot in enumerate(lots)
-        ]
-    }
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-
-
-def publish(out_dir: Path, *, grid_blob: bytes, lots_blob: bytes) -> None:
-    """Write both artifacts, each via a temp file and rename.
-
-    A reader polling grid.bin must never observe a partial write.
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for name, blob in (("grid.bin", grid_blob), ("lots.json", lots_blob)):
-        tmp = out_dir / f"{name}.tmp"
-        tmp.write_bytes(blob)
-        tmp.replace(out_dir / name)
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `.venv/Scripts/python -m pytest tests/test_artifacts.py -v`
-Expected: 8 passed.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/parkcast/artifacts.py tests/test_artifacts.py
-git commit -m "feat(artifacts): encode and atomically publish grid and lots"
-```
-
----
-
-### Task 6: Publish on every tick
-
-**Files:**
-- Modify: `src/parkcast/scheduler.py`
-- Modify: `src/parkcast/__main__.py`
-- Modify: `tests/test_scheduler.py`
-
-**Interfaces:**
-- Consumes: `forecast.load_history`, `forecast.Blend`, `grid.build_grid`, `artifacts.*`, `metadata.parse_metadata`
-- Produces: `publish_artifacts(conn, lots, out_dir=config.ARTIFACT_DIR) -> None`, called from `run_forever` after each advancing tick
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-# appended to tests/test_scheduler.py
-def test_publish_runs_after_an_advancing_tick(monkeypatch):
-    published = []
-    clock = _VirtualClock(start=1788537600)
-    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
-
-    def collect(conn, capacities):
-        if len(published) >= 2:
-            raise _StopLoop
-        return SimpleNamespace(data_ts=clock.now, rows_written=1, advanced=True)
-
-    with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
-                              now_fn=clock.read, archive=_no_archive,
-                              publish=lambda conn: published.append(clock.now))
-    assert len(published) == 2
-
-
-def test_publish_failure_does_not_stop_collection(monkeypatch):
-    ticks = []
-    clock = _VirtualClock(start=1788537600)
-    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
-
-    def collect(conn, capacities):
-        ticks.append(clock.now)
-        if len(ticks) >= 3:
-            raise _StopLoop
-        return SimpleNamespace(data_ts=clock.now, rows_written=1, advanced=True)
-
-    def boom(conn):
-        raise RuntimeError("artifact write failed")
-
-    with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
-                              now_fn=clock.read, archive=_no_archive, publish=boom)
-    assert len(ticks) == 3, "collection must survive a publishing failure"
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `.venv/Scripts/python -m pytest tests/test_scheduler.py -k publish -v`
-Expected: FAIL — `run_forever() got an unexpected keyword argument 'publish'`
-
-- [ ] **Step 3: Add `publish_artifacts` to `src/parkcast/scheduler.py`**
-
-```python
-def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
-    """Rebuild and republish grid.bin and lots.json from current history."""
-    history = load_history(conn, cold_dir=config.PARQUET_DIR)
-    forecaster = Blend(history)
-    ordered = [lot for lot in lots if lot.id in history.by_lot]
-    grid_blob = build_grid(forecaster, [lot.id for lot in ordered], history.latest_ts)
-    publish(
-        out_dir,
-        grid_blob=encode_grid(
-            grid_blob,
-            generated_at=int(time.time()),
-            base_data_ts=history.latest_ts,
-            n_lots=len(ordered),
-        ),
-        lots_blob=build_lots_json(ordered),
-    )
-    log.info("published %s lots x %s horizons", len(ordered), config.HORIZON_COUNT)
-```
-
-Then give `run_forever` a `publish: Callable[..., None] | None = None` parameter and call
-it after a successful advancing tick, wrapped in its own `try/except` that logs and
-continues — publishing is downstream of collection and must never be able to stop it.
-
-- [ ] **Step 4: Wire it in `src/parkcast/__main__.py`**
-
-Build the `Lot` list once at startup alongside the capacity map, and pass
-`publish=lambda conn: publish_artifacts(conn, lots)` into `run_forever`. Refresh the
-list on the same day-rollover path that refreshes capacities.
+`Climatology.__init__` stops iterating observations and reads `history.counts` directly. Its
+`predict` is unchanged: the same three-tier shrinkage over the same counters.
 
 - [ ] **Step 5: Run the full suite**
 
 Run: `.venv/Scripts/python -m pytest -q`
-Expected: all pass (92 from Plan 1 + 36 new = 128).
+Expected: all pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/parkcast/scheduler.py src/parkcast/__main__.py tests/test_scheduler.py
-git commit -m "feat(scheduler): publish forecast artifacts each tick"
+git add src/parkcast tests
+git commit -m "refactor(forecast): bound retained history and read counts"
 ```
 
 ---
 
-### Task 7: Verify against real data and deploy
+### Task 4: Prove equivalence and the bound on real data
 
 **Files:**
-- Create: `tests/test_artifacts_integration.py`
+- Create: `tests/test_history_bounds.py`
 
 **Interfaces:**
 - Consumes: everything above
-- Produces: an end-to-end test over a real DB snapshot
 
-- [ ] **Step 1: Write an integration test using the real collected database**
+- [ ] **Step 1: Write the test**
 
 ```python
-# tests/test_artifacts_integration.py
-"""End-to-end check against a snapshot of the live database, when one exists."""
+# tests/test_history_bounds.py
+"""Guards on the two properties Plan 2b exists to create."""
 import shutil
-from pathlib import Path
+import time
 
 import pytest
 
 from parkcast import config, store
-from parkcast.artifacts import HEADER_SIZE, build_lots_json, decode_header, encode_grid
-from parkcast.forecast import Blend, load_history
-from parkcast.grid import UNKNOWN, build_grid
+from parkcast.forecast import Climatology, load_history
 
 LIVE_DB = config.DB_PATH
 
 
 @pytest.mark.skipif(not LIVE_DB.exists(), reason="no collected data on this machine")
-def test_end_to_end_over_real_observations(tmp_path):
+def test_per_tick_load_is_fast_on_the_real_corpus(tmp_path):
     copy = tmp_path / "snap.sqlite"
     shutil.copy(LIVE_DB, copy)
     conn = store.connect(copy)
 
-    history = load_history(conn)
-    assert history.latest_ts > 0
-    assert len(history.by_lot) > 500, "expected a citywide history"
+    load_history(conn, cold_dir=config.PARQUET_DIR)      # warm the cold cache
+    started = time.perf_counter()
+    load_history(conn, cold_dir=config.PARQUET_DIR)      # the steady-state tick
+    elapsed = time.perf_counter() - started
 
-    lot_ids = sorted(history.by_lot)
-    grid = build_grid(Blend(history), lot_ids, history.latest_ts)
-    blob = encode_grid(grid, generated_at=history.latest_ts + 30,
-                       base_data_ts=history.latest_ts, n_lots=len(lot_ids))
+    assert elapsed < 30, (
+        f"a warm load took {elapsed:.1f}s; the poll slot is 300s and this must not "
+        "grow with corpus age"
+    )
 
-    header = decode_header(blob)
-    assert header["n_lots"] == len(lot_ids)
-    assert len(blob) == HEADER_SIZE + len(lot_ids) * 24
 
-    known = [b for b in grid if b != UNKNOWN]
-    assert known, "a real snapshot must produce some known probabilities"
-    assert all(0 <= b <= 100 for b in known)
-    # Blend must decay toward climatology, so horizon 0 and 23 cannot be identical
-    # for every lot unless the two components agree everywhere.
-    first = [grid[i * 24] for i in range(len(lot_ids))]
-    last = [grid[i * 24 + 23] for i in range(len(lot_ids))]
-    assert first != last, "probabilities must vary across the horizon"
+@pytest.mark.skipif(not LIVE_DB.exists(), reason="no collected data on this machine")
+def test_retained_observations_are_bounded_on_the_real_corpus(tmp_path):
+    copy = tmp_path / "snap.sqlite"
+    shutil.copy(LIVE_DB, copy)
+    h = load_history(store.connect(copy), cold_dir=config.PARQUET_DIR)
+
+    assert h.recent, "expected a citywide history"
+    worst = max(len(series) for series in h.recent.values())
+    assert worst <= config.HISTORY_TAIL
+
+    total = sum(len(series) for series in h.recent.values())
+    assert total <= len(h.recent) * config.HISTORY_TAIL
+
+    # Counts must still span the entire corpus, far exceeding what is retained.
+    assert h.counts.glob[1] > total, (
+        "climatology must have counted more observations than history retains"
+    )
 ```
 
 - [ ] **Step 2: Run it**
 
-Run: `.venv/Scripts/python -m pytest tests/test_artifacts_integration.py -v`
-Expected: PASS (or skip on a machine with no collected data).
+Run: `.venv/Scripts/python -m pytest tests/test_history_bounds.py -v`
+Expected: 2 passed.
 
-- [ ] **Step 3: Generate artifacts from the live snapshot and inspect them**
+- [ ] **Step 3: Prove behaviour is unchanged on real data**
+
+Generate a grid before and after the change from the same snapshot and diff them. The published
+probabilities must be identical — this is a performance change, not a modelling one.
 
 ```bash
-.venv/Scripts/python -c "from parkcast import config, store; from parkcast.scheduler import publish_artifacts; from parkcast.metadata import parse_metadata; import json, glob; lots = parse_metadata(json.load(open(sorted(glob.glob('data/cold/meta/*.json'))[-1], encoding='utf-8'))); publish_artifacts(store.connect(config.DB_PATH), lots, config.ARTIFACT_DIR)"
-ls -la data/artifacts/
+.venv/Scripts/python -c "import sqlite3, hashlib; from pathlib import Path; from parkcast.forecast import load_history, Blend; from parkcast.grid import build_grid; from parkcast import config, store; c=store.connect(config.DB_PATH); h=load_history(c, cold_dir=config.PARQUET_DIR); lots=sorted(h.recent); g=build_grid(Blend(h), lots, h.latest_ts); print('lots', len(lots), 'sha256', hashlib.sha256(g).hexdigest()[:16])"
 ```
 
-Expected: `grid.bin` around 26 KB and `lots.json` around 234 KB.
+Compare against the same command run on the previous commit (using `by_lot`). The hashes must match.
 
-- [ ] **Step 4: Rebuild and restart the live collector**
-
-```bash
-docker compose -f docker/docker-compose.yml up -d --build
-```
-
-Expected: within ~5.5 minutes a `published N lots x 24 horizons` line appears, and
-`data/artifacts/` contains both files. Collected rows must survive the restart.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add tests/test_artifacts_integration.py
-git commit -m "test: verify artifact pipeline against real observations"
+git add tests/test_history_bounds.py
+git commit -m "test: guard the history bound and warm-load latency"
 ```
 
 ---
 
-## Definition of done for Plan 2
+## Definition of done
 
-- [ ] `grid.bin` and `lots.json` are regenerated every 5 minutes by the live collector
-- [ ] `grid.bin` is ~26 KB; `lots.json` ~234 KB raw
-- [ ] Every probability is in `[0, 100]` or exactly `UNKNOWN`; no lot silently reads 0 for "no data"
-- [ ] `base_data_ts` and `generated_at` are both present in the header and differ
-- [ ] Publishing failures cannot stop collection (test-proven)
+- [ ] A warm `load_history` on the real corpus completes in well under the 300 s slot and does not
+      grow with corpus age
+- [ ] Retained observations per lot never exceed `config.HISTORY_TAIL`
+- [ ] Climatology counts still span the entire corpus
+- [ ] A grid built from the same snapshot is byte-identical before and after
 - [ ] Full suite green
+- [ ] Live collector rebuilt and publishing
 
 ## Review
 
