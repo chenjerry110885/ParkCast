@@ -79,27 +79,52 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
     Lots are ordered by id and filtered to those with at least one usable
     observation, so grid rows and lots.json indices line up exactly.
 
-    Refuses to publish a set that is empty, or that has collapsed to less than
-    MIN_PUBLISH_LOT_FRACTION of what is already published: stale artifacts beat
-    artifacts that have lost most of the city.
+    Refuses to publish a set that is empty, one that has collapsed to less than
+    MIN_PUBLISH_LOT_FRACTION of what is already published, or one with no
+    reading behind it to forecast from: stale artifacts beat artifacts that have
+    lost most of the city, and beat artifacts dated 1970.
+
+    Every refusal returns rather than raises. Publishing sits downstream of
+    collection and must never be able to stop it.
     """
     history = load_history(conn, cold_dir=config.PARQUET_DIR)
     forecaster = Blend(history)
+    # `counts.lot`, not `recent`: the filter asks "has this lot ever produced a
+    # usable observation", which is a question about the whole corpus. `recent`
+    # is a two-hour tail, so filtering on it would drop any lot whose history
+    # lives only in the cold store -- lots that still get an honest
+    # climatology-only forecast and belong on the map.
     ordered = sorted(
-        (lot for lot in lots if lot.id in history.by_lot), key=lambda lot: lot.id
+        (lot for lot in lots if lot.id in history.counts.lot), key=lambda lot: lot.id
     )
     if not ordered:
         # Reachable with a perfectly good `lots` argument too: an empty
         # `history` (e.g. right after a metadata-blob outage left `_lots`
         # empty at startup, or a fresh store with no observations yet) makes
-        # every lot fail the `history.by_lot` filter. Writing a header-only
+        # every lot fail the history filter. Writing a header-only
         # grid.bin and an empty lots.json would blank the whole site to zero
         # parking lots until the next day-rollover refresh. Stale artifacts
         # beat empty ones, so leave whatever is already published alone.
         log.warning(
             "no lots survived the history filter (%s candidate lots, %s with "
             "history); leaving existing artifacts untouched",
-            len(lots), len(history.by_lot),
+            len(lots), len(history.counts.lot),
+        )
+        return
+
+    if history.latest_ts == 0:
+        # A full roster with nothing to forecast from. `ordered` is filtered on
+        # `counts.lot`, which spans the cold corpus, but `latest_ts` comes off
+        # `recent`, which is hot-only on this path -- so a hot window in which
+        # every free_car is NULL (a citywide -9 from the feed, or a fresh hot
+        # store restored beside an intact cold one) passes both guards above
+        # while leaving the base timestamp at 0. `build_grid` would then evaluate
+        # every horizon against Thursday 1970-01-01 Taipei -- a real climatology
+        # bucket, so the bytes look plausible -- and stamp `base_data_ts: 0` on
+        # the result, telling every client the reading is 56 years stale.
+        log.error(
+            "no usable reading behind %s lots (latest_ts is 0: the hot window is "
+            "entirely NULL); leaving existing artifacts untouched", len(ordered),
         )
         return
 

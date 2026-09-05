@@ -12,6 +12,20 @@ from parkcast.metadata import Lot
 from parkcast.scheduler import next_poll_ts, taipei_date
 
 
+@pytest.fixture(autouse=True)
+def _isolated_cold_store(tmp_path, monkeypatch):
+    """Keep this module off the live Parquet corpus.
+
+    `publish_artifacts` reads `config.PARQUET_DIR`, so without this the suite
+    loads whatever the collector has archived on this machine -- slow,
+    non-deterministic, and, now that cold owns every day it holds a file for,
+    silently swallowing the hot observations these tests seed on 2026-09-04,
+    which is a real collected day. The cold store has its own tests; these are
+    about the scheduler.
+    """
+    monkeypatch.setattr(config, "PARQUET_DIR", tmp_path / "cold-isolated")
+
+
 def minute_of(ts: int) -> int:
     return (ts // 60) % 60
 
@@ -867,3 +881,96 @@ def test_publish_artifacts_publishes_when_there_is_no_readable_baseline(tmp_path
 
     header = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
     assert header["magic"] == artifacts.MAGIC and header["n_lots"] == 1
+
+
+def test_publish_artifacts_refuses_an_all_null_hot_window(tmp_path, monkeypatch, caplog):
+    """Every reading in the hot window NULL, beside an intact cold corpus.
+
+    Two ways in: the feed returns -9 for the whole city, or a fresh hot store is
+    restored next to a cold one that survived. Either way `recent` -- which is
+    hot-only on the serving path -- is empty, so `latest_ts` is 0. The row filter
+    reads `counts.lot`, which is full from cold, so the roster looks healthy and
+    neither existing guard fires. `build_grid` would then evaluate every horizon
+    against Thursday 08:05 Taipei 1970 and publish it stamped `base_data_ts: 0`.
+    """
+    from parkcast.compact import compact_day
+
+    cold = tmp_path / "cold"
+    monkeypatch.setattr(config, "PARQUET_DIR", cold)
+    src = store.connect(tmp_path / "src.sqlite")
+    for lot_id in ("A", "B"):
+        _seed(src, date(2026, 9, 3), lot=lot_id)
+    compact_day(src, date(2026, 9, 3), cold)
+    src.close()
+
+    conn = store.connect(tmp_path / "t.sqlite")
+    for lot_id in ("A", "B"):                       # the feed said -9 for everything
+        _seed(conn, date(2026, 9, 4), lot=lot_id, free=None)
+
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+    # Deliberately not a real grid header, so `read_header` returns None and the
+    # collapsed-lot-count guard cannot be what saves us here.
+    (out_dir / "grid.bin").write_bytes(b"OLD-GRID-BYTES-18")
+    (out_dir / "lots.json").write_text('{"lots":[{"i":0,"id":"OLD"}]}', encoding="utf-8")
+
+    with caplog.at_level(logging.ERROR, logger="parkcast.scheduler"):
+        scheduler.publish_artifacts(conn, [_make_lot("A"), _make_lot("B")], out_dir)
+    conn.close()
+
+    assert (out_dir / "grid.bin").read_bytes() == b"OLD-GRID-BYTES-18"
+    assert (out_dir / "lots.json").read_text(encoding="utf-8") == (
+        '{"lots":[{"i":0,"id":"OLD"}]}'
+    )
+    assert list(out_dir.glob("*.tmp")) == []
+    assert "no usable reading" in caplog.text
+
+
+def test_publish_artifacts_stamps_the_real_data_ts_on_a_normal_publish(tmp_path):
+    """The guard must not cost the happy path: a hot window with readings in it
+    publishes, stamped with the newest data_ts and never with 0."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    start, _ = day_bounds(date(2026, 9, 4))
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir)
+    conn.close()
+
+    header = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
+    assert header["base_data_ts"] == start
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert doc["base_data_ts"] == start
+
+
+def test_publish_artifacts_keeps_a_lot_whose_history_is_only_in_the_cold_store(
+    tmp_path, monkeypatch
+):
+    """The row filter asks whether a lot has ever produced a usable observation,
+    which is a question about the whole corpus, not about the retained tail.
+
+    `History.recent` is a two-hour tail fed from the hot store, so filtering on
+    it would silently drop every lot the hot store has pruned past -- lots that
+    still get an honest climatology-only forecast and belong on the map.
+    """
+    from parkcast.compact import compact_day
+
+    cold = tmp_path / "cold"
+    monkeypatch.setattr(config, "PARQUET_DIR", cold)
+
+    src = store.connect(tmp_path / "src.sqlite")
+    _seed(src, date(2026, 9, 3), lot="COLDONLY")
+    compact_day(src, date(2026, 9, 3), cold)
+    src.close()
+
+    conn = store.connect(tmp_path / "t.sqlite")   # hot holds only lot A
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+
+    scheduler.publish_artifacts(conn, [_make_lot("A"), _make_lot("COLDONLY")], out_dir)
+    conn.close()
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert [l["id"] for l in doc["lots"]] == ["A", "COLDONLY"]

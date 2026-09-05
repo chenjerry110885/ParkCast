@@ -36,7 +36,19 @@ LON_MIN, LON_MAX = 121.0, 122.5
 # --- forecasting ---
 HORIZON_STEP_MIN = 5
 HORIZON_COUNT = 24            # +5 min through +120 min
-CLIMATOLOGY_BUCKET_MIN = 30   # time-of-week bucket width
+# Time-of-week bucket width. MUST stay a whole number of compaction slots
+# (compact.SLOT_SECONDS, 300s) -- test_config pins it.
+#
+# `compact_day` files each reading at the start of its 5-minute slot, so the cold
+# copy of an observation carries a data_ts up to one slot earlier than the hot
+# copy of the same reading (in practice exactly 180s earlier: feed data_ts minutes
+# are congruent to 3 mod 5). The two copies agree on climatology only because a
+# bucket boundary can never fall between them, and that holds only while the
+# bucket width is a multiple of the slot. A finer 12-minute bucket, say, would put
+# some readings in one bucket via hot and the neighbouring one via cold -- so the
+# counts would depend on which side of a midnight compaction each reading was
+# seen on, and would shift under themselves as days rolled into the cold store.
+CLIMATOLOGY_BUCKET_MIN = 30
 # Hierarchical shrinkage strengths, in pseudo-observations. A 30-min bucket at a
 # 5-min cadence accrues only 6 observations per week, so an unsmoothed bucket
 # rate is 0/6 or 6/6 far more often than not: measured, 96.1% of bucket rates
@@ -48,6 +60,14 @@ CLIMATOLOGY_BUCKET_MIN = 30   # time-of-week bucket width
 CLIMATOLOGY_BUCKET_PRIOR = 8  # bucket shrinks toward the lot rate
 CLIMATOLOGY_LOT_PRIOR = 20    # lot shrinks toward the citywide rate
 BLEND_HALF_LIFE_MIN = 30      # persistence weight halves every 30 min of horizon
+
+# Observations retained per lot in `History.recent`: 2 hours at the 5-minute
+# cadence. Only the newest reading is actually consumed today (Persistence, and
+# the freshness stamp on the artifacts), but a short tail is what a lag feature
+# will need and it costs nothing. Climatology reads `History.counts`, which
+# covers the whole corpus, so this bound does not truncate what it learns --
+# which is the point: memory stops growing with corpus age.
+HISTORY_TAIL = 24
 
 ARTIFACT_DIR = DATA_DIR / "artifacts"
 # Refuse to publish a grid holding less than this fraction of the lots the
