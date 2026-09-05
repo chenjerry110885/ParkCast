@@ -21,6 +21,7 @@ tier of the fallback chain and no lag feature can reach across it. Splits are
 by time, never at random -- a random split leaks the future backwards through
 those same counts.
 """
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -29,6 +30,8 @@ from pathlib import Path
 from typing import Protocol
 
 from parkcast import config
+
+log = logging.getLogger("parkcast.forecast")
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,8 +312,27 @@ class ColdCountCache:
     1.44 s per daily file -- 526 s per tick after a year, against a 300 s
     slot. Folding each file exactly once makes the per-tick cost flat.
 
-    A file is identified by name, mtime and size, so a rewritten day is
-    re-read rather than silently trusted.
+    A file is identified by NAME, and remembered with the (mtime, size) it
+    carried when it was folded. When a name comes back wearing a different
+    stamp -- or stops being there at all -- the directory's accumulated counts
+    are thrown away and every file is folded again from zero.
+
+    Re-folding just the changed file would ADD its rows to the contribution its
+    previous version already made, and `Counts` has no way to subtract. Byte-
+    identical content is the case that makes this concrete: restoring `data/cold`
+    from a backup, or rsyncing it into place, rewrites the same rows under a new
+    mtime, and every counter would double. A uniform doubling leaves the rates
+    themselves correct, so nothing looks wrong -- but it halves the weight of
+    CLIMATOLOGY_BUCKET_PRIOR and CLIMATOLOGY_LOT_PRIOR relative to n, and every
+    published probability sharpens. A partial restore skews the rates outright.
+
+    Discarding the whole directory is the conservative choice rather than the
+    lazy one: cold files are immutable in normal operation, so this fires only
+    when something outside the collector has been at the corpus, and at that
+    point the cheapest trustworthy state is the one read from disk. It is logged
+    at WARNING with the file that triggered it -- re-reading the entire corpus is
+    too much work to do silently, and by the time the counts look odd the mtime
+    that explains them is long gone.
 
     The overlap with the hot store is resolved by DATE OWNERSHIP, not by a
     timestamp cutoff: cold owns every day that has a Parquet file, and the hot
@@ -331,25 +353,40 @@ class ColdCountCache:
     """
 
     def __init__(self) -> None:
-        self._by_dir: dict[Path, tuple[Counts, set[tuple[str, int, int]]]] = {}
+        # dir -> (counts folded so far, file name -> the (mtime_ns, size) that
+        # was folded). Keyed by name so a stamp change is an UPDATE to a known
+        # file rather than the arrival of an unrelated one.
+        self._by_dir: dict[Path, tuple[Counts, dict[str, tuple[int, int]]]] = {}
 
     def counts_through(self, cold_dir: Path, before_ts: int | None) -> Counts:
         key = Path(cold_dir)
-        entry = self._by_dir.get(key)
-        if entry is None:
-            entry = self._by_dir[key] = (Counts(), set())
-        counts, folded = entry
+        counts, folded = self._by_dir.setdefault(key, (Counts(), {}))
 
+        stamps = {}
         for path in sorted(key.glob("*.parquet")):
             stat = path.stat()
-            file_key = (path.name, stat.st_mtime_ns, stat.st_size)
-            if file_key in folded:
+            stamps[path.name] = (stat.st_mtime_ns, stat.st_size)
+
+        # A file already folded whose stamp no longer matches -- rewritten, or
+        # gone. Its old rows are inside `counts` and cannot be taken back out,
+        # so the only correct move is to start the directory over.
+        changed = sorted(name for name, was in folded.items() if stamps.get(name) != was)
+        if changed:
+            log.warning(
+                "cold file(s) changed under the count cache (%s); discarding %s "
+                "folded file(s) and re-folding %s from scratch",
+                ", ".join(changed), len(folded), key,
+            )
+            counts, folded = self._by_dir[key] = (Counts(), {})
+
+        for name, stamp in stamps.items():
+            if name in folded:
                 continue
-            for lot_id, ts, free in _read_parquet_day(path):
+            for lot_id, ts, free in _read_parquet_day(key / name):
                 if before_ts is not None and ts >= before_ts:
                     continue
                 counts.add(lot_id, ts, free)
-            folded.add(file_key)
+            folded[name] = stamp
         return counts
 
 

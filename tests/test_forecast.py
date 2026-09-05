@@ -1,3 +1,5 @@
+import logging
+import os
 from datetime import date
 
 import pytest
@@ -833,16 +835,64 @@ def test_cache_does_not_reread_files_it_has_seen(tmp_path, monkeypatch):
     assert reads == [], "an already-folded file must never be read again"
 
 
-def test_cache_rereads_a_rewritten_day(tmp_path):
-    """Identity is name + mtime + size, so a recompacted day is not trusted stale."""
+def test_cache_replaces_a_restamped_day_rather_than_adding_to_it(tmp_path, caplog):
+    """A re-stamped file REPLACES its old contribution. It must not stack on it.
+
+    Byte-identical content is the sharp case, and a realistic one: restoring
+    `data/cold` from a backup, or rsyncing it into place, rewrites the same rows
+    under a new mtime. Folding them a second time on top of the first doubled
+    every counter -- which leaves the raw rates untouched and so shows up nowhere
+    obvious, but halves the effective weight of CLIMATOLOGY_BUCKET_PRIOR and
+    CLIMATOLOGY_LOT_PRIOR against n, sharpening every published probability. A
+    partial restore skews the rates between lots and buckets outright.
+    """
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5, 2: 0})
+    path = tmp_path / "2026-09-04.parquet"
+    cache = ColdCountCache()
+    assert cache.counts_through(tmp_path, None).glob == [2, 3]
+
+    # Identical bytes, new mtime. Stamped explicitly rather than relying on the
+    # clock to tick between two writes -- Windows file times move in ~15ms steps.
+    blob = path.read_bytes()
+    path.unlink()
+    path.write_bytes(blob)
+    os.utime(path, ns=(0, 1_600_000_000_000_000_000))
+
+    with caplog.at_level(logging.WARNING, logger="parkcast.forecast"):
+        assert cache.counts_through(tmp_path, None).glob == [2, 3], (
+            "a re-stamped file replaces what it gave before; it does not add to it"
+        )
+    assert "2026-09-04.parquet" in caplog.text, (
+        "re-folding the whole corpus is too much work to do silently, and the "
+        "file that triggered it is the one thing worth naming"
+    )
+
+
+def test_cache_refolds_a_recompacted_day_at_its_new_contents(tmp_path):
+    """Same rule where the content really did change: the day counts once, at
+    what the file says now -- not the sum of both versions."""
     _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5})
     cache = ColdCountCache()
     assert cache.counts_through(tmp_path, None).glob == [2, 2]
 
     (tmp_path / "src-2026-09-04.sqlite").unlink()
     _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 5, 2: 5, 3: 5})
-    assert cache.counts_through(tmp_path, None).glob == [6, 6], (
-        "the rewritten file is folded in again, on top of what it already gave"
+    assert cache.counts_through(tmp_path, None).glob == [4, 4]
+
+
+def test_refolding_one_changed_day_keeps_the_days_beside_it(tmp_path):
+    """The re-fold discards the whole directory's counts, so every other file
+    has to be read again -- an untouched neighbour must come back at its own
+    weight, neither dropped to zero nor left double."""
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5, 1: 0})
+    _write_parquet_day(tmp_path, date(2026, 9, 5), {0: 5, 1: 5, 2: 5})
+    cache = ColdCountCache()
+    assert cache.counts_through(tmp_path, None).glob == [4, 5]
+
+    (tmp_path / "src-2026-09-04.sqlite").unlink()
+    _write_parquet_day(tmp_path, date(2026, 9, 4), {0: 5})
+    assert cache.counts_through(tmp_path, None).glob == [4, 4], (
+        "2026-09-05 is counted exactly once across the re-fold"
     )
 
 
