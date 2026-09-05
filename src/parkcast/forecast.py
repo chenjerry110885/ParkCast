@@ -171,6 +171,46 @@ def week_bucket(ts: int) -> int:
     return int(local_min // config.CLIMATOLOGY_BUCKET_MIN) % BUCKETS_PER_WEEK
 
 
+class Counts:
+    """Accumulated (hits, total) at three tiers, fed one observation at a time.
+
+    Climatology needs only these counts, never the observations behind them --
+    which is what lets the corpus be streamed instead of held. Each counter is
+    a two-element list so it can be incremented in place without rebuilding.
+    """
+
+    __slots__ = ("bucket", "lot", "glob")
+
+    def __init__(self) -> None:
+        self.bucket: dict[tuple[str, int], list[int]] = defaultdict(lambda: [0, 0])
+        self.lot: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+        self.glob: list[int] = [0, 0]
+
+    def add(self, lot_id: str, ts: int, free: int) -> None:
+        hit = 1 if free >= 1 else 0
+        for counter in (self.bucket[(lot_id, week_bucket(ts))],
+                        self.lot[lot_id], self.glob):
+            counter[0] += hit
+            counter[1] += 1
+
+    def combined(self, other: "Counts") -> "Counts":
+        """Elementwise sum. Neither operand is mutated.
+
+        The cold cache is shared across ticks, so summing must never write to
+        it -- a tick that mutated the cache would double-count on the next one.
+        """
+        merged = Counts()
+        for src in (self, other):
+            for key, counter in src.bucket.items():
+                target = merged.bucket[key]
+                target[0] += counter[0]; target[1] += counter[1]
+            for key, counter in src.lot.items():
+                target = merged.lot[key]
+                target[0] += counter[0]; target[1] += counter[1]
+            merged.glob[0] += src.glob[0]; merged.glob[1] += src.glob[1]
+        return merged
+
+
 def _shrink(counter: list[int], prior_rate: float, strength: float) -> float:
     """Blend a [hits, n] counter toward `prior_rate` with `strength` pseudo-obs.
 

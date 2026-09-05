@@ -666,3 +666,44 @@ def test_all_cold_is_kept_when_the_hot_store_is_empty(conn, tmp_path):
 
     h = load_history(conn, cold_dir=tmp_path)  # conn is empty
     assert len(h.by_lot["A"]) == 10
+
+
+from parkcast.forecast import Counts
+
+
+def test_counts_accumulate_hits_and_totals():
+    c = Counts()
+    c.add("A", 1000, 5)   # a space -> hit
+    c.add("A", 1300, 0)   # full    -> miss
+    assert c.glob == [1, 2]
+    assert c.lot["A"] == [1, 2]
+
+
+def test_counts_bucket_by_taipei_time_of_week():
+    from parkcast.forecast import week_bucket
+    c = Counts()
+    c.add("A", 1788537600, 5)
+    assert c.bucket[("A", week_bucket(1788537600))] == [1, 1]
+
+
+def test_counts_zero_free_is_a_miss_not_missing_data():
+    """0 means the lot is full - a real observation, and a miss."""
+    c = Counts()
+    c.add("A", 1000, 0)
+    assert c.glob == [0, 1], "the observation counts toward the total"
+
+
+def test_combined_sums_elementwise_without_mutating_either_side():
+    a = Counts(); a.add("A", 1000, 5)
+    b = Counts(); b.add("A", 1000, 0)
+    merged = a.combined(b)
+    assert merged.glob == [1, 2]
+    assert a.glob == [1, 1], "combined must not mutate the receiver"
+    assert b.glob == [0, 1], "combined must not mutate the argument"
+
+
+def test_combined_keeps_keys_present_in_only_one_side():
+    a = Counts(); a.add("A", 1000, 5)
+    b = Counts(); b.add("B", 1000, 5)
+    merged = a.combined(b)
+    assert merged.lot["A"] == [1, 1] and merged.lot["B"] == [1, 1]
