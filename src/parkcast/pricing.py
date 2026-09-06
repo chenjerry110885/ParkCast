@@ -27,17 +27,21 @@ _ASIDE = re.compile(r"[（(][^）)]*(?:機車|大型車|大客車)[^）)]*[）)]
 # Longest form first: `、大型重型機車` must match at 大, not at 機 four
 # characters in, or the separator test below looks at the wrong character.
 _NON_CAR = re.compile(r"大型重型機車|大型重機|重型機車|大客車|大型車|機車")
-_CAR = re.compile(r"小型車|小客車")
+# `汽車` is as common a way to say car as `小型車`, and ten fixture lots price
+# in it -- five of which never write `小型車` at all. The feed names its large
+# vehicles 大型車/大客車/大型重型機車, never `大型汽車`, so a bare `汽車` is
+# always the small-vehicle subject here.
+_CAR = re.compile(r"小型車|小客車|汽車")
 
 # Sentence boundaries -- the widest a single stripped clause can reach.
 _SENTENCE = re.compile(r"[；;。]")
-# A colon introduces a fresh subject, so it opens a clause outright:
+# A colon introduces a fresh subject, so everything before it is out of reach:
 # `計次：機車20元/次` prices bikes however the sentence began.
 _INTRODUCER = "：:"
-# `，`, `,` and `、` enumerate both clauses and bare subjects, so they open a
-# clause only once a rate has been quoted -- see `_opens_a_clause`.
-_ENUMERATOR = "，,、"
-_RATE = re.compile(r"\d[\d,]*\s*元")
+# What may stand between two vehicle nouns that share a single rate: `、`, `，`
+# and `,` enumerate, and `及`/`與`/`和`/`暨`/`含`/`或` conjoin. Anything else --
+# a rate, a floor, `惟`, `其中` -- ends the enumeration.
+_CONJOINED = re.compile(r"^[、，,及與和暨含或\s]*$")
 
 # The feed comma-groups every four-digit figure it prints, so a rate must be
 # read as `\d[\d,]*` and not `\d+`: matching `1,200元/時` from the comma on
@@ -60,28 +64,34 @@ class Price:
 UNKNOWN = Price("unknown", None, None)
 
 
-def _opens_a_clause(sentence: str, at: int) -> bool:
-    """Whether the word at `at` heads its own clause rather than sitting
-    inside one.
+def _clause_start(sentence: str, at: int) -> int:
+    """Where the clause containing `at` begins -- just past the nearest
+    introducer, since a colon puts everything before it out of reach."""
+    return max(sentence.rfind(c, 0, at) for c in _INTRODUCER) + 1
 
-    It does at the head of the sentence, after a colon, or after an enumerator
-    that follows a rate already quoted. That last condition is the whole
-    distinction between two readings of `、`:
+
+def _opens_a_clause(sentence: str, at: int) -> bool:
+    """Whether the vehicle noun at `at` heads its own clause rather than
+    standing as a second subject of one rate.
+
+    It is a second subject exactly when a car noun stands before it in the
+    same clause joined by nothing but enumerators and conjunctions:
 
         小型車、大型重型機車：計時40元/時   one rate, two subjects  -> keep
         小型車30元/時、機車10元/時          cars priced, then bikes -> strip
+        小型車30元/時，惟機車10元/時        `惟` ends the enumeration -> strip
+        24小時營業，機車10元/時             no car named at all     -> strip
+        地下一樓機車20元/時                 no car named at all     -> strip
 
-    In the first the car has not been priced yet, so the enumeration is still
-    naming who the coming rate applies to; in the second it has, so what
-    follows is a new clause with a new subject and a rate cars cannot get.
+    Testing only the character immediately before the noun was too narrow:
+    any intervening word (`惟`, `其中`, a floor, a rate) defeated the strip and
+    let a motorcycle rate be published as the car price.
     """
-    before = sentence[:at]
-    head = before.rstrip()
-    if not head:
-        return True
-    if head[-1] in _INTRODUCER:
-        return True
-    return head[-1] in _ENUMERATOR and bool(_RATE.search(before))
+    span = sentence[_clause_start(sentence, at):at]
+    joined = None
+    for m in _CAR.finditer(span):
+        joined = span[m.end():]
+    return joined is None or not _CONJOINED.match(joined)
 
 
 def _first_clause(pattern: re.Pattern[str], sentence: str, start: int = 0) -> int | None:

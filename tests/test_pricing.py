@@ -134,6 +134,45 @@ def test_a_shared_subject_list_keeps_the_rate_it_shares():
     assert parse_fare("小型車、大型重型機車：計時40元/時，全程以半小時計。")         == Price("exact", 40, 40)
 
 
+def test_a_word_between_the_rate_and_the_motorcycle_does_not_defeat_the_strip():
+    """Testing only the character immediately before the noun was too narrow:
+    `惟` and `其中` sit between the comma and the subject, and let a NT$10
+    motorcycle rate become the low end of a range no driver can pay."""
+    assert parse_fare("計時：小型車30元/時，惟機車10元/時。") == Price("exact", 30, 30)
+    assert parse_fare("計時：小型車30元/時，其中機車10元/時。") == Price("exact", 30, 30)
+
+
+def test_a_motorcycle_rate_after_an_unpriced_aside_is_not_the_car_rate():
+    """`24小時營業` quotes no rate and names no car, so the only rate in the
+    text belongs to motorcycles. There is no car price to report."""
+    assert parse_fare("計時：24小時營業，機車10元/時。").kind == "unknown"
+
+
+def test_a_motorcycle_rate_qualified_by_a_place_is_not_the_car_rate():
+    """No car is named anywhere, so `地下一樓機車20元/時` is a bike rate with a
+    floor attached -- not a car rate. TPE1300 carries this shape live."""
+    assert parse_fare("計時：地下一樓機車20元/時。").kind == "unknown"
+
+
+def test_a_truck_rate_qualified_by_its_customer_is_still_excluded():
+    """TPE1300's `農產公司送貨大型車40元/時` is benign only because that truck
+    rate happens to equal the car rate. It must be excluded on structure."""
+    p = parse_fare("計時：小型車30元/時，農產公司送貨大型車40元/時。")
+    assert p == Price("exact", 30, 30)
+
+
+def test_a_car_written_as_汽車_is_recognised_as_a_car():
+    """Ten fixture lots price in 汽車, five of which never write 小型車. Without
+    it the strip cannot resume, so the weekend rate is dropped AND the result
+    claims exactness -- the worst of both outcomes."""
+    p = parse_fare("計時：汽車30元/時，機車10元/時，汽車假日50元/時。")
+    assert p == Price("range", 30, 50)
+
+
+def test_汽車_alone_is_enough_to_carry_a_lot():
+    assert parse_fare("計時：汽車40元/時，全程以半小時計。") == Price("exact", 40, 40)
+
+
 def test_a_motorcycle_only_lot_has_no_car_rate_to_report():
     """機車:10元/時 is the whole fare text; there is no car price to give."""
     assert parse_fare("機車：10元/時，當日當次停車最高收費上限30元/次，隔日另計。").kind == "unknown"
