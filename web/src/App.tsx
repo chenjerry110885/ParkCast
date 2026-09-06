@@ -5,7 +5,7 @@
  * runs in this component, and nothing is ever sent anywhere -- the driver's
  * location never leaves the phone, because there is no server to send it to.
  *
- * Six things here are load-bearing rather than cosmetic:
+ * Seven things here are load-bearing rather than cosmetic:
  *
  *   - **The staleness line.** The upstream feed publishes every five minutes
  *     with a ~3-minute lag, so the reading behind any forecast is already a few
@@ -32,6 +32,12 @@
  *     "where am I", which is the wrong question for a driver on their way
  *     somewhere else; a tap on the map answers the right one. Both feed the same
  *     single `destination`, and a tap wins over a location still in flight.
+ *   - **The map does not wait for the destination.** Nothing a dot needs -- id,
+ *     name, district, position, probability -- comes from where the driver is
+ *     going, so all 1,088 draw on first paint and only the *ranking* waits.
+ *     Feeding the map the ranked array instead, as this did, left the whole
+ *     city invisible until the user happened to tap: the project's own
+ *     "silently absent lot" failure, at 1,088 out of 1,088.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { artifactsBase, horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
@@ -40,9 +46,10 @@ import { LangToggle } from "./components/LangToggle";
 import { Scrubber } from "./components/Scrubber";
 import type { LatLon } from "./geo";
 import { detectLang, fillTemplate, t, type Lang } from "./i18n";
+import { toMapLot } from "./map/lotSource";
 import { MapView } from "./map/MapView";
 import { listRows, rankLots } from "./rank";
-import type { Grid, LotsDoc } from "./types";
+import type { Grid, Lot, LotsDoc } from "./types";
 
 /**
  * Where the two artifacts live. Relative to the deployment root so the app
@@ -56,9 +63,10 @@ const ARTIFACTS_BASE = artifactsBase(import.meta.env.BASE_URL);
  * handful; past that the list is scroll for its own sake, and every extra row
  * is DOM work on a phone.
  *
- * This is a limit on the list and on nothing else. The map is handed the whole
- * ranked array: slicing it there would silently hide 98% of the city behind a
- * map that looked like it was showing all of it.
+ * This is a limit on the list and on nothing else. The map draws every lot in
+ * the roster and never goes through the ranking at all: slicing it there would
+ * silently hide 98% of the city behind a map that looked like it was showing
+ * all of it.
  *
  * It is also a *soft* limit: `listRows` grows the list rather than let a fixed
  * cap drop the no-forecast lots the ranker deliberately kept.
@@ -100,6 +108,25 @@ type GeoState = "idle" | "locating" | "ready" | "unavailable";
 interface Artifacts {
   grid: Grid;
   lots: LotsDoc;
+}
+
+/**
+ * P(at least one space) for one lot at one arrival time.
+ *
+ * Read at the row the lot *declares*, never at its position in the array:
+ * `fetchLots` drops a row it cannot place, and reading by position after that
+ * hands every later lot its neighbour's forecast -- a silent, plausible-looking
+ * wrong answer for most of the city. Both readers, the ranking and the map, go
+ * through here, so the two cannot disagree about which row belongs to which car
+ * park.
+ *
+ * Guarded rather than raw: a roster longer than the grid would otherwise throw
+ * mid-render and take the whole page down, when "no data" for the extra rows is
+ * both true and survivable.
+ */
+function probabilityForLot(grid: Grid, lot: Lot | undefined, horizonMin: number): number | null {
+  const row = lot?.i;
+  return row === undefined || row >= grid.nLots ? null : probabilityAt(grid, row, horizonMin);
 }
 
 export default function App() {
@@ -246,7 +273,29 @@ export default function App() {
     grid !== null && ageMin !== null && ageMin > grid.stepMin * grid.nHorizons;
 
   /**
-   * Every lot, ranked. Not sliced: this is what the map draws.
+   * Every lot the map draws, projected straight from the artifacts.
+   *
+   * Deliberately not derived from `ranked`: the ranking needs a destination and
+   * this does not, so hanging the map off it drew an empty city until the user
+   * happened to tap -- see the seventh point in the module comment. The list
+   * ordering and the destination pin are all `ranked` is for.
+   *
+   * Recomputed when the arrival time moves, which is the whole scrub: a new
+   * column out of a grid already in memory, no request, no refetch, and a
+   * `setData` on one GeoJSON source at the other end.
+   */
+  const mapLots = useMemo(() => {
+    if (artifacts === null) return [];
+    const { grid: g, lots } = artifacts;
+    return lots.lots.map((lot) =>
+      // No forecast survives an artifact this stale, and the dot goes grey --
+      // the same "no data" the map already draws for an unknown cell.
+      toMapLot(lot, forecastExpired ? null : probabilityForLot(g, lot, gridHorizonMin)),
+    );
+  }, [artifacts, gridHorizonMin, forecastExpired]);
+
+  /**
+   * Every lot, ranked. Not sliced: `listRows` decides what the list shows.
    *
    * Recomputed when the arrival time moves, which is the whole scrub: a new
    * column out of a grid already in memory, no request, no refetch.
@@ -259,19 +308,9 @@ export default function App() {
       destination,
       horizonMin: gridHorizonMin,
       lots: rows,
-      probability: (i, h) => {
-        // No forecast survives an artifact older than the grid's own span, and
-        // saying so once here is what keeps the rest of the screen honest.
-        if (forecastExpired) return null;
-        // The lot's declared row, not its position: `fetchLots` may have dropped
-        // a row it could not place, and reading by position after that would
-        // hand every later lot its neighbour's forecast.
-        const row = rows[i]?.i;
-        // Guarded rather than raw: a roster longer than the grid would otherwise
-        // throw mid-render and take the whole page down, when "no data" for the
-        // extra rows is both true and survivable.
-        return row === undefined || row >= g.nLots ? null : probabilityAt(g, row, h);
-      },
+      // `rows[i]`, resolved through `Lot.i` inside: `rankLots` reports the array
+      // position it scored, and the grid row is the lot's own business.
+      probability: (i, h) => (forecastExpired ? null : probabilityForLot(g, rows[i], h)),
     });
   }, [artifacts, destination, gridHorizonMin, forecastExpired]);
 
@@ -401,9 +440,10 @@ export default function App() {
           </p>
         )}
         {!loadFailed && (
-          // Every ranked lot, never `listed`: the list is capped at 20 rows and
-          // the map is the city.
-          <MapView rows={ranked} destination={destination} onPick={pickDestination} lang={lang} />
+          // Every lot in the roster, never `listed` and never `ranked`: the list
+          // is capped at 20 rows, the ranking waits for a destination, and the
+          // map is the city either way.
+          <MapView lots={mapLots} destination={destination} onPick={pickDestination} lang={lang} />
         )}
         {!loadFailed && artifacts === null && <p className="notice">{s.loading}</p>}
         {forecastExpired && (

@@ -20,18 +20,23 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { GeoJSONSource, MapMouseEvent } from "maplibre-gl";
 import type { LatLon } from "../geo";
 import { t, type Lang } from "../i18n";
-import type { Ranked } from "../rank";
-import { toFeatureCollection, toMapLot, toPointCollection } from "./lotSource";
+import { toFeatureCollection, toPointCollection, type MapLot } from "./lotSource";
 import { useMapLibre } from "./useMapLibre";
 
-const LOTS_SOURCE = "lots";
+/** Exported so a test can assert on the source the app actually feeds. */
+export const LOTS_SOURCE = "lots";
 const LOTS_LAYER = "lots-circles";
 const DESTINATION_SOURCE = "destination";
 const DESTINATION_LAYER = "destination-pin";
 
 export interface MapViewProps {
-  /** Every lot to draw -- the whole ranked set, not the slice the list shows. */
-  rows: readonly Ranked[];
+  /**
+   * Every lot to draw: the whole roster, not the slice the list shows -- and
+   * not the ranking either. A dot needs an identity, a position and a
+   * probability, none of which come from where the driver is going, so the map
+   * is drawn from the artifacts and is full before a destination exists.
+   */
+  lots: readonly MapLot[];
   /** Where the driver is going, drawn as a pin. `null` before one is chosen. */
   destination: LatLon | null;
   /** Called with the tapped point, so the map can *be* the destination input. */
@@ -39,11 +44,11 @@ export interface MapViewProps {
   lang: Lang;
 }
 
-export function MapView({ rows, destination, onPick, lang }: MapViewProps) {
+export function MapView({ lots, destination, onPick, lang }: MapViewProps) {
   const { containerRef, map, unavailable } = useMapLibre();
   const s = t(lang);
 
-  const lots = useMemo(() => toFeatureCollection(rows.map(toMapLot)), [rows]);
+  const features = useMemo(() => toFeatureCollection(lots), [lots]);
   const pin = useMemo(() => toPointCollection(destination), [destination]);
 
   // The taps outlive the render that registered them, so the handler reads the
@@ -106,8 +111,8 @@ export function MapView({ rows, destination, onPick, lang }: MapViewProps) {
   // of precomputing all 24 horizons into the grid.
   useEffect(() => {
     const source = map?.getSource<GeoJSONSource>(LOTS_SOURCE);
-    source?.setData(lots);
-  }, [map, lots]);
+    source?.setData(features);
+  }, [map, features]);
 
   useEffect(() => {
     const source = map?.getSource<GeoJSONSource>(DESTINATION_SOURCE);

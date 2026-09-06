@@ -1,5 +1,5 @@
 /**
- * Ranked rows -> the single GeoJSON source that draws all 1,088 car parks.
+ * Lots -> the single GeoJSON source that draws all 1,088 car parks.
  *
  * One source, one circle layer. Not 1,088 `Marker`s: a DOM node per lot is what
  * turns a city-wide parking map into a phone that drops frames while panning,
@@ -21,15 +21,15 @@
  */
 import type { Feature, FeatureCollection, Point } from "geojson";
 import { colourFor } from "./colour";
-import type { Ranked } from "../rank";
+import type { Lot } from "../types";
 
 /**
- * What the map needs from a ranked row, and nothing else.
+ * What the map needs from a lot, and nothing else.
  *
- * Narrower than `Ranked` on purpose: the map draws a dot with an identity, a
- * position and a probability, so that is the contract. It also means the source
- * builder can be tested with a plain object literal instead of a whole `Lot`
- * plus a scored `Ranked` wrapper around it.
+ * Narrower than `Lot` on purpose: the map draws a dot with an identity, a
+ * position and a probability, so that is the contract. Nothing in it comes from
+ * the ranking -- which is exactly why the map can draw the whole city before the
+ * driver has said where they are going.
  */
 export interface MapLot {
   /** Feed id, e.g. `TPE0001`. The feature id, so MapLibre can key hover state. */
@@ -57,15 +57,22 @@ export type LotProperties = {
   known: boolean;
 };
 
-/** The `Ranked` -> `MapLot` projection. The one place `y`/`x` become `lat`/`lon`. */
-export function toMapLot(row: Ranked): MapLot {
+/**
+ * The `Lot` -> `MapLot` projection. The one place `y`/`x` become `lat`/`lon`.
+ *
+ * The probability is passed in rather than looked up here: resolving a lot to
+ * its grid row is `App`'s single conversion point -- through `Lot.i`, never the
+ * array position -- and this module stays a pure reshape with no opinion about
+ * where the number came from.
+ */
+export function toMapLot(lot: Lot, probability: number | null): MapLot {
   return {
-    id: row.id,
-    name: row.lot.n,
-    district: row.lot.a,
-    lat: row.lot.y,
-    lon: row.lot.x,
-    probability: row.probability,
+    id: lot.id,
+    name: lot.n,
+    district: lot.a,
+    lat: lot.y,
+    lon: lot.x,
+    probability,
   };
 }
 
