@@ -49,9 +49,39 @@ dominated by easy cases and **climatology is a strong baseline**. Plan 4 must re
 hard subset (lots at or near capacity) in addition to the citywide number, or the evaluation will
 flatter itself.
 
-**Price is unstructured.** `payex` is free Chinese text averaging 57 chars ("小時：100元/時…"). The
-Plan 3 expected-cost ranker needs a numeric hourly rate parsed out of it — treat that as real work,
-not a field read.
+**Price is unstructured, and measured (2026-09-06 over 1,756 lots).** `payex` is free Chinese text;
+none are empty, 1,119 are distinct.
+
+| | share | note |
+|---|---|---|
+| hourly rate present | **87%** | `NN元/時` |
+| — time-tiered | 6% | `100元/時(09-21)、60元/時(21-09)` |
+| — weekday-varying | 6% | `週一至週五…` |
+| per-entry only (計次) | 3% | a different pricing model, not an hourly rate |
+| neither → **unknown** | **10%** | |
+
+**83 of the 104 time-tiered lots would be OVERSTATED by taking the first regex match**, so naive
+parsing is not good enough. The ranker shows price as a visible column, so a wrong price is worse
+than no price: **unknown must be a first-class value.** The UI shows it as unknown and the ranker
+drops the price term for that lot — never substitutes zero, never substitutes an average, never
+guesses.
+
+### The app is bilingual: English and 繁體中文
+
+Required, and it shapes the artifact format rather than being a later polish pass. The upstream feed
+is **100% Chinese for every user-facing field** — there is no English anywhere in it. So the
+translatable boundary is fixed by the data:
+
+| | distinct | translatable |
+|---|---|---|
+| UI chrome | — | yes, we author it |
+| Districts (`area`) | **12** | yes, a small closed set |
+| Lot types (`type2`) | **8** | yes |
+| Lot names | **1,750** | **no — and they should not be** |
+
+Lot names stay in Chinese under an English UI on purpose: they match the physical signage a driver
+reads on arrival. Translating them would make the app harder to use, not easier. Traditional
+characters throughout (zh-Hant / zh-TW), never Simplified.
 
 ### Collection runs locally, and the corpus has time-correlated gaps
 
