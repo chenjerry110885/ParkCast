@@ -60,6 +60,17 @@ _HOURLY = re.compile(r"(\d[\d,]*)\s*元\s*/\s*(?:小)?時")
 _ENTRY = re.compile(r"(\d[\d,]*)\s*元\s*/\s*次")
 
 
+# A bare figure carrying an explicit hour window -- `40元(08-22)` -- is a
+# tariff; the window is what it is charged per. A bare figure *without* one
+# stays unrecognised, because it is far too ambiguous to publish: a deposit, a
+# daily cap, a per-entry fee and a penalty all take that shape.
+_HOUR = r"\d{1,2}\s*(?:時|:\d{2})?"
+_WINDOWED = re.compile(
+    rf"(\d[\d,]*)\s*元\s*[（(]\s*{_HOUR}\s*[-~～至到]\s*{_HOUR}\s*[）)]")
+# A ceiling is not a tariff, however it is qualified.
+_CEILING = re.compile(r"上限|最高|免費|優惠|折扣")
+
+
 def _amount(digits: str) -> int:
     return int(digits.replace(",", ""))
 
@@ -146,19 +157,41 @@ def _strip_non_car(text: str) -> str:
                      for s in _SENTENCE.split(_ASIDE.sub("", text)))
 
 
+def _windowed_rates(timing: str) -> list[int]:
+    """Bare rates carrying an explicit hour window, ignoring clauses that quote
+    a ceiling rather than a rate."""
+    parts = _CLAUSE.split(timing)
+    return [_amount(m)
+            for i, part in enumerate(parts)
+            if i % 2 == 0 and not _CEILING.search(part)
+            for m in _WINDOWED.findall(part)]
+
+
+def _span(values: list[int]) -> Price | None:
+    """One rate is a fact; several mean the price varies under conditions this
+    text does not expose, so report the span. None if nothing is plausible."""
+    rates = sorted({v for v in values if PLAUSIBLE_MIN <= v <= PLAUSIBLE_MAX})
+    if not rates:
+        return None
+    return Price("exact", rates[0], rates[0]) if len(rates) == 1 \
+        else Price("range", rates[0], rates[-1])
+
+
 def parse_fare(payex: str | None) -> Price:
     if not payex:
         return UNKNOWN
 
     timing = _strip_non_car(_drop_surcharges(_TIMING.match(payex).group(1)))
 
-    rates = sorted({_amount(r) for r in _HOURLY.findall(timing)})
-    rates = [r for r in rates if PLAUSIBLE_MIN <= r <= PLAUSIBLE_MAX]
-    if rates:
-        # A single rate is a fact; several mean the price varies under
-        # conditions this text does not expose, so report the span.
-        return Price("exact", rates[0], rates[0]) if len(rates) == 1 \
-            else Price("range", rates[0], rates[-1])
+    hourly = _span([_amount(r) for r in _HOURLY.findall(timing)])
+    if hourly:
+        return hourly
+
+    # Fallback only. A bare windowed rate is good evidence of a tariff, but a
+    # quoted `元/時` is better evidence, so the two never compete.
+    windowed = _span(_windowed_rates(timing))
+    if windowed:
+        return windowed
 
     # Per-entry fees tier by weekday/weekend exactly as hourly rates do, and
     # taking the first match would ship the weekday fee on a Sunday. Report

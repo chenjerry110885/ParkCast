@@ -148,6 +148,35 @@ def test_a_charging_bay_surcharge_is_never_read_as_the_tariff():
     guard can catch it."""
     p = parse_fare(TPE0007)
     assert (p.low, p.high) != (10, 20)
+    assert p == Price("range", 20, 40)
+
+
+def test_a_bare_rate_with_an_hour_window_is_recovered_as_a_tariff():
+    """`NN元(HH-HH)` is strongly a tariff -- the window says what it is charged
+    per. TPE0429 prices 30/hr on weekday mornings and 40/hr otherwise, all of
+    it bare, and without this the lot has no price at all."""
+    p = parse_fare("計時:星期一至星期五30元(07-10)，40元(10-20)，星期六至星期日及政府行政"
+                   "機關放假之紀念日與民俗節日40元(07-20)，全程以半小時計費。"
+                   "月租:全日2,400元月(三、五號水門堤外通用)。")
+    assert p == Price("range", 30, 40)
+
+
+def test_a_bare_rate_without_an_hour_window_stays_unrecognised():
+    """A bare `NN元` could be a deposit, a daily cap, a per-entry fee or a
+    penalty. There is nothing in the text to tell them apart."""
+    assert parse_fare("計時：小型車每次收費50元。").kind == "unknown"
+    assert parse_fare("計時：小型車保證金100元。").kind == "unknown"
+
+
+def test_a_quoted_hourly_rate_beats_a_bare_windowed_one():
+    """The fallback must never widen a lot that already quotes `元/時`."""
+    p = parse_fare("計時：小型車40元/時，當日累計200元(08-20)。")
+    assert p == Price("exact", 40, 40)
+
+
+def test_a_windowed_ceiling_is_not_read_as_a_tariff():
+    """`上限` marks a cap, not a rate, however it is windowed."""
+    assert parse_fare("計時：小型車免費，當日累計上限200元(08-20)。").kind == "unknown"
 
 
 def test_a_surcharge_clause_is_excluded_however_it_is_introduced():
