@@ -332,7 +332,26 @@ Give the empty result set a message rather than a bare heading. Validate that `y
 numbers when parsing `lots.json`; a null coordinate currently renders as `13155.6 km`. Skip such a
 lot rather than plotting it in the Gulf of Guinea, and test both.
 
-- [ ] **Step 5: Run the full suite** — expect 66+ total.
+- [ ] **Step 4b: Say so when the data is too old to answer the question**
+
+Found while verifying Task 3. When the artifact's age exceeds the grid's span, EVERY horizon the user
+can pick clamps to the last column — so the scrubber silently does nothing and the app shows a
+forecast for a time nobody asked for. Observed with a 383-minute-old artifact: 24 scrubber positions,
+one identical answer, no indication anything was wrong.
+
+The clamp itself is correct. Presenting its output as an answer is not. This will happen in
+production: CLAUDE.md documents that the collector stops whenever the machine sleeps, and the CDN
+copy then ages while the site stays up.
+
+Implement: when `ageMin` exceeds the grid's span (`stepMin * nHorizons`, i.e. 120 min), the app says
+the forecast is too old to be useful rather than rendering a ranked list built on a clamped column.
+Keep the page usable — the lot metadata, distances and prices are all still valid, and a user may
+still want the nearest car park. It is the *probability* that has expired, not everything.
+
+Add strings in both languages, and a test that a grid older than its own span produces the
+too-old state rather than a silently clamped ranking.
+
+- [ ] **Step 5: Run the full suite** — expect 68+ total.
 
 - [ ] **Step 6: Commit**
 
