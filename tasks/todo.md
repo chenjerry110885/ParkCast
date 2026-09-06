@@ -239,6 +239,98 @@ git commit -m "feat(pricing): parse the fare field into a numeric price"
 
 ---
 
+### Task 1b: Stop the non-car strip from eating car rates
+
+Task 1's parser strips clauses about motorcycles and large vehicles so their rates are never mistaken
+for a car's. Measured against the committed fixture, it strips too much: **133 of the 332 `unknown`
+lots contain a perfectly good hourly rate that the strip destroyed.** Coverage is 81% where it could
+be ~88%.
+
+**Two distinct failure patterns, both confirmed on real lots:**
+
+1. **A parenthetical aside inside the car clause.** `小型車(含大型重型機車)：小型 30元/時，…` — the
+   aside names a motorcycle, so the strip fires mid-clause and eats to the next `。`, taking the car
+   rate with it. This is the bulk of the 133.
+2. **A non-car clause introduced by `、`.** `計時：小型車30元/時、機車10元/時(…)` — the ideographic
+   comma is not in the separator set, so the motorcycle clause is NOT stripped and its NT$10 becomes
+   the low end of a fake range. This lot must yield `exact(30)`, never `range(10, 30)`. It is the
+   mirror error and the more dangerous one: it advertises a price no driver can actually pay.
+
+**Files:**
+- Modify: `src/parkcast/pricing.py`
+- Modify: `tests/test_pricing.py`, `tests/test_pricing_coverage.py`
+
+**Interfaces:** unchanged — `parse_fare(payex) -> Price` keeps its signature and semantics.
+
+- [ ] **Step 1: Write the failing tests**
+
+```python
+# appended to tests/test_pricing.py
+def test_a_parenthetical_motorcycle_aside_does_not_destroy_the_car_rate():
+    """`小型車(含大型重型機車)` is a car clause that merely mentions motorcycles.
+    Stripping from the mention onward loses the rate entirely."""
+    p = parse_fare("計時：小型車(含大型重型機車)：小型 30元/時，未滿半小時以半小時計費。")
+    assert p == Price("exact", 30, 30)
+
+
+def test_a_motorcycle_clause_after_an_ideographic_comma_is_still_stripped():
+    """`、` separates clauses just as `，` does. Missing it lets a NT$10
+    motorcycle rate become the low end of a range no driver can pay."""
+    p = parse_fare("計時：小型車30元/時、機車10元/時(當日累計上限20元)，未滿半小時計費。")
+    assert p == Price("exact", 30, 30)
+
+
+def test_a_large_vehicle_rate_is_still_excluded():
+    """The strip must keep doing its original job."""
+    p = parse_fare("計時：小型車100元/時，大客車300元/時，停車全程以半小時計。")
+    assert p == Price("exact", 100, 100)
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `.venv/Scripts/python -m pytest tests/test_pricing.py -v`
+Expected: the first two FAIL; the third should already pass.
+
+- [ ] **Step 3: Fix the strip**
+
+Two changes, both in `pricing.py`:
+
+- Before stripping clauses, remove **bracketed asides** that name a non-car vehicle, so a mention
+  inside a car clause cannot trigger a clause-level strip:
+  `[（(][^）)]*(?:機車|大型車|大客車)[^）)]*[）)]`
+- Strip a non-car clause only when the vehicle word **begins a clause** — preceded by a separator or
+  the start of the string — and include `、` in the separator set on both sides of the rule.
+
+Tune against the fixture rather than by inspection; it is the ground truth and it is committed.
+
+- [ ] **Step 4: Verify against the whole fixture, and justify every change**
+
+This is the acceptance gate, not a formality. Produce and report:
+
+- coverage before and after (target: **above 85%**; measured 88% in prototyping)
+- implausible parses after (must be **zero**)
+- **every lot whose already-known price CHANGED value**, with its fare text, and a one-line
+  justification for each. A change is only acceptable if the new value is demonstrably more correct.
+  A previously-`exact` lot becoming a `range` because a motorcycle rate crept in is a REGRESSION,
+  not an improvement — that is failure pattern 2 and it must not appear.
+
+If any change cannot be justified, keep iterating rather than accepting it.
+
+- [ ] **Step 5: Raise the coverage guard**
+
+In `tests/test_pricing_coverage.py`, raise the `priced` threshold from `0.70` to `0.85` and lower the
+`unknown` bound from `0.30` to `0.15`, so the gain is locked in and a future regex regression fails
+the suite.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/parkcast/pricing.py tests/test_pricing.py tests/test_pricing_coverage.py
+git commit -m "fix(pricing): stop the non-car strip from eating car rates"
+```
+
+---
+
 ### Task 2: Carry the price in lots.json
 
 **Files:**
