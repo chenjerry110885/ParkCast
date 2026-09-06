@@ -5,20 +5,25 @@
  * runs in this component, and nothing is ever sent anywhere -- the driver's
  * location never leaves the phone, because there is no server to send it to.
  *
- * Three things here are load-bearing rather than cosmetic:
+ * Four things here are load-bearing rather than cosmetic:
  *
  *   - **The staleness line.** The upstream feed publishes every five minutes
  *     with a ~3-minute lag, so the reading behind any forecast is already a few
  *     minutes old. Saying so, from the grid's own `baseDataTs`, is the honest
  *     version of the "live" badge every other parking app wears -- and it is
  *     this project's entire thesis in one line of text.
+ *   - **The staleness *correction*.** Saying it is not enough: the grid's
+ *     horizons are measured from `baseDataTs`, so reading column "15 min" for a
+ *     driver arriving in 15 minutes answers for 15 minutes after a reading that
+ *     already happened. `gridHorizonMin` adds the age back, which is the whole
+ *     reason a nowcast is a model rather than a lookup. See `ageMin` below.
  *   - **Geolocation never leaves the user on a spinner.** Denial, failure and a
  *     browser without the API all land in the same visible end state, with the
  *     rest of the page still working.
  *   - **`baseDataTs` and `generatedAt` stay distinct.** The age shown is the age
  *     of the *reading*, not of the file we wrote from it.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
 import { LotList } from "./components/LotList";
 import { LangToggle } from "./components/LangToggle";
@@ -46,6 +51,17 @@ const DEFAULT_HORIZON_MIN = 15;
 /** How often the staleness line re-reads the clock. */
 const CLOCK_TICK_MS = 30_000;
 
+/**
+ * How often the artifacts are refetched.
+ *
+ * The horizon offset is only bounded if the age is: a tab left open answers for
+ * an ever-older reading otherwise, and the far end of the horizon control drifts
+ * into the past. Two minutes is well inside the feed's five-minute cadence and
+ * costs almost nothing -- `rosterId` pairing means a routine refetch revalidates
+ * the cached 186 KB `lots.json` and downloads only the 26 KB grid.
+ */
+export const REFRESH_MS = 120_000;
+
 /** Geolocation is a permission prompt, so it is a state machine, not a value. */
 type GeoState = "idle" | "locating" | "ready" | "unavailable";
 
@@ -59,6 +75,7 @@ export default function App() {
   const [artifacts, setArtifacts] = useState<Artifacts | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  const [refresh, setRefresh] = useState(0);
   const [destination, setDestination] = useState<LatLon | null>(null);
   const [geo, setGeo] = useState<GeoState>("idle");
   const [horizonMin, setHorizonMin] = useState(DEFAULT_HORIZON_MIN);
@@ -66,20 +83,30 @@ export default function App() {
 
   const s = t(lang);
 
+  // Whether a grid has ever landed, read from inside the fetch effect -- state
+  // would make the effect re-run on the load it just did.
+  const loadedRef = useRef(false);
+
   useEffect(() => {
     let cancelled = false;
     loadArtifacts(ARTIFACTS_BASE).then(
       (loaded) => {
-        if (!cancelled) setArtifacts(loaded);
+        if (cancelled) return;
+        loadedRef.current = true;
+        setArtifacts(loaded);
+        setLoadFailed(false);
       },
       () => {
-        if (!cancelled) setLoadFailed(true);
+        // A failed *refresh* must not replace a working screen with an error:
+        // the grid we hold is older than we wanted, not missing, and the
+        // staleness line already says so.
+        if (!cancelled && !loadedRef.current) setLoadFailed(true);
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [attempt]);
+  }, [attempt, refresh]);
 
   // The staleness line is only honest if it keeps counting.
   useEffect(() => {
@@ -87,13 +114,57 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  // ...and the correction below is only bounded if the reading keeps arriving.
+  useEffect(() => {
+    const bump = () => setRefresh((n) => n + 1);
+    const id = setInterval(() => {
+      // Nobody is reading a hidden tab, and polling one is exactly the battery
+      // cost an app with no server has no excuse for.
+      if (document.visibilityState !== "hidden") bump();
+    }, REFRESH_MS);
+    const onVisibility = () => {
+      // Coming back is the moment the age is largest and the user is looking.
+      if (document.visibilityState === "visible") bump();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
   const grid = artifacts?.grid ?? null;
 
   /**
+   * Whole minutes since the *reading*, not since the file was written.
+   *
+   * Shown in the staleness line and added to every horizon: those are two uses
+   * of one number, and they must not drift apart.
+   */
+  const ageMin =
+    grid === null ? null : Math.max(0, Math.round((nowMs / 1000 - grid.baseDataTs) / 60));
+
+  /**
    * The horizon snapped to a column the grid actually has, so the number under
-   * the control and the column read out of the grid are the same number.
+   * the control and the number the user picked are the same number.
    */
   const activeHorizon = grid ? (horizonColumn(grid, horizonMin) + 1) * grid.stepMin : horizonMin;
+
+  /**
+   * The horizon actually read out of the grid: the user's arrival time measured
+   * from `baseDataTs` instead of from now.
+   *
+   * `grid.py` evaluates column `c` at `baseDataTs + (c + 1) * stepMin`, so a
+   * grid five minutes old answers "in 15 min" with a forecast for now + 10.
+   * Adding the age back is the staleness correction the design spec calls the
+   * nowcast's whole job.
+   *
+   * At the far end this can run off the grid, and `probabilityAt` clamps to the
+   * last column. That is the right trade: a few minutes short at +120 min is a
+   * far smaller lie than being minutes wrong at +5, and dropping the option
+   * would take real arrival times off the control to flatter the model.
+   */
+  const gridHorizonMin = activeHorizon + (ageMin ?? 0);
 
   const horizons = useMemo(
     () =>
@@ -108,14 +179,14 @@ export default function App() {
     const { grid: g, lots } = artifacts;
     return rankLots({
       destination,
-      horizonMin: activeHorizon,
+      horizonMin: gridHorizonMin,
       lots: lots.lots,
       // Guarded rather than raw: a roster longer than the grid would otherwise
       // throw mid-render and take the whole page down, when "no data" for the
       // extra rows is both true and survivable.
       probability: (i, h) => (i < g.nLots ? probabilityAt(g, i, h) : null),
     }).slice(0, LIST_LIMIT);
-  }, [artifacts, destination, activeHorizon]);
+  }, [artifacts, destination, gridHorizonMin]);
 
   function requestLocation() {
     if (typeof navigator === "undefined" || !navigator.geolocation) {
@@ -137,10 +208,6 @@ export default function App() {
       setGeo("unavailable");
     }
   }
-
-  // Whole minutes since the *reading*, not since the file was written.
-  const ageMin =
-    grid === null ? null : Math.max(0, Math.round((nowMs / 1000 - grid.baseDataTs) / 60));
 
   return (
     <div className="app">
