@@ -33,6 +33,16 @@ _NON_CAR = re.compile(r"大型重型機車|大型重機|重型機車|大客車|�
 # always the small-vehicle subject here.
 _CAR = re.compile(r"小型車|小客車|汽車")
 
+# A surcharge is not a tariff. `加收`, `另收` and `加計` -- and `再加收`, which
+# contains `加收` -- introduce an extra levied on top of the rate, most often
+# for occupying a charging bay. `另計` is deliberately absent: `隔日另計` says
+# the next day is counted separately, not that anything extra is charged.
+_SURCHARGE = re.compile(r"加收|另收|加計")
+
+# Clause delimiters, kept in the split so that blanking a clause leaves the
+# surrounding structure -- and so the clause test -- undisturbed.
+_CLAUSE = re.compile(r"([，,、；;。：:])")
+
 # Sentence boundaries -- the widest a single stripped clause can reach.
 _SENTENCE = re.compile(r"[；;。]")
 # A colon introduces a fresh subject, so everything before it is out of reach:
@@ -117,6 +127,19 @@ def _strip_sentence(sentence: str) -> str:
     return sentence[:cut] + _strip_sentence(sentence[resume:])
 
 
+def _drop_surcharges(text: str) -> str:
+    """Blank the clauses that levy an extra on top of the tariff.
+
+    TPE0007 writes its real tariff bare (`40元(08-22)`) while every one of its
+    charging-bay surcharges carries `元/時`, so without this the surcharge is
+    the only thing `_HOURLY` can see and a NT$40 lot is published at NT$10-20.
+    No plausibility guard can catch that -- 10-20 is an ordinary hourly rate.
+    """
+    parts = _CLAUSE.split(text)
+    return "".join("" if i % 2 == 0 and _SURCHARGE.search(part) else part
+                   for i, part in enumerate(parts))
+
+
 def _strip_non_car(text: str) -> str:
     """Drop the clauses that price something other than a car."""
     return "；".join(_strip_sentence(s)
@@ -127,7 +150,7 @@ def parse_fare(payex: str | None) -> Price:
     if not payex:
         return UNKNOWN
 
-    timing = _strip_non_car(_TIMING.match(payex).group(1))
+    timing = _strip_non_car(_drop_surcharges(_TIMING.match(payex).group(1)))
 
     rates = sorted({_amount(r) for r in _HOURLY.findall(timing)})
     rates = [r for r in rates if PLAUSIBLE_MIN <= r <= PLAUSIBLE_MAX]

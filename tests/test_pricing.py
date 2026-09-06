@@ -134,6 +134,41 @@ def test_a_shared_subject_list_keeps_the_rate_it_shares():
     assert parse_fare("小型車、大型重型機車：計時40元/時，全程以半小時計。")         == Price("exact", 40, 40)
 
 
+TPE0007 = ("計時:40元(08-22)、20元(22-08)，停放於充電格位之車輛，加收10元/時，"
+           "依設備自動判斷未充電者再加收10元/時（未充電者合計加收20元/時），全程半小時計。"
+           "月租：全日6,000元，夜間3,000元/月(22-08)。")
+
+
+def test_a_charging_bay_surcharge_is_never_read_as_the_tariff():
+    """TPE0007, live in the published roster. Its real tariff is 40/hr by day
+    and 20/hr overnight, written bare; the 10/10/20 figures are 加收 extras for
+    occupying a charging bay and every one of them carries `元/時`, so they are
+    all `_HOURLY` can see. Publishing NT$10-20 for a NT$40 lot is exactly the
+    plausible-but-wrong number this parser exists to refuse, and no plausibility
+    guard can catch it."""
+    p = parse_fare(TPE0007)
+    assert (p.low, p.high) != (10, 20)
+
+
+def test_a_surcharge_clause_is_excluded_however_it_is_introduced():
+    for marker in ("加收", "另收", "再加收", "加計"):
+        text = f"計時：小型車30元/時，停放於充電格位之車輛{marker}10元/時。"
+        assert parse_fare(text) == Price("exact", 30, 30), marker
+
+
+def test_隔日另計_is_not_a_surcharge():
+    """`另計` says the next day is counted separately, not that anything extra
+    is charged. It ends nearly every per-entry clause in the feed; treating it
+    as a surcharge would blank the rate itself."""
+    assert parse_fare("小型車： 計次 50元/次，隔日另計。") == Price("entry", 50, 50)
+
+
+def test_a_surcharge_does_not_swallow_the_rate_in_a_neighbouring_clause():
+    """TPE0590's shape: the levy sits in its own clause after the fee."""
+    p = parse_fare("計次：小型車30元/次，當日未於17時30分前離場加收30元。")
+    assert p == Price("entry", 30, 30)
+
+
 def test_a_word_between_the_rate_and_the_motorcycle_does_not_defeat_the_strip():
     """Testing only the character immediately before the noun was too narrow:
     `惟` and `其中` sit between the comma and the subject, and let a NT$10
