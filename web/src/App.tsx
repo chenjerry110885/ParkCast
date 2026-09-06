@@ -17,11 +17,11 @@
  *     driver arriving in 15 minutes answers for 15 minutes after a reading that
  *     already happened. `gridHorizonMin` adds the age back, which is the whole
  *     reason a nowcast is a model rather than a lookup. See `ageMin` below.
- *   - **The staleness *limit*.** The correction above has an end. Once the
- *     reading is older than the grid's whole span, every arrival time clamps to
- *     the last column and the forecast is no longer about the time the user
- *     asked for; `forecastExpired` says so and withholds the probability rather
- *     than dressing a clamp up as an answer. The rest of the page keeps working.
+ *   - **The staleness *limit*.** The correction above has an end. Once even the
+ *     nearest arrival time clamps to the last column, every later one does too
+ *     and the forecast is no longer about the time the user asked for;
+ *     `forecastExpired` says so and withholds the probability rather than
+ *     dressing a clamp up as an answer. The rest of the page keeps working.
  *   - **Geolocation never leaves the user on a spinner.** Denial, failure, a
  *     browser without the API and a permission prompt closed without an answer
  *     all land in the same visible end state, with the rest of the page still
@@ -252,15 +252,22 @@ export default function App() {
   const gridHorizonMin = activeHorizon + (ageMin ?? 0);
 
   /**
-   * The reading is older than the whole grid, so there is no forecast left.
+   * The reading is old enough that no arrival time the user can pick is still
+   * answerable, so there is no forecast left.
    *
-   * The grid spans `stepMin * nHorizons` minutes from `baseDataTs` -- 120 as
-   * built. Past that the age alone overshoots the last column, so *every*
-   * arrival time the user can pick clamps to the same one: the scrubber does
+   * The test is the *nearest* arrival time: once even `stepMin` from now lands
+   * on the last column, every later one clamps to it too, the scrubber does
    * nothing, and all 24 of its positions show one identical answer for a time
    * nobody asked for. Observed with a 383-minute-old artifact, and certain to
    * recur -- the collector stops whenever the machine it runs on sleeps, while
    * the published copy stays up and goes on ageing.
+   *
+   * Comparing the age against the grid's whole span (`stepMin * nHorizons`,
+   * 120 as built) is the obvious version of this and trips one window late: at
+   * the shipped geometry the scrubber goes inert at an age of 113 minutes --
+   * `round((5 + 113) / 5) - 1` is already column 23 -- while `age > 120` waits
+   * until 121. For those eight minutes the slider was live, the heading claimed
+   * an order, and all 24 positions rendered the same clamped column.
    *
    * The clamp is right; presenting its output as an answer is not. So the
    * probability is dropped at its source below: one `null` per lot, which puts
@@ -270,7 +277,9 @@ export default function App() {
    * expired, not the page.
    */
   const forecastExpired =
-    grid !== null && ageMin !== null && ageMin > grid.stepMin * grid.nHorizons;
+    grid !== null &&
+    ageMin !== null &&
+    horizonColumn(grid, grid.stepMin + ageMin) === grid.nHorizons - 1;
 
   /**
    * Every lot the map draws, projected straight from the artifacts.

@@ -187,6 +187,31 @@ async function renderLocated(): Promise<void> {
   await screen.findByTestId("lot-list");
 }
 
+/** Column `c` reads `(c + 1) * 4`%, so every column is a distinct percentage. */
+const columnMark = (column: number) => (column + 1) * 4;
+
+/** The single lot the column-marked fixture publishes. */
+const MARKED = LOTS[0]!;
+
+/**
+ * One lot whose 24 columns are all different, so the row names its column.
+ *
+ * Shared by the two describes that need to see *which* column was read: the
+ * staleness correction, and the expiry that fires when there is only one column
+ * left to read.
+ */
+function stubColumnMarkedArtifacts() {
+  const body = Array.from({ length: N_HORIZONS }, (_unused, c) => columnMark(c));
+  stubFetch(encodeGrid(body, 1), {
+    v: 1,
+    generated_at: BASE_DATA_TS + 213,
+    base_data_ts: BASE_DATA_TS,
+    n_lots: 1,
+    roster_id: ROSTER_ID,
+    lots: [MARKED],
+  });
+}
+
 /** The row whose lot name is `name`. Names are Chinese in both languages. */
 function rowFor(name: string): HTMLElement {
   const heading = screen.getByText(name);
@@ -379,24 +404,6 @@ describe("arrival time", () => {
  * the artifact is older than the trip. The age has to be added back.
  */
 describe("staleness correction", () => {
-  /** Column `c` reads `(c + 1) * 4`%, so every column is a distinct percentage. */
-  const columnMark = (column: number) => (column + 1) * 4;
-
-  const MARKED = LOTS[0]!;
-
-  /** One lot whose 24 columns are all different, so the row names its column. */
-  function stubColumnMarkedArtifacts() {
-    const body = Array.from({ length: N_HORIZONS }, (_unused, c) => columnMark(c));
-    stubFetch(encodeGrid(body, 1), {
-      v: 1,
-      generated_at: BASE_DATA_TS + 213,
-      base_data_ts: BASE_DATA_TS,
-      n_lots: 1,
-      roster_id: ROSTER_ID,
-      lots: [MARKED],
-    });
-  }
-
   it("reads the column for the arrival time plus the artifact's age", async () => {
     const AGE_MIN = 10;
     const REQUESTED_MIN = 15; // the control's default
@@ -553,19 +560,23 @@ describe("artifacts", () => {
 /**
  * The forecast has an expiry, and the app has to say so.
  *
- * The grid spans `stepMin * nHorizons` minutes from the reading it was built
- * from -- 120 here, as shipped. Once the artifact is older than that, the
- * staleness correction pushes every arrival time the user can pick past the last
- * column, they all clamp to it, and the scrubber becomes a control that changes
+ * The staleness correction pushes every arrival time the user can pick towards
+ * the end of the grid as the reading ages. Once even the *nearest* one clamps to
+ * the last column, they all do: the scrubber becomes a control that changes
  * nothing while the screen shows one answer for a time nobody asked for. Found
  * with a 383-minute-old artifact, and guaranteed to recur: the collector stops
  * whenever its machine sleeps while the published copy stays up and goes on
  * ageing.
+ *
+ * The boundary is the point of the two tests at the bottom. It is *not* the
+ * grid's span: at the shipped geometry the scrubber goes inert at an age of 113
+ * minutes, eight before the span runs out at 121.
  */
 describe("an artifact older than the grid it came from", () => {
-  const GRID_SPAN_MIN = N_HORIZONS * STEP_MIN;
   /** The 383 minutes actually observed while verifying the scrubber. */
   const OBSERVED_AGE_MIN = 383;
+  /** `round((5 + 112) / 5) - 1` is column 22; one minute later it is 23. */
+  const LAST_LIVE_AGE_MIN = 112;
 
   it("says the forecast is too old instead of showing a clamped column", async () => {
     ageArtifact(OBSERVED_AGE_MIN);
@@ -617,18 +628,42 @@ describe("an artifact older than the grid it came from", () => {
     expect(screen.getByText(t("zh").nearbyCarParks)).toBeInTheDocument();
   });
 
-  it("leaves a grid still inside its own span alone", async () => {
-    // One minute short of the span: the far horizons clamp, exactly as they
-    // always have, and that is the documented trade rather than an expiry.
-    ageArtifact(GRID_SPAN_MIN - 1);
+  it("expires as soon as the nearest arrival time clamps, not a window later", async () => {
+    // 113 minutes: inside the grid's 120-minute span, and already inert. The
+    // span test called this live, so the slider was enabled and the heading
+    // claimed an order over 24 identical clamped columns.
+    ageArtifact(LAST_LIVE_AGE_MIN + 1);
+    await renderLocated();
+
+    expect(screen.getByTestId("forecast-expired").textContent).toBe(t("en").forecastTooOld);
+    expect(screen.getByLabelText(t("en").arrivingIn)).toBeDisabled();
+    expect(screen.getByText(t("en").nearbyCarParks)).toBeInTheDocument();
+    for (const cell of screen.getAllByTestId("lot-probability")) {
+      expect(cell.textContent).not.toMatch(/\d+%/);
+    }
+  });
+
+  it("leaves a grid alone while the scrubber can still change the answer", async () => {
+    // One minute earlier, and the control is not a decoration: the nearest
+    // arrival reads column 22 and the furthest reads 23, so the far horizons
+    // clamp exactly as they always have -- the documented trade, not an expiry.
+    stubColumnMarkedArtifacts();
+    ageArtifact(LAST_LIVE_AGE_MIN);
     await renderLocated();
 
     expect(screen.queryByTestId("forecast-expired")).toBeNull();
     expect(screen.getByText(t("en").rankedForArrival)).toBeInTheDocument();
-    expect(screen.getByLabelText(t("en").arrivingIn)).not.toBeDisabled();
-    expect(
-      within(rowFor("市府路一號停車場")).getByTestId("lot-probability").textContent,
-    ).toContain("88%");
+    const scrubber = screen.getByLabelText(t("en").arrivingIn);
+    expect(scrubber).not.toBeDisabled();
+
+    fireEvent.change(scrubber, { target: { value: String(STEP_MIN) } });
+    const nearest = within(rowFor(MARKED.n)).getByTestId("lot-probability").textContent;
+    fireEvent.change(scrubber, { target: { value: String(N_HORIZONS * STEP_MIN) } });
+    const furthest = within(rowFor(MARKED.n)).getByTestId("lot-probability").textContent;
+
+    expect(nearest).toContain(`${columnMark(N_HORIZONS - 2)}%`);
+    expect(furthest).toContain(`${columnMark(N_HORIZONS - 1)}%`);
+    expect(nearest).not.toBe(furthest);
   });
 });
 
