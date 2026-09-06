@@ -73,6 +73,30 @@ export interface Strings {
   startPrompt: string;
   /** Heading over the ranked list. */
   rankedForArrival: string;
+  /**
+   * Heading over the list once the forecast has expired: the rows are still
+   * ordered, but by walk and price alone, so the heading must stop promising
+   * that the order has anything to do with the arrival time.
+   */
+  nearbyCarParks: string;
+  /**
+   * Shown when the reading behind the grid is older than the grid's own span,
+   * so no arrival time the user can pick has a forecast behind it any more.
+   * Says what expired and, just as importantly, what did not.
+   */
+  forecastTooOld: string;
+  /** Shown when nothing ranked at all -- an empty heading explains nothing. */
+  noLotsNearby: string;
+  /** Accessible name for the map region. The map itself carries no text. */
+  mapLabel: string;
+  /**
+   * Shown in place of the map when the device gives us no WebGL context.
+   *
+   * The ranked list is the app's actual output, so a map that cannot be drawn
+   * is a missing illustration, not a broken app -- and this says so instead of
+   * leaving a blank rectangle.
+   */
+  mapUnavailable: string;
 }
 
 const en: Strings = {
@@ -94,8 +118,14 @@ const en: Strings = {
   loading: "Loading forecast…",
   loadFailed: "Couldn't load the forecast.",
   retry: "Try again",
-  startPrompt: "Tap “Use my location” to rank the car parks around you.",
+  startPrompt: "Tap the map where you're headed, or “Use my location”, to rank the car parks around it.",
   rankedForArrival: "Ranked for your arrival",
+  nearbyCarParks: "Car parks nearby",
+  forecastTooOld:
+    "This forecast is too old to answer for your arrival time, so no chance of a space is shown. Names, walking distances and prices are still correct.",
+  noLotsNearby: "No car parks to rank here. Try another point on the map.",
+  mapLabel: "Map of car parks",
+  mapUnavailable: "This device can't draw the map. The ranked list still works.",
 };
 
 const zh: Strings = {
@@ -117,8 +147,13 @@ const zh: Strings = {
   loading: "載入預報中…",
   loadFailed: "無法載入預報。",
   retry: "重試",
-  startPrompt: "點選「使用目前位置」，排序你附近的停車場。",
+  startPrompt: "點選地圖上的目的地，或「使用目前位置」，排序附近的停車場。",
   rankedForArrival: "依抵達時間排序",
+  nearbyCarParks: "附近的停車場",
+  forecastTooOld: "預報資料已過舊，無法推估您抵達時的狀況，因此不顯示有位機率。名稱、步行距離與價格仍然正確。",
+  noLotsNearby: "此處沒有可排序的停車場，請改點選地圖上的其他位置。",
+  mapLabel: "停車場地圖",
+  mapUnavailable: "此裝置無法顯示地圖，排序清單仍可使用。",
 };
 
 const DICTS: Record<Lang, Strings> = { en, zh };

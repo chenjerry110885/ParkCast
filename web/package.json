@@ -13,6 +13,9 @@
     "sync-artifacts": "node ../scripts/sync-artifacts.mjs"
   },
   "dependencies": {
+    "maplibre-gl": "^6.7.0",
+    "pmtiles": "^4.5.0",
+    "protomaps-themes-base": "^4.5.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

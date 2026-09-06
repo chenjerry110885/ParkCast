@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HEADER_SIZE, UNKNOWN, loadArtifacts, parseGrid, probabilityAt } from "../src/artifacts";
-import type { LotsDoc } from "../src/types";
+import {
+  HEADER_SIZE,
+  UNKNOWN,
+  artifactsBase,
+  loadArtifacts,
+  parseGrid,
+  probabilityAt,
+} from "../src/artifacts";
+import type { Lot, LotsDoc } from "../src/types";
 
 /** Build a grid the same way the Python encoder does: little-endian, no padding. */
 function makeGrid(nLots: number, nHorizons: number, fill: number[], rosterId = 42): ArrayBuffer {
@@ -198,5 +205,128 @@ describe("loadArtifacts", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(loadArtifacts("https://example.test/artifacts")).rejects.toThrow("network down");
+  });
+});
+
+/**
+ * The join between the deployment base and the artifact directory.
+ *
+ * `BASE_URL` is a URL prefix, not a path, and the difference only shows when it
+ * is absolute -- which is exactly the case dev never exercises and a CDN deploy
+ * always does.
+ */
+describe("artifactsBase", () => {
+  it("joins a root base without doubling the separator", () => {
+    expect(artifactsBase("/")).toBe("/artifacts");
+  });
+
+  it("joins a sub-path base, for a project site served under a repo name", () => {
+    expect(artifactsBase("/ParkCast/")).toBe("/ParkCast/artifacts");
+  });
+
+  it("leaves the scheme of an absolute base intact", () => {
+    // The bug this replaces collapsed every `//`, making this `https:/cdn...`
+    // -- a URL that resolves relative to the page and 404s on every fetch.
+    expect(artifactsBase("https://cdn.example/")).toBe("https://cdn.example/artifacts");
+    expect(artifactsBase("https://cdn.example/parkcast/")).toBe(
+      "https://cdn.example/parkcast/artifacts",
+    );
+  });
+
+  it("tolerates a base that does not end in a slash", () => {
+    expect(artifactsBase("https://cdn.example")).toBe("https://cdn.example/artifacts");
+  });
+});
+
+/**
+ * A row whose coordinates are missing.
+ *
+ * Nothing in the shipped feed has one, so this is robustness rather than a
+ * repair -- but the failure is silent and geographic: JSON `null` coerces to 0
+ * and puts a Taipei car park in the Gulf of Guinea at the top of every ranking,
+ * and `undefined` yields `NaN` metres and a `NaN` sort key, which makes the
+ * order of the whole list depend on the order it started in.
+ */
+describe("fetchLots coordinate validation", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const lot = (i: number, over: Partial<Lot> = {}): Lot =>
+    ({
+      i,
+      id: `TPE${i}`,
+      n: `停車場${i}`,
+      a: "中正區",
+      y: 25.04,
+      x: 121.52,
+      c: 40,
+      t: "民營停車場",
+      p: { k: "exact", lo: 30, hi: 30 },
+      ...over,
+    }) as Lot;
+
+  /** Load a roster of four lots, `bad` of which is malformed. */
+  async function loadWith(bad: Partial<Lot>) {
+    const doc = makeLotsDoc(42, {
+      n_lots: 4,
+      lots: [lot(0), lot(1, bad), lot(2), lot(3)],
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        url.endsWith("grid.bin")
+          ? Promise.resolve(bufferResponse(makeGrid(4, 1, [10, 20, 30, 40])))
+          : Promise.resolve(jsonResponse(doc)),
+      ),
+    );
+    return loadArtifacts("https://example.test/artifacts");
+  }
+
+  it("drops a lot whose latitude is null rather than placing it at 0, 0", async () => {
+    const { lots } = await loadWith({ y: null as unknown as number });
+    expect(lots.lots.map((l) => l.id)).toEqual(["TPE0", "TPE2", "TPE3"]);
+  });
+
+  it("drops a lot whose longitude is missing rather than ranking it on NaN", async () => {
+    const { lots } = await loadWith({ x: undefined as unknown as number });
+    expect(lots.lots.map((l) => l.id)).toEqual(["TPE0", "TPE2", "TPE3"]);
+  });
+
+  it("leaves the survivors carrying their own grid rows, not their new positions", async () => {
+    // The whole reason dropping a row is safe: `i` still names the forecast.
+    const { lots } = await loadWith({ y: Number.NaN });
+    expect(lots.lots.map((l) => l.i)).toEqual([0, 2, 3]);
+    // `n_lots` still describes the roster the grid was built against.
+    expect(lots.n_lots).toBe(4);
+  });
+
+  it("keeps a well-formed roster identical, allocating nothing", async () => {
+    const doc = makeLotsDoc(42, { n_lots: 2, lots: [lot(0), lot(1)] });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        url.endsWith("grid.bin")
+          ? Promise.resolve(bufferResponse(makeGrid(2, 1, [10, 20])))
+          : Promise.resolve(jsonResponse(doc)),
+      ),
+    );
+    const { lots } = await loadArtifacts("https://example.test/artifacts");
+    expect(lots).toBe(doc);
+  });
+
+  it("still throws on a truncated download, which is an error and not a bad row", async () => {
+    // The length check runs first, on purpose: a file that arrived incomplete
+    // and a row we chose to drop must not look the same.
+    const doc = makeLotsDoc(42, { n_lots: 3, lots: [lot(0), lot(1)] });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        url.endsWith("grid.bin")
+          ? Promise.resolve(bufferResponse(makeGrid(3, 1, [10, 20, 30])))
+          : Promise.resolve(jsonResponse(doc)),
+      ),
+    );
+    await expect(loadArtifacts("https://example.test/artifacts")).rejects.toThrow(/n_lots/);
   });
 });

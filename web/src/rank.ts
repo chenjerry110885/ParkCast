@@ -84,7 +84,12 @@ export interface Ranked {
   lot: Lot;
   /** Feed id, lifted out because the list keys on it. */
   id: string;
-  /** Position in the input array, i.e. the grid row this was scored from. */
+  /**
+   * Position in the input array, and what `probability` was called with.
+   *
+   * Not necessarily the grid row: `fetchLots` may have dropped an unusable row,
+   * so the caller resolves the row through `Lot.i`. See `App.tsx`.
+   */
   index: number;
   /** P(at least one space) at the arrival time, or `null` if we have none. */
   probability: number | null;
@@ -224,4 +229,47 @@ export function rankLots(input: RankInput): Ranked[] {
   });
 
   return scored.map((s) => s.row);
+}
+
+/**
+ * How many no-forecast lots the list will grow by to keep the ranker's promise.
+ * A handful, so the rescue stays a footnote on the list rather than a second one.
+ */
+export const UNKNOWN_RESERVE = 5;
+
+/**
+ * The head of the ranking, plus any nearer no-forecast lots the cap would drop.
+ *
+ * `rankLots` keeps a lot with no forecast and sorts it behind every lot that has
+ * one -- deliberately: a cost missing its risk term is a different quantity, and
+ * comparing the two would float exactly the lots we know least about to the top.
+ * Rendering only the first N rows then undoes that promise *precisely*: the rows
+ * the ranker refused to drop are the first ones the cap drops, and a car park
+ * missing from the list is invisible while one that says "no data" is not.
+ *
+ * So the cap bends and the sort does not. The alternative -- ranking unknowns by
+ * distance among the rest -- would have to compare the two costs after all, and
+ * would be a systematic bias dressed as a fix.
+ *
+ * A no-forecast lot is appended when it is no further from the destination than
+ * a lot already on screen. That is the honest reading of "nearby" here: the
+ * user's own list sets the scale, so this promises nothing about a lot across
+ * the city and everything about one on the same street. At most
+ * `UNKNOWN_RESERVE` of them, nearest first.
+ */
+export function listRows(ranked: readonly Ranked[], limit: number): Ranked[] {
+  const head = ranked.slice(0, limit);
+  // Nothing was cut, or the cap already reached the unknown group -- and when
+  // no lot has a forecast at all, the head *is* that group and needs no rescue.
+  if (head.length === ranked.length) return head;
+  if (head.some((row) => row.probability === null)) return head;
+
+  const envelope = head.reduce((furthest, row) => Math.max(furthest, row.meters), 0);
+  const rescued = ranked
+    .slice(limit)
+    .filter((row) => row.probability === null && row.meters <= envelope)
+    .sort((a, b) => a.meters - b.meters)
+    .slice(0, UNKNOWN_RESERVE);
+
+  return rescued.length === 0 ? head : [...head, ...rescued];
 }

@@ -5,7 +5,7 @@
  * runs in this component, and nothing is ever sent anywhere -- the driver's
  * location never leaves the phone, because there is no server to send it to.
  *
- * Four things here are load-bearing rather than cosmetic:
+ * Seven things here are load-bearing rather than cosmetic:
  *
  *   - **The staleness line.** The upstream feed publishes every five minutes
  *     with a ~3-minute lag, so the reading behind any forecast is already a few
@@ -17,32 +17,59 @@
  *     driver arriving in 15 minutes answers for 15 minutes after a reading that
  *     already happened. `gridHorizonMin` adds the age back, which is the whole
  *     reason a nowcast is a model rather than a lookup. See `ageMin` below.
+ *   - **The staleness *limit*.** The correction above has an end. Once even the
+ *     nearest arrival time clamps to the last column, every later one does too
+ *     and the forecast is no longer about the time the user asked for;
+ *     `forecastExpired` says so and withholds the probability rather than
+ *     dressing a clamp up as an answer. The rest of the page keeps working.
  *   - **Geolocation never leaves the user on a spinner.** Denial, failure, a
  *     browser without the API and a permission prompt closed without an answer
  *     all land in the same visible end state, with the rest of the page still
  *     working.
  *   - **`baseDataTs` and `generatedAt` stay distinct.** The age shown is the age
  *     of the *reading*, not of the file we wrote from it.
+ *   - **The destination is an input, not a measurement.** Geolocation answers
+ *     "where am I", which is the wrong question for a driver on their way
+ *     somewhere else; a tap on the map answers the right one. Both feed the same
+ *     single `destination`, and a tap wins over a location still in flight.
+ *   - **The map does not wait for the destination.** Nothing a dot needs -- id,
+ *     name, district, position, probability -- comes from where the driver is
+ *     going, so all 1,088 draw on first paint and only the *ranking* waits.
+ *     Feeding the map the ranked array instead, as this did, left the whole
+ *     city invisible until the user happened to tap: the project's own
+ *     "silently absent lot" failure, at 1,088 out of 1,088.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
+import { artifactsBase, horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
 import { LotList } from "./components/LotList";
 import { LangToggle } from "./components/LangToggle";
+import { Scrubber } from "./components/Scrubber";
 import type { LatLon } from "./geo";
 import { detectLang, fillTemplate, t, type Lang } from "./i18n";
-import { rankLots } from "./rank";
-import type { Grid, LotsDoc } from "./types";
+import { toMapLot } from "./map/lotSource";
+import { MapView } from "./map/MapView";
+import { listRows, rankLots } from "./rank";
+import type { Grid, Lot, LotsDoc } from "./types";
 
 /**
  * Where the two artifacts live. Relative to the deployment root so the app
- * works under a sub-path (GitHub Pages) without a rebuild-time absolute URL.
+ * works under a sub-path (GitHub Pages) without a rebuild-time absolute URL --
+ * and correct for an absolute base too, which is what `artifactsBase` is for.
  */
-const ARTIFACTS_BASE = `${import.meta.env.BASE_URL}artifacts`.replace(/\/{2,}/g, "/");
+const ARTIFACTS_BASE = artifactsBase(import.meta.env.BASE_URL);
 
 /**
- * How many ranked lots to render. A driver picks from the first handful; past
- * that the list is scroll for its own sake, and every extra row is DOM work on
- * a phone. All 1,088 are still *ranked* -- only the tail is not drawn.
+ * How many ranked lots the *list* renders. A driver picks from the first
+ * handful; past that the list is scroll for its own sake, and every extra row
+ * is DOM work on a phone.
+ *
+ * This is a limit on the list and on nothing else. The map draws every lot in
+ * the roster and never goes through the ranking at all: slicing it there would
+ * silently hide 98% of the city behind a map that looked like it was showing
+ * all of it.
+ *
+ * It is also a *soft* limit: `listRows` grows the list rather than let a fixed
+ * cap drop the no-forecast lots the ranker deliberately kept.
  */
 export const LIST_LIMIT = 20;
 
@@ -83,6 +110,25 @@ interface Artifacts {
   lots: LotsDoc;
 }
 
+/**
+ * P(at least one space) for one lot at one arrival time.
+ *
+ * Read at the row the lot *declares*, never at its position in the array:
+ * `fetchLots` drops a row it cannot place, and reading by position after that
+ * hands every later lot its neighbour's forecast -- a silent, plausible-looking
+ * wrong answer for most of the city. Both readers, the ranking and the map, go
+ * through here, so the two cannot disagree about which row belongs to which car
+ * park.
+ *
+ * Guarded rather than raw: a roster longer than the grid would otherwise throw
+ * mid-render and take the whole page down, when "no data" for the extra rows is
+ * both true and survivable.
+ */
+function probabilityForLot(grid: Grid, lot: Lot | undefined, horizonMin: number): number | null {
+  const row = lot?.i;
+  return row === undefined || row >= grid.nLots ? null : probabilityAt(grid, row, horizonMin);
+}
+
 export default function App() {
   const [lang, setLang] = useState<Lang>(detectLang);
   const [artifacts, setArtifacts] = useState<Artifacts | null>(null);
@@ -100,6 +146,13 @@ export default function App() {
   // would make the effect re-run on the load it just did.
   const loadedRef = useRef(false);
   const geoWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * Abandons an in-flight location request. Held in a ref because the thing
+   * that abandons it -- a tap on the map -- happens in a later render than the
+   * one that started it, and a location arriving afterwards must not overwrite
+   * the destination the user just chose by hand.
+   */
+  const abandonGeoRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -192,30 +245,89 @@ export default function App() {
    * last column. That is the right trade: a few minutes short at +120 min is a
    * far smaller lie than being minutes wrong at +5, and dropping the option
    * would take real arrival times off the control to flatter the model.
+   *
+   * It stops being a trade once the *age alone* runs off the grid -- see
+   * `forecastExpired`.
    */
   const gridHorizonMin = activeHorizon + (ageMin ?? 0);
 
-  const horizons = useMemo(
-    () =>
-      grid === null
-        ? []
-        : Array.from({ length: grid.nHorizons }, (_unused, i) => (i + 1) * grid.stepMin),
-    [grid],
-  );
+  /**
+   * The reading is old enough that no arrival time the user can pick is still
+   * answerable, so there is no forecast left.
+   *
+   * The test is the *nearest* arrival time: once even `stepMin` from now lands
+   * on the last column, every later one clamps to it too, the scrubber does
+   * nothing, and all 24 of its positions show one identical answer for a time
+   * nobody asked for. Observed with a 383-minute-old artifact, and certain to
+   * recur -- the collector stops whenever the machine it runs on sleeps, while
+   * the published copy stays up and goes on ageing.
+   *
+   * Comparing the age against the grid's whole span (`stepMin * nHorizons`,
+   * 120 as built) is the obvious version of this and trips one window late: at
+   * the shipped geometry the scrubber goes inert at an age of 113 minutes --
+   * `round((5 + 113) / 5) - 1` is already column 23 -- while `age > 120` waits
+   * until 121. For those eight minutes the slider was live, the heading claimed
+   * an order, and all 24 positions rendered the same clamped column.
+   *
+   * The clamp is right; presenting its output as an answer is not. So the
+   * probability is dropped at its source below: one `null` per lot, which puts
+   * every row on the "no data" path the UI already has for a missing cell and
+   * the map on the grey it already has for an unknown one. Names, distances and
+   * prices never came from the grid and are untouched -- it is the forecast that
+   * expired, not the page.
+   */
+  const forecastExpired =
+    grid !== null &&
+    ageMin !== null &&
+    horizonColumn(grid, grid.stepMin + ageMin) === grid.nHorizons - 1;
 
+  /**
+   * Every lot the map draws, projected straight from the artifacts.
+   *
+   * Deliberately not derived from `ranked`: the ranking needs a destination and
+   * this does not, so hanging the map off it drew an empty city until the user
+   * happened to tap -- see the seventh point in the module comment. The list
+   * ordering and the destination pin are all `ranked` is for.
+   *
+   * Recomputed when the arrival time moves, which is the whole scrub: a new
+   * column out of a grid already in memory, no request, no refetch, and a
+   * `setData` on one GeoJSON source at the other end.
+   */
+  const mapLots = useMemo(() => {
+    if (artifacts === null) return [];
+    const { grid: g, lots } = artifacts;
+    return lots.lots.map((lot) =>
+      // No forecast survives an artifact this stale, and the dot goes grey --
+      // the same "no data" the map already draws for an unknown cell.
+      toMapLot(lot, forecastExpired ? null : probabilityForLot(g, lot, gridHorizonMin)),
+    );
+  }, [artifacts, gridHorizonMin, forecastExpired]);
+
+  /**
+   * Every lot, ranked. Not sliced: `listRows` decides what the list shows.
+   *
+   * Recomputed when the arrival time moves, which is the whole scrub: a new
+   * column out of a grid already in memory, no request, no refetch.
+   */
   const ranked = useMemo(() => {
     if (artifacts === null || destination === null) return [];
     const { grid: g, lots } = artifacts;
+    const rows = lots.lots;
     return rankLots({
       destination,
       horizonMin: gridHorizonMin,
-      lots: lots.lots,
-      // Guarded rather than raw: a roster longer than the grid would otherwise
-      // throw mid-render and take the whole page down, when "no data" for the
-      // extra rows is both true and survivable.
-      probability: (i, h) => (i < g.nLots ? probabilityAt(g, i, h) : null),
-    }).slice(0, LIST_LIMIT);
-  }, [artifacts, destination, gridHorizonMin]);
+      lots: rows,
+      // `rows[i]`, resolved through `Lot.i` inside: `rankLots` reports the array
+      // position it scored, and the grid row is the lot's own business.
+      probability: (i, h) => (forecastExpired ? null : probabilityForLot(g, rows[i], h)),
+    });
+  }, [artifacts, destination, gridHorizonMin, forecastExpired]);
+
+  /**
+   * What the list draws: the head of the ranking, grown if the cap would
+   * otherwise drop a nearby lot the ranker kept on purpose. See `listRows`.
+   */
+  const listed = useMemo(() => listRows(ranked, LIST_LIMIT), [ranked]);
 
   function requestLocation() {
     if (typeof navigator === "undefined" || !navigator.geolocation) {
@@ -233,9 +345,12 @@ export default function App() {
       settled = true;
       if (geoWatchdogRef.current !== null) clearTimeout(geoWatchdogRef.current);
       geoWatchdogRef.current = null;
+      abandonGeoRef.current = null;
       finish();
     };
     geoWatchdogRef.current = setTimeout(() => settle(() => setGeo("unavailable")), GEO_WATCHDOG_MS);
+    // A fourth way to finish: the user answered the question themselves.
+    abandonGeoRef.current = () => settle(() => setGeo("idle"));
 
     try {
       navigator.geolocation.getCurrentPosition(
@@ -251,6 +366,21 @@ export default function App() {
     } catch {
       settle(() => setGeo("unavailable"));
     }
+  }
+
+  /**
+   * A tap on the map. This is what the map is *for*: geolocation answers "where
+   * am I", and Plan 3b shipped with nothing else, so a driver heading somewhere
+   * they were not standing had no way to say where.
+   */
+  function pickDestination(at: LatLon) {
+    // Whatever the pending location request was about to say, it is answering a
+    // question the user has now answered better -- and a position that landed a
+    // second later would silently move the destination off the tapped point.
+    abandonGeoRef.current?.();
+    // A failure the user has routed around is no longer worth reporting.
+    if (geo === "unavailable") setGeo("idle");
+    setDestination(at);
   }
 
   return (
@@ -271,21 +401,22 @@ export default function App() {
           {geo === "locating" ? s.locating : s.useMyLocation}
         </button>
 
-        {horizons.length > 0 && (
-          <div className="horizon">
-            <label htmlFor="horizon-select">{s.arrivingIn}</label>
-            <select
-              id="horizon-select"
-              value={activeHorizon}
-              onChange={(e) => setHorizonMin(Number(e.target.value))}
-            >
-              {horizons.map((min) => (
-                <option key={min} value={min}>
-                  {min} {s.minutesUnit}
-                </option>
-              ))}
-            </select>
-          </div>
+        {grid !== null && (
+          <Scrubber
+            value={activeHorizon}
+            stepMin={grid.stepMin}
+            count={grid.nHorizons}
+            // Straight into the horizon state: the arrival time the user picked
+            // is stored as they picked it, and `gridHorizonMin` above is the one
+            // place the artifact's age is ever added to it.
+            onChange={setHorizonMin}
+            // A control that cannot change the answer should not look as though
+            // it could: past the grid's span every position reads the same
+            // clamped column, which is the silent no-op this whole state exists
+            // to make visible.
+            disabled={forecastExpired}
+            lang={lang}
+          />
         )}
       </div>
 
@@ -317,12 +448,36 @@ export default function App() {
             </button>
           </p>
         )}
+        {!loadFailed && (
+          // Every lot in the roster, never `listed` and never `ranked`: the list
+          // is capped at 20 rows, the ranking waits for a destination, and the
+          // map is the city either way.
+          <MapView lots={mapLots} destination={destination} onPick={pickDestination} lang={lang} />
+        )}
         {!loadFailed && artifacts === null && <p className="notice">{s.loading}</p>}
+        {forecastExpired && (
+          <p className="notice notice-stale" data-testid="forecast-expired" role="status">
+            {s.forecastTooOld}
+          </p>
+        )}
         {artifacts !== null && destination === null && <p className="notice">{s.startPrompt}</p>}
         {artifacts !== null && destination !== null && (
           <>
-            <h2 className="list-head">{s.rankedForArrival}</h2>
-            <LotList rows={ranked} lang={lang} />
+            {/* The heading follows what the order actually means: with no
+                forecast behind it, the list is sorted by walk and price, and
+                claiming it is "ranked for your arrival" would be the same lie
+                one layer up. */}
+            <h2 className="list-head">
+              {forecastExpired ? s.nearbyCarParks : s.rankedForArrival}
+            </h2>
+            {listed.length === 0 ? (
+              // A bare heading over nothing reads as a bug. Say what happened.
+              <p className="notice" data-testid="no-lots">
+                {s.noLotsNearby}
+              </p>
+            ) : (
+              <LotList rows={listed} lang={lang} />
+            )}
           </>
         )}
       </main>
