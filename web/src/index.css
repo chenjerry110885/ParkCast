@@ -1,110 +1,280 @@
+/*
+ * ParkCast's stylesheet. Plain CSS, system fonts, no framework and no icon
+ * pack: the app is used one-handed, outdoors, on mobile data, and every
+ * kilobyte of chrome is a kilobyte not spent on the forecast.
+ *
+ * Sized for a 360 px phone first; wider screens only get a centred column,
+ * because a car-park list does not become a different thing on a desktop.
+ *
+ * The controls stick to the top so the arrival time and the location button
+ * stay reachable while scrolling the list, and every tap target is at least
+ * 44 px tall -- the size of a thumb, not of a mouse pointer.
+ */
+
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --text: #1b1b1f;
+  --muted: #5d5d69;
+  --border: #dcdce3;
+  --accent: #1d5fd0;
+  --accent-text: #ffffff;
+  --unknown: #6a6a76;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
-
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
   color-scheme: light dark;
+  font: 16px/1.4 system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
   color: var(--text);
   background: var(--bg);
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
+  -webkit-text-size-adjust: 100%;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
+    --bg: #14151a;
+    --surface: #1c1e25;
+    --text: #eceef4;
+    --muted: #a3a7b4;
+    --border: #33363f;
+    --accent: #6d9bff;
+    --accent-text: #10131a;
+    --unknown: #9aa0ad;
   }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
 }
 
 body {
   margin: 0;
+  background: var(--bg);
 }
 
-h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
+/* A double-tap on a phone selects the label instead of pressing again. */
+button {
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
+.app {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 0 12px 32px;
 }
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
+
+/* ---------------------------------------------------------------- header */
+
+.app-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 0 6px;
 }
-p {
+
+.app-head h1 {
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
   margin: 0;
 }
 
-code {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
+.app-head button {
+  min-height: 44px;
+  padding: 0 12px;
+  font: inherit;
+  font-size: 15px;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
-code {
+/* -------------------------------------------------------------- controls */
+
+.controls {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.locate {
+  flex: 1 1 12rem;
+  min-height: 48px;
+  padding: 0 16px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: none;
+  border-radius: 10px;
+}
+
+.locate[disabled] {
+  opacity: 0.65;
+}
+
+.horizon {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.horizon select {
+  min-height: 44px;
+  padding: 0 8px;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* ------------------------------------------------- status and staleness */
+
+.status:empty {
+  /* Collapsed, not `display: none`: a live region that leaves the box tree
+     stops being announced when it fills. */
+  margin: 0;
+}
+
+.status {
+  margin: 8px 0 0;
   font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+  color: var(--text);
+}
+
+/*
+ * The age of the reading behind the forecast. Quiet, but never hidden: the
+ * whole point of this app is that the number it shows is a prediction made
+ * from a reading that is already a few minutes old.
+ */
+.staleness {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.notice {
+  margin: 20px 0;
+  color: var(--muted);
+}
+
+.notice button {
+  min-height: 44px;
+  padding: 0 12px;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.list-head {
+  margin: 20px 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: none;
+}
+
+/* ------------------------------------------------------------- the list */
+
+.lots {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.lot {
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.lot-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lot-ident {
+  min-width: 0;
+}
+
+.lot-name {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.lot-where {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* The probability column, right-aligned so a scan down the list compares
+   like with like without reading a single lot name. */
+.lot-chance {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex: 0 0 auto;
+  margin: 0;
+  text-align: right;
+}
+
+.lot-chance-value {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+/*
+ * "No data" is set smaller and grey on purpose. It must not look like a
+ * confident number, and it must never be styled the way a 0% would be.
+ */
+.lot-chance-value.is-unknown {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--unknown);
+}
+
+.lot-chance-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.lot-facts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  margin: 10px 0 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.lot-facts span:last-child {
+  color: var(--text);
+}
+
+@media (max-width: 360px) {
+  .lot-chance-value {
+    font-size: 20px;
+  }
 }

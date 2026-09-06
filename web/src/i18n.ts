@@ -36,6 +36,14 @@ export interface Strings {
   walk: string;
   /** Unit suffix for an hourly rate, e.g. "NT$60 per hour". */
   perHour: string;
+  /**
+   * Unit suffix for a flat per-visit fee, e.g. "NT$50 per entry".
+   *
+   * 21 lots charge 計次 -- once per entry, not per hour. Without this string the
+   * UI would have to fall back to `priceUnknown` for every one of them, which
+   * would be a lie: their price is known, it is just not hourly.
+   */
+  perEntry: string;
   /** Shown instead of a price when the feed's free-text fare couldn't be parsed. */
   priceUnknown: string;
   /** Shown instead of a probability when the grid has no forecast for a lot. */
@@ -46,11 +54,25 @@ export interface Strings {
   locationUnavailable: string;
   /** Unit suffix for a duration in minutes, e.g. "12 min" / "12 分鐘". */
   minutesUnit: string;
+  /** Unit suffix for a distance under a kilometre, e.g. "320 m". */
+  metersUnit: string;
+  /** Unit suffix for a distance of a kilometre or more, e.g. "1.4 km". */
+  kilometersUnit: string;
   /**
-   * The staleness line, e.g. "data from 3 minutes ago". Contains a `{n}`
+   * The staleness line, e.g. "data from 3 min ago". Contains a `{n}`
    * placeholder for the minute count -- substitute it with `fillTemplate`.
    */
   stalenessTemplate: string;
+  /** Shown while the two artifacts are downloading. */
+  loading: string;
+  /** Shown when the artifacts could not be fetched or did not parse. */
+  loadFailed: string;
+  /** Label on the button that retries a failed load. */
+  retry: string;
+  /** Shown before a destination is known -- the list has nothing to rank against. */
+  startPrompt: string;
+  /** Heading over the ranked list. */
+  rankedForArrival: string;
 }
 
 const en: Strings = {
@@ -60,12 +82,20 @@ const en: Strings = {
   chanceOfSpace: "Chance of a space",
   walk: "Walk",
   perHour: "per hour",
+  perEntry: "per entry",
   priceUnknown: "Price unknown",
   noData: "No data",
   locating: "Locating…",
   locationUnavailable: "Location unavailable",
   minutesUnit: "min",
-  stalenessTemplate: "data from {n} minutes ago",
+  metersUnit: "m",
+  kilometersUnit: "km",
+  stalenessTemplate: "data from {n} min ago",
+  loading: "Loading forecast…",
+  loadFailed: "Couldn't load the forecast.",
+  retry: "Try again",
+  startPrompt: "Tap “Use my location” to rank the car parks around you.",
+  rankedForArrival: "Ranked for your arrival",
 };
 
 const zh: Strings = {
@@ -75,12 +105,20 @@ const zh: Strings = {
   chanceOfSpace: "有位機率",
   walk: "步行",
   perHour: "每小時",
+  perEntry: "每次",
   priceUnknown: "價格未知",
   noData: "無資料",
   locating: "定位中…",
   locationUnavailable: "無法取得目前位置",
   minutesUnit: "分鐘",
+  metersUnit: "公尺",
+  kilometersUnit: "公里",
   stalenessTemplate: "{n} 分鐘前的資料",
+  loading: "載入預報中…",
+  loadFailed: "無法載入預報。",
+  retry: "重試",
+  startPrompt: "點選「使用目前位置」，排序你附近的停車場。",
+  rankedForArrival: "依抵達時間排序",
 };
 
 const DICTS: Record<Lang, Strings> = { en, zh };
