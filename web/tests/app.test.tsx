@@ -14,7 +14,7 @@
  */
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { REFRESH_MS } from "../src/App";
+import App, { GEO_WATCHDOG_MS, REFRESH_MS } from "../src/App";
 import { HEADER_SIZE, UNKNOWN } from "../src/artifacts";
 import { t } from "../src/i18n";
 import type { Lot, LotsDoc } from "../src/types";
@@ -299,6 +299,43 @@ describe("geolocation", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: t("en").useMyLocation }));
     await screen.findByText(t("en").locationUnavailable);
+  });
+
+  it("gives up on a permission prompt that is closed without an answer", async () => {
+    useDrivableFakeTimers();
+    // The fourth case, and the only one the API cannot report: the spec starts
+    // its own `timeout` only *after* the permission decision, so a prompt the
+    // user (or the browser) closes without deciding fires neither callback.
+    Object.defineProperty(navigator, "geolocation", {
+      value: { getCurrentPosition: vi.fn() },
+      configurable: true,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: t("en").useMyLocation }));
+    expect(screen.getByRole("button", { name: t("en").locating }).hasAttribute("disabled")).toBe(
+      true,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GEO_WATCHDOG_MS + 1_000);
+    });
+
+    await screen.findByText(t("en").locationUnavailable);
+    const retry = screen.getByRole("button", { name: t("en").useMyLocation });
+    expect(retry.hasAttribute("disabled")).toBe(false);
+    expect(retry.getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("does not take back a location it already found when the deadline passes", async () => {
+    useDrivableFakeTimers();
+    await renderLocated();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GEO_WATCHDOG_MS * 2);
+    });
+
+    expect(screen.queryByText(t("en").locationUnavailable)).toBeNull();
+    expect(screen.getByTestId("lot-list")).toBeDefined();
   });
 });
 

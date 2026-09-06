@@ -17,9 +17,10 @@
  *     driver arriving in 15 minutes answers for 15 minutes after a reading that
  *     already happened. `gridHorizonMin` adds the age back, which is the whole
  *     reason a nowcast is a model rather than a lookup. See `ageMin` below.
- *   - **Geolocation never leaves the user on a spinner.** Denial, failure and a
- *     browser without the API all land in the same visible end state, with the
- *     rest of the page still working.
+ *   - **Geolocation never leaves the user on a spinner.** Denial, failure, a
+ *     browser without the API and a permission prompt closed without an answer
+ *     all land in the same visible end state, with the rest of the page still
+ *     working.
  *   - **`baseDataTs` and `generatedAt` stay distinct.** The age shown is the age
  *     of the *reading*, not of the file we wrote from it.
  */
@@ -62,6 +63,18 @@ const CLOCK_TICK_MS = 30_000;
  */
 export const REFRESH_MS = 120_000;
 
+/** Passed to the Geolocation API, which starts it only after the permission decision. */
+const GEO_TIMEOUT_MS = 10_000;
+
+/**
+ * Our own deadline on a location request, covering the case the API's `timeout`
+ * does not: a permission prompt dismissed without an answer. The spec starts
+ * `timeout` only once permission is decided, so a prompt the user closes (or
+ * that the browser closes for them -- Firefox and several Android WebViews do)
+ * fires neither callback, and the button would stay disabled until reload.
+ */
+export const GEO_WATCHDOG_MS = 12_000;
+
 /** Geolocation is a permission prompt, so it is a state machine, not a value. */
 type GeoState = "idle" | "locating" | "ready" | "unavailable";
 
@@ -86,6 +99,7 @@ export default function App() {
   // Whether a grid has ever landed, read from inside the fetch effect -- state
   // would make the effect re-run on the load it just did.
   const loadedRef = useRef(false);
+  const geoWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,6 +146,15 @@ export default function App() {
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
+
+  // A location request outlives the render that started it; nothing should
+  // outlive the component.
+  useEffect(
+    () => () => {
+      if (geoWatchdogRef.current !== null) clearTimeout(geoWatchdogRef.current);
+    },
+    [],
+  );
 
   const grid = artifacts?.grid ?? null;
 
@@ -194,18 +217,33 @@ export default function App() {
       return;
     }
     setGeo("locating");
+
+    // Whichever of the three finishes first wins, once: the success callback,
+    // the error callback, or the watchdog that covers the prompt that answers
+    // neither. Without the third, "定位中…" is a permanent state.
+    let settled = false;
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (geoWatchdogRef.current !== null) clearTimeout(geoWatchdogRef.current);
+      geoWatchdogRef.current = null;
+      finish();
+    };
+    geoWatchdogRef.current = setTimeout(() => settle(() => setGeo("unavailable")), GEO_WATCHDOG_MS);
+
     try {
       navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          setDestination({ lat: pos.coords.latitude, lon: pos.coords.longitude });
-          setGeo("ready");
-        },
+        (pos) =>
+          settle(() => {
+            setDestination({ lat: pos.coords.latitude, lon: pos.coords.longitude });
+            setGeo("ready");
+          }),
         // Denied, timed out, or position unavailable: one visible end state.
-        () => setGeo("unavailable"),
-        { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+        () => settle(() => setGeo("unavailable")),
+        { enableHighAccuracy: true, timeout: GEO_TIMEOUT_MS, maximumAge: 60_000 },
       );
     } catch {
-      setGeo("unavailable");
+      settle(() => setGeo("unavailable"));
     }
   }
 
