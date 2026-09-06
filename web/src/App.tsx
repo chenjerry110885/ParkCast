@@ -156,6 +156,12 @@ export default function App() {
     [],
   );
 
+  // The page's own language, for assistive tech, font fallback and line
+  // breaking. `index.html` can only ship one guess; this is the real answer.
+  useEffect(() => {
+    document.documentElement.lang = lang === "zh" ? "zh-Hant" : "en";
+  }, [lang]);
+
   const grid = artifacts?.grid ?? null;
 
   /**

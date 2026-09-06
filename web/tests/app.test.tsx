@@ -210,6 +210,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   Reflect.deleteProperty(navigator, "geolocation");
   Reflect.deleteProperty(document, "visibilityState");
+  document.documentElement.lang = "en";
 });
 
 describe("price", () => {
@@ -503,6 +504,28 @@ describe("refresh", () => {
     // An older grid is not a missing one, and the staleness line already says so.
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByTestId("staleness")).toBeDefined();
+  });
+});
+
+describe("document language", () => {
+  it("labels the document with the language it is actually written in", async () => {
+    render(<App />);
+    await screen.findByTestId("staleness");
+    expect(document.documentElement.lang).toBe("en");
+
+    fireEvent.click(screen.getByRole("button", { name: "切換為中文" }));
+    await screen.findByRole("button", { name: t("zh").useMyLocation });
+
+    // Not `zh`: the app is Traditional throughout, and the script is what
+    // decides the voice, the font fallback and the line breaking.
+    expect(document.documentElement.lang).toBe("zh-Hant");
+  });
+
+  it("defaults to Chinese, the same way the UI does", async () => {
+    Object.defineProperty(navigator, "language", { value: "ja-JP", configurable: true });
+    render(<App />);
+    await screen.findByTestId("staleness");
+    expect(document.documentElement.lang).toBe("zh-Hant");
   });
 });
 
