@@ -25,7 +25,8 @@ _TIMING = re.compile(r"^(.*?)(?:月租|月票|季租|$)", re.S)
 _ASIDE = re.compile(r"[（(][^）)]*(?:機車|大型車|大客車)[^）)]*[）)]")
 
 # Longest form first: `、大型重型機車` must match at 大, not at 機 four
-# characters in, or the separator test below looks at the wrong character.
+# characters in, or the clause test sees `大型重` between the noun and the
+# enumerator and reads a shared subject as a clause of its own.
 _NON_CAR = re.compile(r"大型重型機車|大型重機|重型機車|大客車|大型車|機車")
 # `汽車` is as common a way to say car as `小型車`, and ten fixture lots price
 # in it -- five of which never write `小型車` at all. The feed names its large
