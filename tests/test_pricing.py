@@ -41,6 +41,24 @@ def test_per_entry_only_is_its_own_kind():
     assert p == Price("entry", 50, 50)
 
 
+def test_tiered_entry_fees_become_a_span_not_the_first_one():
+    """Taking `_ENTRY`'s first match shipped the weekday fee on a Sunday --
+    precisely the failure the range design rejected for hourly rates."""
+    p = parse_fare("計次：平日20元/次，假日30元/次")
+    assert p == Price("entry", 20, 30)
+
+
+def test_a_single_entry_fee_stays_degenerate():
+    assert parse_fare("小型車： 計次 50元/次，隔日另計。") == Price("entry", 50, 50)
+
+
+def test_an_implausible_entry_tier_is_dropped_not_spanned():
+    """A 6,000元 figure is a monthly rental that escaped the 月租 cut; it must
+    not stretch the span, and the plausible tier it sits beside still stands."""
+    p = parse_fare("計次：小型車50元/次，全年期6,000元/次。")
+    assert p == Price("entry", 50, 50)
+
+
 def test_an_hourly_rate_wins_over_a_per_entry_rate():
     p = parse_fare("計時：小型車60元/時(06-18)。計次：小型車週一至週五50元/次。")
     assert p.kind in ("exact", "range")

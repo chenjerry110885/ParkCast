@@ -40,10 +40,14 @@ def test_no_parsed_price_is_implausible():
 
 
 def test_ranges_are_ordered_and_exact_prices_are_degenerate():
+    """`entry` may span too -- a lot that prices weekdays and weekends
+    separately per entry has no single fee, exactly as with hourly rates."""
     for p in _prices():
         if p.kind == "range":
             assert p.low < p.high
-        elif p.kind in ("exact", "entry"):
+        elif p.kind == "entry":
+            assert p.low <= p.high
+        elif p.kind == "exact":
             assert p.low == p.high
 
 

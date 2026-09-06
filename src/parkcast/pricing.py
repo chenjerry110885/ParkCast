@@ -54,7 +54,7 @@ def _amount(digits: str) -> int:
 class Price:
     kind: str            # "exact" | "range" | "entry" | "unknown"
     low: int | None      # NT$/hour, or NT$/entry when kind == "entry"
-    high: int | None
+    high: int | None     # equal to `low` for "exact"; a span otherwise
 
 
 UNKNOWN = Price("unknown", None, None)
@@ -127,10 +127,12 @@ def parse_fare(payex: str | None) -> Price:
         return Price("exact", rates[0], rates[0]) if len(rates) == 1 \
             else Price("range", rates[0], rates[-1])
 
-    entry = _ENTRY.search(timing)
-    if entry:
-        fee = _amount(entry.group(1))
-        if PLAUSIBLE_MIN <= fee <= PLAUSIBLE_MAX:
-            return Price("entry", fee, fee)
+    # Per-entry fees tier by weekday/weekend exactly as hourly rates do, and
+    # taking the first match would ship the weekday fee on a Sunday. Report
+    # the span instead; the kind stays `entry` because the unit is not hours.
+    fees = sorted({_amount(f) for f in _ENTRY.findall(timing)})
+    fees = [f for f in fees if PLAUSIBLE_MIN <= f <= PLAUSIBLE_MAX]
+    if fees:
+        return Price("entry", fees[0], fees[-1])
 
     return UNKNOWN
