@@ -39,8 +39,8 @@ Measured 2026-09-04 — do not re-derive, and do not assume these have drifted w
 
 | Fact | Value |
 |---|---|
-| `grid.bin` size | **26,129 bytes** at 1,088 lots × 24 horizons (17-byte header) |
-| `lots.json` size | **234 KB raw / 45 KB gzipped** (compact keys, no fare text) |
+| `grid.bin` size | **26,133 bytes** at 1,088 lots × 24 horizons (**21-byte** header: `<4sBIIHBBI`, incl. `roster_id`) |
+| `lots.json` size | **186 KB raw / 30 KB gzipped** at 1,089 published lots (compact keys, parsed price, no fare text) |
 | P(free≥1) base rate | **0.844 at 19:00**, rising to **0.919 at 23:00** Taipei |
 | Lots in feed with history | 1,088 of 1,756 in metadata |
 
