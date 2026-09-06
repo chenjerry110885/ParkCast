@@ -39,8 +39,15 @@ _INTRODUCER = "：:"
 _ENUMERATOR = "，,、"
 _RATE = re.compile(r"\d[\d,]*\s*元")
 
-_HOURLY = re.compile(r"(\d+)\s*元\s*/\s*(?:小)?時")
-_ENTRY = re.compile(r"(\d+)\s*元\s*/\s*次")
+# The feed comma-groups every four-digit figure it prints, so a rate must be
+# read as `\d[\d,]*` and not `\d+`: matching `1,200元/時` from the comma on
+# yields 200, a number no guard downstream can tell from a real NT$200 rate.
+_HOURLY = re.compile(r"(\d[\d,]*)\s*元\s*/\s*(?:小)?時")
+_ENTRY = re.compile(r"(\d[\d,]*)\s*元\s*/\s*次")
+
+
+def _amount(digits: str) -> int:
+    return int(digits.replace(",", ""))
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +119,7 @@ def parse_fare(payex: str | None) -> Price:
 
     timing = _strip_non_car(_TIMING.match(payex).group(1))
 
-    rates = sorted({int(r) for r in _HOURLY.findall(timing)})
+    rates = sorted({_amount(r) for r in _HOURLY.findall(timing)})
     rates = [r for r in rates if PLAUSIBLE_MIN <= r <= PLAUSIBLE_MAX]
     if rates:
         # A single rate is a fact; several mean the price varies under
@@ -122,7 +129,7 @@ def parse_fare(payex: str | None) -> Price:
 
     entry = _ENTRY.search(timing)
     if entry:
-        fee = int(entry.group(1))
+        fee = _amount(entry.group(1))
         if PLAUSIBLE_MIN <= fee <= PLAUSIBLE_MAX:
             return Price("entry", fee, fee)
 

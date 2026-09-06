@@ -63,6 +63,21 @@ def test_implausible_rates_are_rejected_as_unknown():
     assert parse_fare("計時：小型車1元/時。").kind == "unknown"
 
 
+def test_a_comma_grouped_rate_is_read_whole_not_from_the_comma_on():
+    """The feed comma-groups four-digit figures. Reading `1,200元/時` from the
+    comma yields 200 -- squarely inside the plausible band, so nothing
+    downstream would catch it. The whole figure is implausible, hence unknown."""
+    assert parse_fare("計時：小型車1,200元/時。").kind == "unknown"
+
+
+def test_a_comma_grouped_entry_fee_is_read_whole():
+    assert parse_fare("計次：小型車1,500元/次。").kind == "unknown"
+
+
+def test_comma_grouping_does_not_disturb_an_ordinary_rate():
+    assert parse_fare("計時：小型車30元/時。月租：小型車5,000元/月。") == Price("exact", 30, 30)
+
+
 def test_range_is_ordered_low_then_high():
     p = parse_fare("計時：小型車100元/時(09-21)、60元/時(21-09)。")
     assert p.kind == "range" and p.low < p.high
