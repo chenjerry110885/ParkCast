@@ -162,6 +162,24 @@ npm test --prefix web     # 53
 
 ---
 
+## Basemap
+
+The map tiles are **self-hosted**, not pulled from a keyed provider. Most hobby projects reach for
+MapTiler or Mapbox here, but those need an API key and a billing account, and this project has no
+server to hide a key behind. Instead, a ~23 MB [Protomaps](https://protomaps.com/) `.pmtiles`
+archive covering Taipei is served as a static file and read by the browser via range request.
+
+It is not committed (regenerable, so it does not belong in git) -- one command rebuilds it:
+
+```bash
+node scripts/build-basemap.mjs
+```
+
+See [`docs/basemap.md`](docs/basemap.md) for what it needs, why it won't download anything for you,
+and how to verify the extractor binary before running it.
+
+---
+
 ## Data source
 
 Taipei City parking availability and metadata, published by 臺北市政府交通局停車管理工程處 as open
