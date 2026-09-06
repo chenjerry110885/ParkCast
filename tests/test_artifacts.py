@@ -192,3 +192,35 @@ def test_publish_overwrites_cleanly(tmp_path):
     publish(tmp_path, grid_blob=b"OLD", lots_blob=b"OLD")
     publish(tmp_path, grid_blob=b"NEW", lots_blob=b"NEW")
     assert (tmp_path / "grid.bin").read_bytes() == b"NEW"
+
+
+# --- price: lots.json carries the parsed fare, never the raw prose ---------
+
+
+def test_lots_json_carries_a_parsed_price():
+    lot = Lot(id="TPE0001", name="測試", area="中正區", lot_type="立體",
+              capacity_car=50, lat=25.05, lon=121.52,
+              service_time="00:00:00-23:59:59",
+              fare_text="計時：小型車100元/時。月租：小型車全日10,000元/月。")
+    doc = json.loads(build_lots_json([lot], generated_at=1, base_data_ts=1))
+    assert doc["lots"][0]["p"] == {"k": "exact", "lo": 100, "hi": 100}
+
+
+def test_an_unknown_price_carries_no_numbers_at_all():
+    """The client must not be able to read a number that was never parsed."""
+    lot = Lot(id="TPE0002", name="測試", area="中正區", lot_type="立體",
+              capacity_car=50, lat=25.05, lon=121.52,
+              service_time="", fare_text="洽公民眾30分鐘以下者免費。")
+    doc = json.loads(build_lots_json([lot], generated_at=1, base_data_ts=1))
+    assert doc["lots"][0]["p"] == {"k": "unknown"}
+    assert "lo" not in doc["lots"][0]["p"]
+
+
+def test_the_raw_fare_text_is_not_shipped_to_the_client():
+    """The browser gets numbers; parsing Chinese prose is the collector's job,
+    and shipping ~57 chars x 1,756 lots would roughly double the artifact."""
+    lot = Lot(id="TPE0003", name="測試", area="中正區", lot_type="立體",
+              capacity_car=50, lat=25.05, lon=121.52,
+              service_time="", fare_text="計時：小型車100元/時。")
+    blob = build_lots_json([lot], generated_at=1, base_data_ts=1)
+    assert "計時" not in blob.decode("utf-8")
