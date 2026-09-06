@@ -73,6 +73,16 @@ export interface Strings {
   startPrompt: string;
   /** Heading over the ranked list. */
   rankedForArrival: string;
+  /** Accessible name for the map region. The map itself carries no text. */
+  mapLabel: string;
+  /**
+   * Shown in place of the map when the device gives us no WebGL context.
+   *
+   * The ranked list is the app's actual output, so a map that cannot be drawn
+   * is a missing illustration, not a broken app -- and this says so instead of
+   * leaving a blank rectangle.
+   */
+  mapUnavailable: string;
 }
 
 const en: Strings = {
@@ -96,6 +106,8 @@ const en: Strings = {
   retry: "Try again",
   startPrompt: "Tap “Use my location” to rank the car parks around you.",
   rankedForArrival: "Ranked for your arrival",
+  mapLabel: "Map of car parks",
+  mapUnavailable: "This device can't draw the map. The ranked list still works.",
 };
 
 const zh: Strings = {
@@ -119,6 +131,8 @@ const zh: Strings = {
   retry: "重試",
   startPrompt: "點選「使用目前位置」，排序你附近的停車場。",
   rankedForArrival: "依抵達時間排序",
+  mapLabel: "停車場地圖",
+  mapUnavailable: "此裝置無法顯示地圖，排序清單仍可使用。",
 };
 
 const DICTS: Record<Lang, Strings> = { en, zh };

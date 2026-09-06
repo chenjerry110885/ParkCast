@@ -175,6 +175,39 @@ button {
   border-radius: 8px;
 }
 
+/* ------------------------------------------------------------- the map */
+
+/*
+ * A map with no height is a blank page, and a `height: 100%` that no ancestor
+ * gives a height to is a map with no height. So the box is sized here, in
+ * viewport units with a floor, and never left to inherit one.
+ */
+.map {
+  position: relative;
+  margin: 12px 0 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.map-canvas {
+  width: 100%;
+  height: clamp(240px, 42vh, 460px);
+}
+
+/* MapLibre's attribution sits on the map, so it needs to stay legible on it. */
+.map .maplibregl-ctrl-attrib {
+  font-size: 11px;
+}
+
+.map-unavailable {
+  margin: 0;
+  padding: 16px 12px;
+  font-size: 14px;
+  color: var(--muted);
+  text-align: center;
+}
+
 .list-head {
   margin: 20px 0 8px;
   font-size: 14px;
