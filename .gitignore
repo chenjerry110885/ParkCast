@@ -8,3 +8,9 @@ data/
 dist/
 *.egg-info/
 .env
+
+# Web app
+web/node_modules/
+web/dist/
+# Dev copies of the collector output (see scripts/sync-artifacts.mjs)
+web/public/artifacts/
