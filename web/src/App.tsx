@@ -5,7 +5,7 @@
  * runs in this component, and nothing is ever sent anywhere -- the driver's
  * location never leaves the phone, because there is no server to send it to.
  *
- * Five things here are load-bearing rather than cosmetic:
+ * Six things here are load-bearing rather than cosmetic:
  *
  *   - **The staleness line.** The upstream feed publishes every five minutes
  *     with a ~3-minute lag, so the reading behind any forecast is already a few
@@ -17,6 +17,11 @@
  *     driver arriving in 15 minutes answers for 15 minutes after a reading that
  *     already happened. `gridHorizonMin` adds the age back, which is the whole
  *     reason a nowcast is a model rather than a lookup. See `ageMin` below.
+ *   - **The staleness *limit*.** The correction above has an end. Once the
+ *     reading is older than the grid's whole span, every arrival time clamps to
+ *     the last column and the forecast is no longer about the time the user
+ *     asked for; `forecastExpired` says so and withholds the probability rather
+ *     than dressing a clamp up as an answer. The rest of the page keeps working.
  *   - **Geolocation never leaves the user on a spinner.** Denial, failure, a
  *     browser without the API and a permission prompt closed without an answer
  *     all land in the same visible end state, with the rest of the page still
@@ -29,21 +34,22 @@
  *     single `destination`, and a tap wins over a location still in flight.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
+import { artifactsBase, horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
 import { LotList } from "./components/LotList";
 import { LangToggle } from "./components/LangToggle";
 import { Scrubber } from "./components/Scrubber";
 import type { LatLon } from "./geo";
 import { detectLang, fillTemplate, t, type Lang } from "./i18n";
 import { MapView } from "./map/MapView";
-import { rankLots } from "./rank";
+import { listRows, rankLots } from "./rank";
 import type { Grid, LotsDoc } from "./types";
 
 /**
  * Where the two artifacts live. Relative to the deployment root so the app
- * works under a sub-path (GitHub Pages) without a rebuild-time absolute URL.
+ * works under a sub-path (GitHub Pages) without a rebuild-time absolute URL --
+ * and correct for an absolute base too, which is what `artifactsBase` is for.
  */
-const ARTIFACTS_BASE = `${import.meta.env.BASE_URL}artifacts`.replace(/\/{2,}/g, "/");
+const ARTIFACTS_BASE = artifactsBase(import.meta.env.BASE_URL);
 
 /**
  * How many ranked lots the *list* renders. A driver picks from the first
@@ -53,6 +59,9 @@ const ARTIFACTS_BASE = `${import.meta.env.BASE_URL}artifacts`.replace(/\/{2,}/g,
  * This is a limit on the list and on nothing else. The map is handed the whole
  * ranked array: slicing it there would silently hide 98% of the city behind a
  * map that looked like it was showing all of it.
+ *
+ * It is also a *soft* limit: `listRows` grows the list rather than let a fixed
+ * cap drop the no-forecast lots the ranker deliberately kept.
  */
 export const LIST_LIMIT = 20;
 
@@ -209,8 +218,32 @@ export default function App() {
    * last column. That is the right trade: a few minutes short at +120 min is a
    * far smaller lie than being minutes wrong at +5, and dropping the option
    * would take real arrival times off the control to flatter the model.
+   *
+   * It stops being a trade once the *age alone* runs off the grid -- see
+   * `forecastExpired`.
    */
   const gridHorizonMin = activeHorizon + (ageMin ?? 0);
+
+  /**
+   * The reading is older than the whole grid, so there is no forecast left.
+   *
+   * The grid spans `stepMin * nHorizons` minutes from `baseDataTs` -- 120 as
+   * built. Past that the age alone overshoots the last column, so *every*
+   * arrival time the user can pick clamps to the same one: the scrubber does
+   * nothing, and all 24 of its positions show one identical answer for a time
+   * nobody asked for. Observed with a 383-minute-old artifact, and certain to
+   * recur -- the collector stops whenever the machine it runs on sleeps, while
+   * the published copy stays up and goes on ageing.
+   *
+   * The clamp is right; presenting its output as an answer is not. So the
+   * probability is dropped at its source below: one `null` per lot, which puts
+   * every row on the "no data" path the UI already has for a missing cell and
+   * the map on the grey it already has for an unknown one. Names, distances and
+   * prices never came from the grid and are untouched -- it is the forecast that
+   * expired, not the page.
+   */
+  const forecastExpired =
+    grid !== null && ageMin !== null && ageMin > grid.stepMin * grid.nHorizons;
 
   /**
    * Every lot, ranked. Not sliced: this is what the map draws.
@@ -221,19 +254,32 @@ export default function App() {
   const ranked = useMemo(() => {
     if (artifacts === null || destination === null) return [];
     const { grid: g, lots } = artifacts;
+    const rows = lots.lots;
     return rankLots({
       destination,
       horizonMin: gridHorizonMin,
-      lots: lots.lots,
-      // Guarded rather than raw: a roster longer than the grid would otherwise
-      // throw mid-render and take the whole page down, when "no data" for the
-      // extra rows is both true and survivable.
-      probability: (i, h) => (i < g.nLots ? probabilityAt(g, i, h) : null),
+      lots: rows,
+      probability: (i, h) => {
+        // No forecast survives an artifact older than the grid's own span, and
+        // saying so once here is what keeps the rest of the screen honest.
+        if (forecastExpired) return null;
+        // The lot's declared row, not its position: `fetchLots` may have dropped
+        // a row it could not place, and reading by position after that would
+        // hand every later lot its neighbour's forecast.
+        const row = rows[i]?.i;
+        // Guarded rather than raw: a roster longer than the grid would otherwise
+        // throw mid-render and take the whole page down, when "no data" for the
+        // extra rows is both true and survivable.
+        return row === undefined || row >= g.nLots ? null : probabilityAt(g, row, h);
+      },
     });
-  }, [artifacts, destination, gridHorizonMin]);
+  }, [artifacts, destination, gridHorizonMin, forecastExpired]);
 
-  /** The head of the ranking, which is all the list draws. See `LIST_LIMIT`. */
-  const listed = useMemo(() => ranked.slice(0, LIST_LIMIT), [ranked]);
+  /**
+   * What the list draws: the head of the ranking, grown if the cap would
+   * otherwise drop a nearby lot the ranker kept on purpose. See `listRows`.
+   */
+  const listed = useMemo(() => listRows(ranked, LIST_LIMIT), [ranked]);
 
   function requestLocation() {
     if (typeof navigator === "undefined" || !navigator.geolocation) {
@@ -316,6 +362,11 @@ export default function App() {
             // is stored as they picked it, and `gridHorizonMin` above is the one
             // place the artifact's age is ever added to it.
             onChange={setHorizonMin}
+            // A control that cannot change the answer should not look as though
+            // it could: past the grid's span every position reads the same
+            // clamped column, which is the silent no-op this whole state exists
+            // to make visible.
+            disabled={forecastExpired}
             lang={lang}
           />
         )}
@@ -355,11 +406,29 @@ export default function App() {
           <MapView rows={ranked} destination={destination} onPick={pickDestination} lang={lang} />
         )}
         {!loadFailed && artifacts === null && <p className="notice">{s.loading}</p>}
+        {forecastExpired && (
+          <p className="notice notice-stale" data-testid="forecast-expired" role="status">
+            {s.forecastTooOld}
+          </p>
+        )}
         {artifacts !== null && destination === null && <p className="notice">{s.startPrompt}</p>}
         {artifacts !== null && destination !== null && (
           <>
-            <h2 className="list-head">{s.rankedForArrival}</h2>
-            <LotList rows={listed} lang={lang} />
+            {/* The heading follows what the order actually means: with no
+                forecast behind it, the list is sorted by walk and price, and
+                claiming it is "ranked for your arrival" would be the same lie
+                one layer up. */}
+            <h2 className="list-head">
+              {forecastExpired ? s.nearbyCarParks : s.rankedForArrival}
+            </h2>
+            {listed.length === 0 ? (
+              // A bare heading over nothing reads as a bug. Say what happened.
+              <p className="notice" data-testid="no-lots">
+                {s.noLotsNearby}
+              </p>
+            ) : (
+              <LotList rows={listed} lang={lang} />
+            )}
           </>
         )}
       </main>

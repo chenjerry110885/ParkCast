@@ -35,10 +35,17 @@ export interface ScrubberProps {
   count: number;
   /** Called with the new arrival time, in minutes from now. */
   onChange: (arrivalMin: number) => void;
+  /**
+   * Set when there is no forecast left for the control to move through -- an
+   * artifact older than the grid's own span, where every position would clamp to
+   * the same column. A live-looking slider that changes nothing is the exact
+   * failure this flag exists to make visible.
+   */
+  disabled?: boolean;
   lang: Lang;
 }
 
-export function Scrubber({ value, stepMin, count, onChange, lang }: ScrubberProps) {
+export function Scrubber({ value, stepMin, count, onChange, disabled = false, lang }: ScrubberProps) {
   const s = t(lang);
   // Generated rather than hardcoded: an id that collides silently re-points a
   // label at the wrong control, and a wrong label is worse than none.
@@ -60,6 +67,7 @@ export function Scrubber({ value, stepMin, count, onChange, lang }: ScrubberProp
         max={stepMin * count}
         step={stepMin}
         value={value}
+        disabled={disabled}
         // A screen reader would otherwise announce a bare "45", which in a
         // parking app could as easily be a price or a distance.
         aria-valuetext={reading}

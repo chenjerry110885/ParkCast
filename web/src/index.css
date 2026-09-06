@@ -184,6 +184,21 @@ button {
   color: var(--muted);
 }
 
+/*
+ * The forecast has expired. Bordered and boxed rather than another line of grey
+ * prose, because it is the reason every probability below it reads "no data" --
+ * a reader who skims past it is left thinking the app is broken.
+ */
+.notice-stale {
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--unknown);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
 .notice button {
   min-height: 44px;
   padding: 0 12px;

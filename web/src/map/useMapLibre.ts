@@ -41,8 +41,13 @@ import { noLabels } from "protomaps-themes-base";
 /**
  * Where the archive is served from. Relative to the deployment root, like the
  * artifacts, so the app works under a sub-path (GitHub Pages) unrebuilt.
+ *
+ * Only the seam between base and path is normalised. Collapsing *every* run of
+ * slashes -- what this used to do -- turns an absolute base's `https://` into
+ * `https:/`, a break that cannot appear in dev because the base has no scheme
+ * there. Same hazard, same shape, as `artifactsBase` in `artifacts.ts`.
  */
-export const BASEMAP_URL = `${import.meta.env.BASE_URL}basemap/taipei.pmtiles`.replace(/\/{2,}/g, "/");
+export const BASEMAP_URL = `${import.meta.env.BASE_URL.replace(/\/+$/, "")}/basemap/taipei.pmtiles`;
 
 /**
  * The archive's real ceiling, declared rather than discovered.

@@ -6,7 +6,7 @@
  * struct format `<4sBIIHBBI` -- little-endian, no alignment padding -- so the
  * offsets below are byte-identical to little-endian `DataView` reads.
  */
-import type { Grid, LotsDoc } from "./types";
+import type { Grid, Lot, LotsDoc } from "./types";
 
 /** `magic(4) version(1) generatedAt(4) baseDataTs(4) nLots(2) nHorizons(1) stepMin(1) rosterId(4)`. */
 export const HEADER_SIZE = 21;
@@ -104,6 +104,23 @@ export function probabilityAt(grid: Grid, lotIndex: number, horizonMin: number):
   return cell === UNKNOWN ? null : cell / 100;
 }
 
+/**
+ * Where the artifacts live, under a deployment base.
+ *
+ * `import.meta.env.BASE_URL` is a URL *prefix*, not a path: it is `/` in dev,
+ * `/ParkCast/` under a sub-path, and an absolute `https://cdn.example/` when the
+ * static files are served from somewhere other than the page. Tidying the join
+ * by collapsing every repeated slash -- the obvious one-liner, and what this
+ * used to do -- rewrites `https://` as `https:/`, which no browser resolves and
+ * which cannot show up in dev, where the base has no scheme to break.
+ *
+ * Only the seam between the two halves needs normalising, so only the seam is
+ * touched.
+ */
+export function artifactsBase(baseUrl: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}/artifacts`;
+}
+
 function artifactUrl(base: string, name: string): string {
   return `${base.replace(/\/+$/, "")}/${name}`;
 }
@@ -112,6 +129,31 @@ async function fetchGrid(base: string, init?: RequestInit): Promise<Grid> {
   const res = await fetch(artifactUrl(base, "grid.bin"), init);
   if (!res.ok) throw new Error(`grid.bin: HTTP ${res.status}`);
   return parseGrid(await res.arrayBuffer());
+}
+
+/**
+ * Whether a row can be placed on the ground and against the grid.
+ *
+ * Two things are read out of a `Lot` without any further checking, and neither
+ * survives a missing value quietly:
+ *
+ *   - **`y`/`x` go straight into a distance.** JSON `null` coerces to 0, and
+ *     (0, 0) is 13,000 km from Taipei in the Gulf of Guinea -- a row that would
+ *     render as `13155.6 km` and, worse, drag the map's bounds across the
+ *     Atlantic. `undefined` is louder but no better: `NaN` metres, and a `NaN`
+ *     sort key, which makes the *whole ranking* order-dependent.
+ *   - **`i` names the grid row.** It is redundant with the array position and
+ *     always equal to it in what the encoder writes, but it is what makes
+ *     dropping a row safe: the survivors still know which forecast is theirs.
+ *     A row that disagrees cannot be scored, because we no longer know which
+ *     of the two numbers is the lie.
+ *
+ * A failing row is dropped rather than repaired -- there is nothing to repair
+ * it from -- and dropped rather than thrown on, because one bad row out of
+ * 1,088 should cost the user one car park, not the whole city.
+ */
+function isPlaceable(lot: Lot, position: number): boolean {
+  return lot.i === position && Number.isFinite(lot.y) && Number.isFinite(lot.x);
 }
 
 async function fetchLots(base: string, init?: RequestInit): Promise<LotsDoc> {
@@ -124,7 +166,14 @@ async function fetchLots(base: string, init?: RequestInit): Promise<LotsDoc> {
   if (!Array.isArray(doc.lots) || doc.lots.length !== doc.n_lots) {
     throw new Error(`lots.json holds ${doc.lots?.length} rows but declares n_lots ${doc.n_lots}`);
   }
-  return doc;
+
+  // After the length check, never before it: a truncated download and a row we
+  // chose to drop must stay distinguishable, and only the first is an error.
+  const placeable = doc.lots.filter(isPlaceable);
+  if (placeable.length === doc.lots.length) return doc;
+  // `n_lots` is left describing the roster the grid was built against, which is
+  // what makes `Lot.i` meaningful; `lots` is now shorter than it on purpose.
+  return { ...doc, lots: placeable };
 }
 
 /**

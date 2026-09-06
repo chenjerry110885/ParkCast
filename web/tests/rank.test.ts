@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rankLots } from "../src/rank";
+import { UNKNOWN_RESERVE, listRows, rankLots } from "../src/rank";
 
 const lot = (id: string, lat: number, p: unknown) =>
   ({ i: 0, id, n: id, a: "中正區", y: lat, x: 121.52, c: 50, t: "民營停車場", p }) as never;
@@ -69,5 +69,113 @@ describe("rankLots", () => {
     });
     expect(out[0]!.walkMin).toBeGreaterThan(0);
     expect(out[0]!.meters).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The list cap, and the guarantee it used to quietly undo.
+ *
+ * `rankLots` keeps a lot with no forecast and sorts it behind every lot that has
+ * one. Rendering only the first N rows then dropped exactly those lots -- the
+ * ranker's one explicit promise, cancelled by a slice two files away. Today's
+ * grid has no unknown cells, but collection gaps are expected and
+ * time-correlated (see CLAUDE.md), and thin climatology buckets are what
+ * produces them.
+ */
+describe("listRows", () => {
+  /** `n` lots, all at the destination, `unknownFrom` onwards having no forecast. */
+  function ranking(n: number, unknownFrom: number, spacing = 0.0001) {
+    return rankLots({
+      destination: at,
+      horizonMin: 15,
+      // Further away with each index, so distance and rank agree by default.
+      lots: Array.from({ length: n }, (_unused, k) =>
+        lot(`lot-${k}`, at.lat + k * spacing, { k: "exact", lo: 30, hi: 30 }),
+      ),
+      probability: (i) => (i >= unknownFrom ? null : 0.9),
+    });
+  }
+
+  it("caps a list of known lots at the limit", () => {
+    expect(listRows(ranking(50, 50), 20)).toHaveLength(20);
+  });
+
+  it("returns everything when the ranking is shorter than the limit", () => {
+    expect(listRows(ranking(3, 3), 20)).toHaveLength(3);
+  });
+
+  it("makes a nearby lot with no forecast reachable past the cap", () => {
+    // 25 lots. The nearest of all of them has no forecast, so the ranker puts
+    // it 25th -- one row past a fixed cap of 20, and invisible.
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: [
+        lot("nearest-unknown", at.lat + 0.00005, { k: "exact", lo: 30, hi: 30 }),
+        ...Array.from({ length: 24 }, (_unused, k) =>
+          lot(`known-${k}`, at.lat + 0.001 * (k + 1), { k: "exact", lo: 30, hi: 30 }),
+        ),
+      ],
+      probability: (i) => (i === 0 ? null : 0.9),
+    });
+    expect(ranked.at(-1)!.id).toBe("nearest-unknown");
+
+    const listed = listRows(ranked, 20);
+    expect(listed.map((r) => r.id)).toContain("nearest-unknown");
+    // Grown, not reordered: the 20 scored lots keep their places and their sort.
+    expect(listed.slice(0, 20)).toEqual(ranked.slice(0, 20));
+  });
+
+  it("does not reach past the cap for a lot further than anything on screen", () => {
+    // "Nearby" is set by the user's own list. A no-forecast lot across the city
+    // is not owed a row, and appending it would make the cap meaningless.
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: [
+        lot("far-unknown", at.lat + 0.5, { k: "exact", lo: 30, hi: 30 }),
+        ...Array.from({ length: 24 }, (_unused, k) =>
+          lot(`known-${k}`, at.lat + 0.0001 * (k + 1), { k: "exact", lo: 30, hi: 30 }),
+        ),
+      ],
+      probability: (i) => (i === 0 ? null : 0.9),
+    });
+    expect(listRows(ranked, 20)).toHaveLength(20);
+  });
+
+  it("rescues at most UNKNOWN_RESERVE of them, so the list stays a list", () => {
+    // 20 known lots far out, then 30 unknown ones nearer than all of them.
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: [
+        ...Array.from({ length: 20 }, (_unused, k) =>
+          lot(`known-${k}`, at.lat + 0.01 + 0.0001 * k, { k: "exact", lo: 30, hi: 30 }),
+        ),
+        ...Array.from({ length: 30 }, (_unused, k) =>
+          lot(`unknown-${k}`, at.lat + 0.0001 * (k + 1), { k: "exact", lo: 30, hi: 30 }),
+        ),
+      ],
+      probability: (i) => (i < 20 ? 0.9 : null),
+    });
+    const listed = listRows(ranked, 20);
+    expect(listed).toHaveLength(20 + UNKNOWN_RESERVE);
+    // Nearest first among the rescued, which is the only order they have.
+    const rescued = listed.slice(20);
+    expect(rescued.map((r) => r.id)).toEqual(["unknown-0", "unknown-1", "unknown-2", "unknown-3", "unknown-4"]);
+  });
+
+  it("adds nothing when the cap already reached the no-forecast group", () => {
+    // 21 lots, the last two unknown: one is already visible at row 20, so the
+    // promise is kept and there is nothing to rescue.
+    const listed = listRows(ranking(21, 19), 20);
+    expect(listed).toHaveLength(20);
+    expect(listed.some((r) => r.probability === null)).toBe(true);
+  });
+
+  it("adds nothing when no lot has a forecast at all", () => {
+    // The expired-artifact case: every row is unknown, the head *is* the group,
+    // and growing the list by five arbitrary extras would help nobody.
+    expect(listRows(ranking(50, 0), 20)).toHaveLength(20);
   });
 });

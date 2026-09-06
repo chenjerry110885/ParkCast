@@ -20,7 +20,14 @@ export interface Price {
 
 /** One row of `lots.json`, index-aligned with row `i` of the grid. */
 export interface Lot {
-  /** Row index into the grid. Redundant with array position, and checked. */
+  /**
+   * Row index into the grid, and the authoritative one.
+   *
+   * Redundant with array position in what the encoder writes, and `fetchLots`
+   * checks that it is -- which is exactly what lets it drop an unusable row
+   * without silently re-pointing every row after it at its neighbour's
+   * forecast. Read this, never the position, when indexing the grid.
+   */
   i: number;
   /** Feed id, e.g. `TPE0001`. */
   id: string;
@@ -46,9 +53,15 @@ export interface LotsDoc {
   generated_at: number;
   /** Unix seconds of the reading the forecast was made from. */
   base_data_ts: number;
+  /** Rows in the roster the grid was built against. */
   n_lots: number;
   /** CRC32 of the ordered lot ids. The only field a grid must agree with. */
   roster_id: number;
+  /**
+   * The rows themselves. Equal in length to `n_lots` as published; *shorter*
+   * once `fetchLots` has dropped a row it could not place. Each survivor still
+   * carries its own grid row in `i`.
+   */
   lots: Lot[];
 }
 

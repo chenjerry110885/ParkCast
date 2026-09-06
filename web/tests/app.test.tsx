@@ -16,7 +16,7 @@
  */
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { GEO_WATCHDOG_MS, REFRESH_MS } from "../src/App";
+import App, { GEO_WATCHDOG_MS, LIST_LIMIT, REFRESH_MS } from "../src/App";
 import { HEADER_SIZE, UNKNOWN } from "../src/artifacts";
 import { t } from "../src/i18n";
 import type { Lot, LotsDoc } from "../src/types";
@@ -547,5 +547,210 @@ describe("artifacts", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain(t("en").loadFailed);
     expect(screen.queryByTestId("lot-list")).toBeNull();
+  });
+});
+
+/**
+ * The forecast has an expiry, and the app has to say so.
+ *
+ * The grid spans `stepMin * nHorizons` minutes from the reading it was built
+ * from -- 120 here, as shipped. Once the artifact is older than that, the
+ * staleness correction pushes every arrival time the user can pick past the last
+ * column, they all clamp to it, and the scrubber becomes a control that changes
+ * nothing while the screen shows one answer for a time nobody asked for. Found
+ * with a 383-minute-old artifact, and guaranteed to recur: the collector stops
+ * whenever its machine sleeps while the published copy stays up and goes on
+ * ageing.
+ */
+describe("an artifact older than the grid it came from", () => {
+  const GRID_SPAN_MIN = N_HORIZONS * STEP_MIN;
+  /** The 383 minutes actually observed while verifying the scrubber. */
+  const OBSERVED_AGE_MIN = 383;
+
+  it("says the forecast is too old instead of showing a clamped column", async () => {
+    ageArtifact(OBSERVED_AGE_MIN);
+    await renderLocated();
+
+    expect(screen.getByTestId("forecast-expired").textContent).toBe(t("en").forecastTooOld);
+    // The lot whose every column reads 88 must not report 88%: that column is a
+    // clamp, not an answer for the arrival time the user actually chose.
+    const chance = within(rowFor("市府路一號停車場")).getByTestId("lot-probability");
+    expect(chance.textContent).toContain(t("en").noData);
+    for (const cell of screen.getAllByTestId("lot-probability")) {
+      expect(cell.textContent).not.toMatch(/\d+%/);
+    }
+  });
+
+  it("keeps the rest of the page usable, because only the probability expired", async () => {
+    ageArtifact(OBSERVED_AGE_MIN);
+    await renderLocated();
+
+    // Names, districts, walking distances and prices never came from the grid.
+    const row = rowFor("至善公園平面停車場");
+    expect(within(row).getByTestId("lot-price").textContent).toBe(`NT$50 ${t("en").perEntry}`);
+    expect(within(row).getByTestId("lot-walk").textContent).toContain(t("en").walk);
+    expect(screen.getByTestId("lot-list")).toBeInTheDocument();
+    // ...and the age is still reported, which is how the user can tell why.
+    expect(screen.getByTestId("staleness")).toBeInTheDocument();
+  });
+
+  it("stops the heading claiming an order the forecast no longer supports", async () => {
+    ageArtifact(OBSERVED_AGE_MIN);
+    await renderLocated();
+    expect(screen.getByText(t("en").nearbyCarParks)).toBeInTheDocument();
+    expect(screen.queryByText(t("en").rankedForArrival)).toBeNull();
+  });
+
+  it("disables the scrubber rather than leave a control that does nothing", async () => {
+    ageArtifact(OBSERVED_AGE_MIN);
+    await renderLocated();
+    expect(screen.getByLabelText(t("en").arrivingIn)).toBeDisabled();
+  });
+
+  it("says all of it in Chinese too", async () => {
+    ageArtifact(OBSERVED_AGE_MIN);
+    await renderLocated();
+    fireEvent.click(screen.getByRole("button", { name: "切換為中文" }));
+    await screen.findByRole("button", { name: t("zh").useMyLocation });
+
+    expect(screen.getByTestId("forecast-expired").textContent).toBe(t("zh").forecastTooOld);
+    expect(screen.getByText(t("zh").nearbyCarParks)).toBeInTheDocument();
+  });
+
+  it("leaves a grid still inside its own span alone", async () => {
+    // One minute short of the span: the far horizons clamp, exactly as they
+    // always have, and that is the documented trade rather than an expiry.
+    ageArtifact(GRID_SPAN_MIN - 1);
+    await renderLocated();
+
+    expect(screen.queryByTestId("forecast-expired")).toBeNull();
+    expect(screen.getByText(t("en").rankedForArrival)).toBeInTheDocument();
+    expect(screen.getByLabelText(t("en").arrivingIn)).not.toBeDisabled();
+    expect(
+      within(rowFor("市府路一號停車場")).getByTestId("lot-probability").textContent,
+    ).toContain("88%");
+  });
+});
+
+/**
+ * The list cap, and the guarantee it silently undid.
+ *
+ * `rank.ts` keeps a lot with no forecast and ranks it last so that it is never
+ * dropped; rendering a fixed 20 rows then dropped precisely those lots. This is
+ * the wiring test -- `listRows` is unit-tested in `rank.test.ts`, but the bug
+ * lived in the slice, not in the sort.
+ */
+describe("the list cap", () => {
+  const NEARBY_UNKNOWN = "巷口臨時停車場";
+
+  /** 25 lots, all priced alike so only distance and the forecast decide order. */
+  function crowd(): Lot[] {
+    const nearest: Lot = {
+      i: 0,
+      id: "TPE_NEAR_UNKNOWN",
+      n: NEARBY_UNKNOWN,
+      a: "信義區",
+      y: HERE.lat + 0.00005,
+      x: HERE.lon,
+      c: 8,
+      t: "民營停車場",
+      p: { k: "exact", lo: 30, hi: 30 },
+    };
+    const rest = Array.from({ length: 24 }, (_unused, k): Lot => ({
+      i: k + 1,
+      id: `TPE_KNOWN_${k}`,
+      n: `已知停車場${k}`,
+      a: "信義區",
+      y: HERE.lat + 0.002 * (k + 1),
+      x: HERE.lon,
+      c: 50,
+      t: "民營停車場",
+      p: { k: "exact", lo: 30, hi: 30 },
+    }));
+    return [nearest, ...rest];
+  }
+
+  /** Row 0 -- the nearest lot of the 25 -- is the one with no forecast. */
+  function stubCrowded(withUnknown: boolean) {
+    const lots = crowd();
+    const body: number[] = [];
+    for (const row of lots) {
+      const value = withUnknown && row.i === 0 ? UNKNOWN : 70;
+      for (let h = 0; h < N_HORIZONS; h += 1) body.push(value);
+    }
+    stubFetch(encodeGrid(body, lots.length), {
+      v: 1,
+      generated_at: BASE_DATA_TS + 213,
+      base_data_ts: BASE_DATA_TS,
+      n_lots: lots.length,
+      roster_id: ROSTER_ID,
+      lots,
+    });
+  }
+
+  it("keeps the nearest lot with no forecast reachable past the 20th row", async () => {
+    stubCrowded(true);
+    await renderLocated();
+
+    // The ranker sorts it 25th, one row past the cap, and it was invisible.
+    const row = rowFor(NEARBY_UNKNOWN);
+    expect(row).toBeInTheDocument();
+    expect(within(row).getByTestId("lot-probability").textContent).toContain(t("en").noData);
+    expect(screen.getAllByTestId("lot-row").length).toBeGreaterThan(LIST_LIMIT);
+  });
+
+  it("grows the list rather than reordering it", async () => {
+    stubCrowded(true);
+    await renderLocated();
+
+    const ids = screen.getAllByTestId("lot-row").map((el) => el.getAttribute("data-lot-id"));
+    // The 20 scored lots keep the cap's places; the rescued row is appended.
+    expect(ids.slice(0, LIST_LIMIT).every((id) => id?.startsWith("TPE_KNOWN_"))).toBe(true);
+    expect(ids.at(-1)).toBe("TPE_NEAR_UNKNOWN");
+  });
+
+  it("still caps the list when every lot has a forecast", async () => {
+    // Nothing was dropped, so nothing is rescued and the cap holds at 20.
+    stubCrowded(false);
+    await renderLocated();
+    expect(screen.getAllByTestId("lot-row").length).toBe(LIST_LIMIT);
+  });
+});
+
+/** A heading over nothing reads as a bug. It has to say what happened. */
+describe("an empty result set", () => {
+  /** A schema-valid pair with no lots in it at all. */
+  function stubEmpty() {
+    stubFetch(encodeGrid([], 0), {
+      v: 1,
+      generated_at: BASE_DATA_TS + 213,
+      base_data_ts: BASE_DATA_TS,
+      n_lots: 0,
+      roster_id: ROSTER_ID,
+      lots: [],
+    });
+  }
+
+  async function renderEmptyLocated() {
+    stubEmpty();
+    stubGeolocation("granted");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: t("en").useMyLocation }));
+    return screen.findByTestId("no-lots");
+  }
+
+  it("explains itself instead of rendering a bare heading", async () => {
+    const notice = await renderEmptyLocated();
+    expect(notice.textContent).toBe(t("en").noLotsNearby);
+    expect(screen.queryByTestId("lot-list")).toBeNull();
+    // The heading is still there; it is no longer alone.
+    expect(screen.getByText(t("en").rankedForArrival)).toBeInTheDocument();
+  });
+
+  it("says it in Chinese too", async () => {
+    await renderEmptyLocated();
+    fireEvent.click(screen.getByRole("button", { name: "切換為中文" }));
+    await screen.findByRole("button", { name: t("zh").useMyLocation });
+    expect(screen.getByTestId("no-lots").textContent).toBe(t("zh").noLotsNearby);
   });
 });
