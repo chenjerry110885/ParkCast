@@ -8,9 +8,11 @@
  * these guard against is a rendering lie -- the data underneath is already
  * right, and was already tested.
  *
- * `fetch` and `navigator.geolocation` are the only two stubs: the artifacts are
- * built as real bytes and go through the real `loadArtifacts`, so the parse,
- * the roster pairing and the ranking are all exercised as shipped.
+ * `fetch`, `navigator.geolocation` and the canvas's WebGL context are the only
+ * stubs: the artifacts are built as real bytes and go through the real
+ * `loadArtifacts`, so the parse, the roster pairing and the ranking are all
+ * exercised as shipped -- and the real `MapView` mounts, down its real
+ * no-WebGL path, on every one of these renders.
  */
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -195,6 +197,12 @@ function rowFor(name: string): HTMLElement {
 
 beforeEach(() => {
   stubFetch();
+  // The screen now mounts the map, and MapLibre asks the canvas for a WebGL
+  // context on its way up. jsdom has none and says so -- loudly, once per
+  // render. Answering `null` ourselves is the same answer without twenty lines
+  // of noise per run, and it still sends `useMapLibre` down the real "this
+  // device cannot draw the map" path these tests want it on.
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
   // A fixed clock, so the staleness line is a fact rather than a race. Spying
   // on `Date.now` rather than faking timers: the component's clock interval is
   // not under test, and fake timers would put it in the way of every `findBy`.
@@ -351,10 +359,13 @@ describe("staleness", () => {
 describe("arrival time", () => {
   it("offers every horizon the grid actually holds", async () => {
     render(<App />);
-    const select = (await screen.findByLabelText(t("en").arrivingIn)) as HTMLSelectElement;
-    expect(select.options.length).toBe(N_HORIZONS);
-    expect(select.options[0]?.value).toBe(String(STEP_MIN));
-    expect(select.options[N_HORIZONS - 1]?.value).toBe(String(N_HORIZONS * STEP_MIN));
+    // The scrubber's range is read off the grid's own header, so a grid built
+    // at a different resolution moves the control instead of leaving its far
+    // end pointing at a column that does not exist.
+    const scrubber = await screen.findByLabelText(t("en").arrivingIn);
+    expect(scrubber.getAttribute("min")).toBe(String(STEP_MIN));
+    expect(scrubber.getAttribute("max")).toBe(String(N_HORIZONS * STEP_MIN));
+    expect(scrubber.getAttribute("step")).toBe(String(STEP_MIN));
   });
 });
 
@@ -424,11 +435,11 @@ describe("staleness correction", () => {
     // still chooses a real number of minutes from now.
     ageArtifact(23);
     render(<App />);
-    const select = (await screen.findByLabelText(t("en").arrivingIn)) as HTMLSelectElement;
-    expect(select.options.length).toBe(N_HORIZONS);
-    expect(select.options[0]?.value).toBe(String(STEP_MIN));
-    expect(select.options[N_HORIZONS - 1]?.value).toBe(String(N_HORIZONS * STEP_MIN));
-    expect(select.value).toBe("15");
+    const scrubber = (await screen.findByLabelText(t("en").arrivingIn)) as HTMLInputElement;
+    expect(scrubber.getAttribute("min")).toBe(String(STEP_MIN));
+    expect(scrubber.getAttribute("max")).toBe(String(N_HORIZONS * STEP_MIN));
+    // 15 minutes from now, not 38 -- the age belongs to the grid read alone.
+    expect(scrubber.value).toBe("15");
   });
 
   it("keeps offering the far horizons even when the offset runs off the grid", async () => {

@@ -5,7 +5,7 @@
  * runs in this component, and nothing is ever sent anywhere -- the driver's
  * location never leaves the phone, because there is no server to send it to.
  *
- * Four things here are load-bearing rather than cosmetic:
+ * Five things here are load-bearing rather than cosmetic:
  *
  *   - **The staleness line.** The upstream feed publishes every five minutes
  *     with a ~3-minute lag, so the reading behind any forecast is already a few
@@ -23,13 +23,19 @@
  *     working.
  *   - **`baseDataTs` and `generatedAt` stay distinct.** The age shown is the age
  *     of the *reading*, not of the file we wrote from it.
+ *   - **The destination is an input, not a measurement.** Geolocation answers
+ *     "where am I", which is the wrong question for a driver on their way
+ *     somewhere else; a tap on the map answers the right one. Both feed the same
+ *     single `destination`, and a tap wins over a location still in flight.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
 import { LotList } from "./components/LotList";
 import { LangToggle } from "./components/LangToggle";
+import { Scrubber } from "./components/Scrubber";
 import type { LatLon } from "./geo";
 import { detectLang, fillTemplate, t, type Lang } from "./i18n";
+import { MapView } from "./map/MapView";
 import { rankLots } from "./rank";
 import type { Grid, LotsDoc } from "./types";
 
@@ -40,9 +46,13 @@ import type { Grid, LotsDoc } from "./types";
 const ARTIFACTS_BASE = `${import.meta.env.BASE_URL}artifacts`.replace(/\/{2,}/g, "/");
 
 /**
- * How many ranked lots to render. A driver picks from the first handful; past
- * that the list is scroll for its own sake, and every extra row is DOM work on
- * a phone. All 1,088 are still *ranked* -- only the tail is not drawn.
+ * How many ranked lots the *list* renders. A driver picks from the first
+ * handful; past that the list is scroll for its own sake, and every extra row
+ * is DOM work on a phone.
+ *
+ * This is a limit on the list and on nothing else. The map is handed the whole
+ * ranked array: slicing it there would silently hide 98% of the city behind a
+ * map that looked like it was showing all of it.
  */
 export const LIST_LIMIT = 20;
 
@@ -100,6 +110,13 @@ export default function App() {
   // would make the effect re-run on the load it just did.
   const loadedRef = useRef(false);
   const geoWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * Abandons an in-flight location request. Held in a ref because the thing
+   * that abandons it -- a tap on the map -- happens in a later render than the
+   * one that started it, and a location arriving afterwards must not overwrite
+   * the destination the user just chose by hand.
+   */
+  const abandonGeoRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -195,14 +212,12 @@ export default function App() {
    */
   const gridHorizonMin = activeHorizon + (ageMin ?? 0);
 
-  const horizons = useMemo(
-    () =>
-      grid === null
-        ? []
-        : Array.from({ length: grid.nHorizons }, (_unused, i) => (i + 1) * grid.stepMin),
-    [grid],
-  );
-
+  /**
+   * Every lot, ranked. Not sliced: this is what the map draws.
+   *
+   * Recomputed when the arrival time moves, which is the whole scrub: a new
+   * column out of a grid already in memory, no request, no refetch.
+   */
   const ranked = useMemo(() => {
     if (artifacts === null || destination === null) return [];
     const { grid: g, lots } = artifacts;
@@ -214,8 +229,11 @@ export default function App() {
       // throw mid-render and take the whole page down, when "no data" for the
       // extra rows is both true and survivable.
       probability: (i, h) => (i < g.nLots ? probabilityAt(g, i, h) : null),
-    }).slice(0, LIST_LIMIT);
+    });
   }, [artifacts, destination, gridHorizonMin]);
+
+  /** The head of the ranking, which is all the list draws. See `LIST_LIMIT`. */
+  const listed = useMemo(() => ranked.slice(0, LIST_LIMIT), [ranked]);
 
   function requestLocation() {
     if (typeof navigator === "undefined" || !navigator.geolocation) {
@@ -233,9 +251,12 @@ export default function App() {
       settled = true;
       if (geoWatchdogRef.current !== null) clearTimeout(geoWatchdogRef.current);
       geoWatchdogRef.current = null;
+      abandonGeoRef.current = null;
       finish();
     };
     geoWatchdogRef.current = setTimeout(() => settle(() => setGeo("unavailable")), GEO_WATCHDOG_MS);
+    // A fourth way to finish: the user answered the question themselves.
+    abandonGeoRef.current = () => settle(() => setGeo("idle"));
 
     try {
       navigator.geolocation.getCurrentPosition(
@@ -251,6 +272,21 @@ export default function App() {
     } catch {
       settle(() => setGeo("unavailable"));
     }
+  }
+
+  /**
+   * A tap on the map. This is what the map is *for*: geolocation answers "where
+   * am I", and Plan 3b shipped with nothing else, so a driver heading somewhere
+   * they were not standing had no way to say where.
+   */
+  function pickDestination(at: LatLon) {
+    // Whatever the pending location request was about to say, it is answering a
+    // question the user has now answered better -- and a position that landed a
+    // second later would silently move the destination off the tapped point.
+    abandonGeoRef.current?.();
+    // A failure the user has routed around is no longer worth reporting.
+    if (geo === "unavailable") setGeo("idle");
+    setDestination(at);
   }
 
   return (
@@ -271,21 +307,17 @@ export default function App() {
           {geo === "locating" ? s.locating : s.useMyLocation}
         </button>
 
-        {horizons.length > 0 && (
-          <div className="horizon">
-            <label htmlFor="horizon-select">{s.arrivingIn}</label>
-            <select
-              id="horizon-select"
-              value={activeHorizon}
-              onChange={(e) => setHorizonMin(Number(e.target.value))}
-            >
-              {horizons.map((min) => (
-                <option key={min} value={min}>
-                  {min} {s.minutesUnit}
-                </option>
-              ))}
-            </select>
-          </div>
+        {grid !== null && (
+          <Scrubber
+            value={activeHorizon}
+            stepMin={grid.stepMin}
+            count={grid.nHorizons}
+            // Straight into the horizon state: the arrival time the user picked
+            // is stored as they picked it, and `gridHorizonMin` above is the one
+            // place the artifact's age is ever added to it.
+            onChange={setHorizonMin}
+            lang={lang}
+          />
         )}
       </div>
 
@@ -317,12 +349,17 @@ export default function App() {
             </button>
           </p>
         )}
+        {!loadFailed && (
+          // Every ranked lot, never `listed`: the list is capped at 20 rows and
+          // the map is the city.
+          <MapView rows={ranked} destination={destination} onPick={pickDestination} lang={lang} />
+        )}
         {!loadFailed && artifacts === null && <p className="notice">{s.loading}</p>}
         {artifacts !== null && destination === null && <p className="notice">{s.startPrompt}</p>}
         {artifacts !== null && destination !== null && (
           <>
             <h2 className="list-head">{s.rankedForArrival}</h2>
-            <LotList rows={ranked} lang={lang} />
+            <LotList rows={listed} lang={lang} />
           </>
         )}
       </main>

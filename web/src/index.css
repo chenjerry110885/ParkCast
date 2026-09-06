@@ -117,22 +117,41 @@ button {
   opacity: 0.65;
 }
 
-.horizon {
+/*
+ * The arrival-time scrubber gets its own full-width row. It is a *sweep*, not a
+ * setting: the map repaints under the thumb, and a 360 px phone has nowhere
+ * near enough width for that to share a line with the location button.
+ */
+.scrubber {
+  flex: 1 1 100%;
   display: flex;
-  align-items: center;
-  gap: 6px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.scrubber-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   font-size: 14px;
   color: var(--muted);
 }
 
-.horizon select {
-  min-height: 44px;
-  padding: 0 8px;
-  font: inherit;
+.scrubber-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
   color: var(--text);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+}
+
+/*
+ * 44 px tall so the whole strip is a thumb target, not just the 20 px of visible
+ * track -- the control is dragged one-handed, in a car park, at arm's length.
+ */
+.scrubber input[type="range"] {
+  width: 100%;
+  height: 44px;
+  margin: 0;
+  accent-color: var(--accent);
 }
 
 /* ------------------------------------------------- status and staleness */
