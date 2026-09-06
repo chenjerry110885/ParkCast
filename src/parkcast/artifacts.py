@@ -7,6 +7,7 @@ from pathlib import Path
 
 from parkcast import config
 from parkcast.metadata import Lot
+from parkcast.pricing import Price, parse_fare
 
 MAGIC = b"PCG1"
 VERSION = 1
@@ -86,6 +87,18 @@ def read_header(path: Path) -> dict | None:
     return header if header["magic"] == MAGIC else None
 
 
+def _price_field(price: Price) -> dict:
+    """The compact `"p"` object for one lot's parsed fare.
+
+    `lo`/`hi` are omitted entirely for `unknown` rather than sent as `null`,
+    so a client cannot read a number that was never parsed -- there is no key
+    to misread in the first place.
+    """
+    if price.kind == "unknown":
+        return {"k": "unknown"}
+    return {"k": price.kind, "lo": price.low, "hi": price.high}
+
+
 def build_lots_json(
     lots: Sequence[Lot], *, generated_at: int, base_data_ts: int
 ) -> bytes:
@@ -107,6 +120,10 @@ def build_lots_json(
     its header; without the same here, a future client could not tell a v1
     lots.json from a v2 one and would have to guess from the keys present.
 
+    `p` carries the fare already parsed into numbers by `pricing.parse_fare`,
+    never the raw Chinese `fare_text` -- the browser has no reason to parse
+    prose, and shipping it at ~57 chars per lot would roughly double the file.
+
     Short keys and unescaped UTF-8: at ~1,100 lots this is the difference
     between a 234 KB file and something several times larger.
     """
@@ -122,6 +139,7 @@ def build_lots_json(
                 "i": i, "id": lot.id, "n": lot.name, "a": lot.area,
                 "y": round(lot.lat, 5), "x": round(lot.lon, 5),
                 "c": lot.capacity_car, "t": lot.lot_type,
+                "p": _price_field(parse_fare(lot.fare_text)),
             }
             for i, lot in enumerate(lots)
         ]
