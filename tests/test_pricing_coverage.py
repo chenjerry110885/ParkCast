@@ -6,8 +6,9 @@ shipping. This is exactly what Task 1b caught: the non-car strip was silently
 discarding a valid rate for 133 lots, and no unit test noticed because each
 one only exercises a single hand-picked string.
 
-Thresholds below reflect Task 1b's raised coverage (measured on the committed
-fixture: 87.61% priced / 12.39% unknown), not Task 1's original 81%.
+Thresholds below reflect the coverage measured on the committed fixture after
+the plan 3a fix wave (87.66% priced / 12.34% unknown), not Task 1's original
+81%. The wave moved five lots, four of them onto a rate they had been hiding.
 """
 import json
 from collections import Counter
@@ -28,7 +29,7 @@ def test_most_lots_get_a_usable_price():
     prices = _prices()
     priced = [p for p in prices if p.kind != "unknown"]
     share = len(priced) / len(prices)
-    assert share >= 0.85, f"only {share:.2%} of lots priced; measured 87.61% after task 1b"
+    assert share >= 0.85, f"only {share:.2%} of lots priced; measured 87.66% after plan 3a"
 
 
 def test_no_parsed_price_is_implausible():
@@ -52,7 +53,7 @@ def test_ranges_are_ordered_and_exact_prices_are_degenerate():
 
 
 def test_the_mix_of_outcomes_is_stable():
-    """Measured after task 1b: 73.5/12.3/1.8/12.4 exact/range/entry/unknown.
+    """Measured after plan 3a: 73.4/12.5/1.8/12.3 exact/range/entry/unknown.
     These are the raised guards -- generous enough to absorb normal drift in
     the feed, tight enough to catch a regex regression that eats a chunk of
     the city (this is what task 1b's bug looked like before it was found)."""
