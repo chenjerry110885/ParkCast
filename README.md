@@ -58,7 +58,7 @@ Running continuously since 2026-09-04. Live figures at the time of writing:
 | Lots forecast every 5 min | **1,088** × 24 horizons (+5 to +120 min) |
 | Lots with a parsed price | **97.5%** |
 | Published payload | **33 KB gzipped**, both files |
-| Tests | **250** Python · **53** TypeScript |
+| Tests | **250** Python · **93** TypeScript |
 
 Plans 1, 2, 2b, 3a and 3b are complete. The map, time-scrubber and PWA install (3c) and the trained
 model with its evaluation (4) are still to come.
@@ -157,7 +157,7 @@ npm run dev --prefix web
 
 ```bash
 python -m pytest          # 250
-npm test --prefix web     # 53
+npm test --prefix web     # 93
 ```
 
 ---
