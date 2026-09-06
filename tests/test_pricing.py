@@ -66,3 +66,41 @@ def test_implausible_rates_are_rejected_as_unknown():
 def test_range_is_ordered_low_then_high():
     p = parse_fare("計時：小型車100元/時(09-21)、60元/時(21-09)。")
     assert p.kind == "range" and p.low < p.high
+
+
+def test_a_parenthetical_motorcycle_aside_does_not_destroy_the_car_rate():
+    """`小型車(含大型重型機車)` is a car clause that merely mentions motorcycles.
+    Stripping from the mention onward loses the rate entirely."""
+    p = parse_fare("計時：小型車(含大型重型機車)：小型 30元/時，未滿半小時以半小時計費。")
+    assert p == Price("exact", 30, 30)
+
+
+def test_a_motorcycle_clause_after_an_ideographic_comma_is_still_stripped():
+    """`、` separates clauses just as `，` does. Missing it lets a NT$10
+    motorcycle rate become the low end of a range no driver can pay."""
+    p = parse_fare("計時：小型車30元/時、機車10元/時(當日累計上限20元)，未滿半小時計費。")
+    assert p == Price("exact", 30, 30)
+
+
+def test_a_large_vehicle_rate_is_still_excluded():
+    """The strip must keep doing its original job."""
+    p = parse_fare("計時：小型車100元/時，大客車300元/時，停車全程以半小時計。")
+    assert p == Price("exact", 100, 100)
+
+
+def test_a_non_car_clause_ends_where_a_car_clause_begins():
+    """Eating to the full stop would take the car rate with the truck's."""
+    p = parse_fare("計時：大型車200元/小時，小型車100元/時，停車全程以半小時計。")
+    assert p == Price("exact", 100, 100)
+
+
+def test_a_shared_subject_list_keeps_the_rate_it_shares():
+    """`小型車及大型重型機車` and `小型車、大型重型機車` name one rate's two
+    subjects; neither may be read as a motorcycle-only clause."""
+    assert parse_fare("小型車及大型重型機車：計時 50元/時，全程以半小時計。")         == Price("exact", 50, 50)
+    assert parse_fare("小型車、大型重型機車：計時40元/時，全程以半小時計。")         == Price("exact", 40, 40)
+
+
+def test_a_motorcycle_only_lot_has_no_car_rate_to_report():
+    """機車:10元/時 is the whole fare text; there is no car price to give."""
+    assert parse_fare("機車：10元/時，當日當次停車最高收費上限30元/次，隔日另計。").kind == "unknown"
