@@ -1,12 +1,12 @@
 /**
- * The map: 1,088 car parks over a self-hosted basemap, coloured by their chance
- * of having a space at the driver's arrival time.
+ * The map: every car park in the roster over a self-hosted basemap, coloured by
+ * its chance of having a space at the driver's arrival time.
  *
  * Every lot is one point in **one** GeoJSON source drawn by **one** circle
- * layer. The obvious alternative -- a `maplibregl.Marker` per lot -- puts 1,088
- * absolutely-positioned DOM nodes on the page and repositions all of them on
- * every frame of a pan. That is the difference between a map that glides and
- * one that stutters on the phone this app is meant to be used on.
+ * layer. The obvious alternative -- a `maplibregl.Marker` per lot -- puts a
+ * thousand absolutely-positioned DOM nodes on the page and repositions every one
+ * of them on every frame of a pan. That is the difference between a map that
+ * glides and one that stutters on the phone this app is meant to be used on.
  *
  * Colour comes from the feature's own `colour` property rather than from a
  * paint expression that re-derives it, so the map, the list and `colour.ts`
@@ -80,8 +80,8 @@ export default function MapView({ lots, destination, onPick, lang }: MapViewProp
       type: "circle",
       source: LOTS_SOURCE,
       paint: {
-        // Small enough at city zoom that 1,088 dots stay a texture rather than
-        // a blob, big enough to hit with a thumb once you are in a district.
+        // Small enough at city zoom that a thousand dots stay a texture rather
+        // than a blob, big enough to hit with a thumb once in a district.
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2.5, 13, 5, 16, 9],
         "circle-color": ["get", "colour"],
         "circle-opacity": ["case", ["get", "known"], 0.9, 0.5],

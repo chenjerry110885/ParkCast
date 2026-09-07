@@ -5,7 +5,7 @@
  * mounts but never gets a MapLibre instance and its GeoJSON source is never
  * written. That blind spot hid the branch's worst bug: the map was fed the
  * *ranked* array, which is empty until a destination exists, so a first load
- * drew a basemap with zero of 1,088 car parks on it and nothing said so.
+ * drew a basemap with zero of the roster's car parks on it and nothing said so.
  *
  * So this file stubs `useMapLibre` -- and only that -- with a map object that
  * records what is set on its sources. Everything above it is real: the fixture

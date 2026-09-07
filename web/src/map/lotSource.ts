@@ -1,7 +1,7 @@
 /**
- * Lots -> the single GeoJSON source that draws all 1,088 car parks.
+ * Lots -> the single GeoJSON source that draws every car park in the roster.
  *
- * One source, one circle layer. Not 1,088 `Marker`s: a DOM node per lot is what
+ * One source, one circle layer. Not a `Marker` each: a DOM node per lot is what
  * turns a city-wide parking map into a phone that drops frames while panning,
  * and MapLibre draws a circle layer of this size on the GPU without noticing.
  *

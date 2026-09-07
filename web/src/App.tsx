@@ -37,10 +37,10 @@
  *     place for a stale GPS fix to overwrite what the user just said.
  *   - **The map does not wait for the destination.** Nothing a dot needs -- id,
  *     name, district, position, probability -- comes from where the driver is
- *     going, so all 1,088 draw on first paint and only the *ranking* waits.
+ *     going, so every one draws on first paint and only the *ranking* waits.
  *     Feeding the map the ranked array instead, as this did, left the whole
  *     city invisible until the user happened to tap: the project's own
- *     "silently absent lot" failure, at 1,088 out of 1,088.
+ *     "silently absent lot" failure, at every lot in the roster.
  *   - **The list does not wait for the map.** MapLibre and its stylesheet are
  *     333 KB gzipped -- more than the rest of the app together -- and a static
  *     import made the ranked list, the thing that answers the user's question,
@@ -150,6 +150,23 @@ const CLOCK_TICK_MS = 30_000;
  */
 export const REFRESH_MS = 120_000;
 
+/**
+ * The shortest gap allowed between two trips to the network.
+ *
+ * The interval above is self-limiting; `visibilitychange` is not. Every switch
+ * back to the tab fired a refetch, so a user flipping between this app and a
+ * map application issued one request per flip, unbounded -- and an app with no
+ * server has no back end to absorb that, only a CDN bill it does not want to
+ * discover.
+ *
+ * Thirty seconds is a sixth of the feed's five-minute cadence, so the floor can
+ * never be the reason a driver is looking at an older grid than exists: the
+ * interval decides freshness, and this only decides how often *impatience* can.
+ * The worst case it permits is two requests a minute; the worst case without it
+ * is however fast someone can switch apps.
+ */
+export const MIN_REFETCH_MS = 30_000;
+
 /** Passed to the Geolocation API, which starts it only after the permission decision. */
 const GEO_TIMEOUT_MS = 10_000;
 
@@ -230,6 +247,8 @@ export default function App() {
   // Whether a grid has ever landed, read from inside the fetch effect -- state
   // would make the effect re-run on the load it just did.
   const loadedRef = useRef(false);
+  /** When the artifacts were last asked for, so `MIN_REFETCH_MS` has something to measure. */
+  const lastFetchRef = useRef(0);
   const geoWatchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /**
    * Abandons an in-flight location request. Held in a ref because the thing
@@ -241,6 +260,10 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
+    // Stamped here rather than at the call site that asked for the refetch, so
+    // it records what actually happened -- a trip to the network -- and covers
+    // the retry button and the first load as well as the two schedulers below.
+    lastFetchRef.current = Date.now();
     loadArtifacts(ARTIFACTS_BASE).then(
       (loaded) => {
         if (cancelled) return;
@@ -275,8 +298,11 @@ export default function App() {
       if (document.visibilityState !== "hidden") bump();
     }, REFRESH_MS);
     const onVisibility = () => {
-      // Coming back is the moment the age is largest and the user is looking.
-      if (document.visibilityState === "visible") bump();
+      // Coming back is the moment the age is largest and the user is looking...
+      if (document.visibilityState !== "visible") return;
+      // ...but only if we have not just been. See `MIN_REFETCH_MS`.
+      if (Date.now() - lastFetchRef.current < MIN_REFETCH_MS) return;
+      bump();
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => {

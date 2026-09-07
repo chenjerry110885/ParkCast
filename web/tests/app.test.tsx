@@ -18,7 +18,13 @@
  */
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { COVERAGE_RADIUS_M, GEO_WATCHDOG_MS, LIST_LIMIT, REFRESH_MS } from "../src/App";
+import App, {
+  COVERAGE_RADIUS_M,
+  GEO_WATCHDOG_MS,
+  LIST_LIMIT,
+  MIN_REFETCH_MS,
+  REFRESH_MS,
+} from "../src/App";
 import { HEADER_SIZE, UNKNOWN } from "../src/artifacts";
 import { haversineMeters } from "../src/geo";
 import { fillTemplate, t } from "../src/i18n";
@@ -29,6 +35,8 @@ const N_HORIZONS = 24;
 const STEP_MIN = 5;
 /** Matches the fixture header below, so the staleness line is deterministic. */
 const BASE_DATA_TS = 1788677280;
+/** The frozen wall clock every test runs at: four minutes after the reading. */
+const NOW_MS = (BASE_DATA_TS + 4 * 60) * 1000;
 
 const HERE = { lat: 25.0375, lon: 121.5637 };
 
@@ -234,7 +242,7 @@ beforeEach(() => {
   // A fixed clock, so the staleness line is a fact rather than a race. Spying
   // on `Date.now` rather than faking timers: the component's clock interval is
   // not under test, and fake timers would put it in the way of every `findBy`.
-  vi.spyOn(Date, "now").mockReturnValue((BASE_DATA_TS + 4 * 60) * 1000);
+  vi.spyOn(Date, "now").mockReturnValue(NOW_MS);
   // The default language must be a decision of the test, not of jsdom.
   Object.defineProperty(navigator, "language", { value: "en-US", configurable: true });
 });
@@ -490,11 +498,51 @@ describe("refresh", () => {
     render(<App />);
     await screen.findByTestId("staleness");
     const before = gridFetchCount();
+    // `Date.now` is frozen for these tests, so the floor would suppress this
+    // refetch on a technicality. Move the clock past it: the behaviour under
+    // test is "coming back refetches", not "coming back within a second does".
+    vi.spyOn(Date, "now").mockReturnValue(NOW_MS + MIN_REFETCH_MS + 1_000);
 
     await act(async () => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
 
+    expect(gridFetchCount()).toBeGreaterThan(before);
+  });
+
+  /**
+   * The interval is self-limiting; `visibilitychange` was not. Flipping between
+   * this app and a map application fired one request per flip, unbounded, at an
+   * app whose whole serving story is "it is only a CDN".
+   */
+  it("does not refetch again the instant the tab is flipped back", async () => {
+    render(<App />);
+    await screen.findByTestId("staleness");
+    const before = gridFetchCount();
+
+    await act(async () => {
+      for (let i = 0; i < 5; i += 1) document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    expect(gridFetchCount()).toBe(before);
+  });
+
+  it("refetches again once the floor has passed", async () => {
+    render(<App />);
+    await screen.findByTestId("staleness");
+    const before = gridFetchCount();
+
+    // One flip inside the floor buys nothing...
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(gridFetchCount()).toBe(before);
+
+    // ...and the floor is a delay, not a lockout.
+    vi.spyOn(Date, "now").mockReturnValue(NOW_MS + MIN_REFETCH_MS + 1_000);
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
     expect(gridFetchCount()).toBeGreaterThan(before);
   });
 

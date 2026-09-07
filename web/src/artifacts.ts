@@ -150,7 +150,7 @@ async function fetchGrid(base: string, init?: RequestInit): Promise<Grid> {
  *
  * A failing row is dropped rather than repaired -- there is nothing to repair
  * it from -- and dropped rather than thrown on, because one bad row out of
- * 1,088 should cost the user one car park, not the whole city.
+ * a thousand should cost the user one car park, not the whole city.
  */
 function isPlaceable(lot: Lot, position: number): boolean {
   return lot.i === position && Number.isFinite(lot.y) && Number.isFinite(lot.x);
