@@ -100,6 +100,11 @@ walking time of several days. **10 km** separates "plausibly driving into Taipei
 (Banqiao at 3.6 km) from "this app cannot answer your question" — with a factor of six of
 headroom on both sides, which is why the number does not need to be argued over.
 
+> **Corrected during Task 3.** These distances are approximate: measured from Banqiao *station*
+> the nearest lot is **2.70 km**, and Taoyuan Airport is **23.45 km**. Same side of the line
+> either way, so 10 km stands — but they are not quotable as measured constants. The figures
+> in `COVERAGE_RADIUS_M`'s comment in `App.tsx` are the corrected ones.
+
 ### The favicon is still the scaffold's
 
 `web/public/favicon.svg` is the starter-template mark, untouched. On a public portfolio
@@ -198,13 +203,13 @@ git commit -m "fix(artifacts): drop lots with no car capacity from the roster"
 - Modify: `web/src/App.tsx`
 - Modify: `web/tests/app.test.tsx`
 
-- [ ] **Step 1: Record the baseline**
+- [x] **Step 1: Record the baseline**
 
 `npm run build`, and write down the gzip size of every emitted chunk. The numbers in
 "Grounded before writing" are the expected starting point; if they do not match, say so
 before changing anything.
 
-- [ ] **Step 2: Write the tests**
+- [x] **Step 2: Write the tests**
 
 The existing `app.test.tsx` renders `App` and asserts on the map. Under `React.lazy` the
 map arrives a microtask later, so those assertions need `findBy*` rather than `getBy*`.
@@ -216,7 +221,7 @@ Add:
   that all lots draw before a destination is picked — that regression is exactly what the
   final review of 3c caught).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `const MapView = lazy(() => import("./map/MapView"))` plus a `<Suspense>` boundary around
 it. `MapView` is currently a named export; give it a default export or adapt the import —
@@ -229,20 +234,20 @@ Note that `maplibre-gl.css` is imported inside `MapView.tsx`, so the 86 KB style
 should follow it out of the entry chunk. Confirm that in the build output; if it does
 not, say so rather than quietly leaving it.
 
-- [ ] **Step 4: Measure the result**
+- [x] **Step 4: Measure the result**
 
 Rebuild. Report entry gzip before and after, and the size of the new map chunk. The
 target from the Plan 3c ledger is roughly 333 KB → 64 KB on the entry chunk. If the real
 number is materially different, report the real number.
 
-- [ ] **Step 5: Verify by hand**
+- [x] **Step 5: Verify by hand**
 
 Load the app with the browser pane **visible** (a hidden pane sets `document.hidden`,
 `requestAnimationFrame` never fires, and MapLibre stalls mid-style-load with no error —
 this cost two implementers real time in Plan 3c). Confirm the list paints first, the map
 follows, and nothing jumps.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web
@@ -302,7 +307,7 @@ normalisation, not simplification — and the **displayed name must stay exactly
 writes it**, because it has to match the sign on the building. Test both directions:
 typing either form finds lots spelled with the other.
 
-- [ ] **Step 1: Write the tests first (`search.ts` is pure and should be tested alone)**
+- [x] **Step 1: Write the tests first (`search.ts` is pure and should be tested alone)**
 
 - Substring match on the lot name, anywhere in the string (Chinese has no word
   boundaries; prefix-only matching would miss most of the roster).
@@ -312,9 +317,9 @@ typing either form finds lots spelled with the other.
 - Empty and whitespace-only queries return nothing, not everything.
 - A query matching nothing returns an empty list, and the UI says so.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Pure function first: `searchLots(lots, query, limit)`. No React inside it.
 
@@ -331,14 +336,14 @@ and the unreachable `noLotsNearby` string is the symptom. Add a coverage check i
 instead of presenting a ranked list of car parks a day's walk away. Put the constant
 somewhere named, with the measurement in a comment. Keep the map usable.
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
-- [ ] **Step 5: Verify by hand at 360 px**
+- [x] **Step 5: Verify by hand at 360 px**
 
 Search for `101`, `信義`, `車站`, `USPACE`, and something that matches nothing. Pick a
 result and confirm the list re-ranks around it. Confirm the keyboard alone can do it.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web
@@ -361,20 +366,20 @@ and the expiry state built in Plans 3b and 3c are what make offline honest rathe
 lie with a nicer error message. Do not add a second, separate "you are offline" notion of
 freshness: the existing one is already correct.
 
-- [ ] **Step 1: Icons, with no new dependency**
+- [x] **Step 1: Icons, with no new dependency**
 
 Replace the scaffold favicon. Generate the PNG sizes deterministically from a script
 committed to the repo — a pure-Python or pure-Node writer is fine, an image library is a
 new dependency and is not. Document the command. A flat geometric mark is the right
 scope; this is not a branding exercise.
 
-- [ ] **Step 2: Manifest**
+- [x] **Step 2: Manifest**
 
 `name`, `short_name`, `start_url` (**relative** — the app deploys under `/ParkCast/`, see
 `vite.config.ts`), `display: standalone`, `theme_color`, `background_color`, and the icons
 including a `maskable` one. Link it from `index.html`.
 
-- [ ] **Step 3: Write the service worker's tests, then the worker**
+- [x] **Step 3: Write the service worker's tests, then the worker**
 
 The strategy, and each clause is load-bearing:
 
@@ -397,21 +402,21 @@ The strategy, and each clause is load-bearing:
   front of the Vite dev server produces stale-module bugs that look like your code is
   haunted.
 
-- [ ] **Step 4: The refetch floor (parked from Plan 3c)**
+- [x] **Step 4: The refetch floor (parked from Plan 3c)**
 
 `App.tsx` refetches on every `visibilitychange` to visible, with no minimum interval, so
 tabbing in and out hammers the CDN. Add a floor — the feed's cadence is 5 minutes and
 `REFRESH_MS` is already 2 minutes, so refetching more often than that buys nothing. Test
 it.
 
-- [ ] **Step 5: Verify by hand**
+- [x] **Step 5: Verify by hand**
 
 Build, `npm run preview`, and confirm: the manifest validates and the app is installable;
 a reload with the network throttled to offline still renders the list from cache with an
 honest age; `taipei.pmtiles` requests are **not** served by the worker; and a second build
 with a changed asset activates only after a full reload.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web scripts
@@ -422,16 +427,16 @@ git commit -m "feat(web): installable PWA with an offline-capable shell"
 
 ## Definition of done
 
-- [ ] No lot with `totalcar: 0` appears in the published roster; a lot with `totalcar: -9` still does
-- [ ] The corpus is untouched — collection, storage and the schema all unchanged
-- [ ] CLAUDE.md and README carry **re-measured** counts and sizes, not arithmetic
-- [ ] The ranked list paints before MapLibre loads, and the layout does not jump
-- [ ] A destination can be set by name, from the keyboard, with no network request
-- [ ] A destination outside Taipei says so instead of ranking car parks 290 km away
-- [ ] The app installs, and opens offline showing an honestly-aged forecast
-- [ ] The basemap is never served from the service worker cache
-- [ ] `npm test`, `npm run typecheck`, `npm run lint` and `python -m pytest` all green
-- [ ] Zero third-party origins, still. Re-verify on the built bundle, not the source
+- [x] No lot with `totalcar: 0` appears in the published roster; a lot with `totalcar: -9` still does
+- [x] The corpus is untouched — collection, storage and the schema all unchanged
+- [x] CLAUDE.md and README carry **re-measured** counts and sizes, not arithmetic
+- [x] The ranked list paints before MapLibre loads, and the layout does not jump
+- [x] A destination can be set by name, from the keyboard, with no network request
+- [x] A destination outside Taipei says so instead of ranking car parks 290 km away
+- [x] The app installs, and opens offline showing an honestly-aged forecast
+- [x] The basemap is never served from the service worker cache
+- [x] `npm test`, `npm run typecheck`, `npm run lint` and `python -m pytest` all green
+- [x] Zero third-party origins, still. Re-verify on the built bundle, not the source
 
 ## Deferred beyond 3d
 

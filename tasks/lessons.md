@@ -107,3 +107,32 @@ guarantee, a lifecycle, a file format — cite where the claim comes from, or ma
 unverified so the implementer knows to check it rather than transcribe it. "I ran it and it looked
 right" is evidence about the mechanism only. And state the general rule with its exceptions
 attached: "Vite hashes every asset filename" invites the reader to include the one it does not.
+
+---
+
+## L006 — Two experiments that share a handle are one experiment
+
+**Date:** 2026-09-07
+**Trigger:** Plan 3d's service-worker verification, twice, in two different agents.
+
+**What happened:** An agent comparing the old and new service worker over CDP reused one
+debugging port across both runs. The second run silently reattached to the *first* browser,
+which still had the earlier worker installed — so both variants produced identical output and
+the fix appeared to change nothing. Caught only because "no difference at all" was implausible.
+
+In the same plan, an earlier agent measured "offline" with `Network.emulateNetworkConditions`
+and got results that did not add up. The emulation does not apply to fetches made from *inside*
+a service worker; genuine offline meant killing the server. They discarded two runs.
+
+And `vite preview` answers a request for a missing file with `index.html` and a **200**, which
+makes any "delete an asset and see what breaks" experiment lie in the most convincing direction.
+
+**Why:** Each of these is a shared or lying handle between two supposedly independent
+observations — a reused browser, an emulation layer that does not reach the code under test, a
+server that fabricates success. None produced an error. All three produced a *plausible* wrong
+answer, which is the expensive kind.
+
+**Rule:** Before trusting a comparison, prove the two sides can actually differ. Use a fresh
+port, profile and process per run; assert a control that is *expected to fail* and confirm it
+does; and never verify a caching change against a server that cannot 404. If an experiment
+reports "no difference", suspect the rig before believing the result.

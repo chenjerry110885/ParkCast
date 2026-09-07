@@ -188,6 +188,10 @@ most want it is a basement car park. A cached forecast is not passed off as a li
 artifact carries the timestamp of the reading behind it, so the app shows its real age and withdraws
 the probability entirely once it is too old to answer the question.
 
+**Offline works from the second visit, not the first.** A service worker does not control the page
+that registers it, so the first load has nothing cached behind it. Saying "works offline" without
+that clause would be the same kind of overclaim the rest of this app exists to avoid.
+
 The service worker deliberately leaves the 23 MB basemap alone: it is read by HTTP range request,
 and caching partial responses is a well-known way to serve corrupt tiles. Offline you get the full
 ranked list and no map tiles, which is the right half to keep.
