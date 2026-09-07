@@ -5,7 +5,7 @@
  * runs in this component, and nothing is ever sent anywhere -- the driver's
  * location never leaves the phone, because there is no server to send it to.
  *
- * Eight things here are load-bearing rather than cosmetic:
+ * Ten things here are load-bearing rather than cosmetic:
  *
  *   - **The staleness line.** The upstream feed publishes every five minutes
  *     with a ~3-minute lag, so the reading behind any forecast is already a few
@@ -30,8 +30,11 @@
  *     of the *reading*, not of the file we wrote from it.
  *   - **The destination is an input, not a measurement.** Geolocation answers
  *     "where am I", which is the wrong question for a driver on their way
- *     somewhere else; a tap on the map answers the right one. Both feed the same
- *     single `destination`, and a tap wins over a location still in flight.
+ *     somewhere else; a tap on the map, and a car park chosen by name, answer
+ *     the right one. All three feed the same single `destination` through the
+ *     same `pickDestination`, and either deliberate answer wins over a location
+ *     still in flight. Three ways in, one path: a second one would be a second
+ *     place for a stale GPS fix to overwrite what the user just said.
  *   - **The map does not wait for the destination.** Nothing a dot needs -- id,
  *     name, district, position, probability -- comes from where the driver is
  *     going, so all 1,088 draw on first paint and only the *ranking* waits.
@@ -46,9 +49,21 @@
  *     list does not jump down the page when the chunk lands. `mapLots` is still
  *     computed here, above the boundary, so the map is full the moment it
  *     mounts -- the previous point is not weakened by this one.
+ *   - **The ranking has an edge, and the app says where it is.** `rankLots` has
+ *     no distance cutoff: from Kaohsiung it will rank Taipei car parks 291 km
+ *     away, in order, with a confident probability on each. Every number would
+ *     be true and the answer would be useless. `COVERAGE_RADIUS_M` is where the
+ *     list stops pretending. The map keeps drawing the whole city either way --
+ *     it is the *ranking* that is meaningless out there, not the data.
+ *   - **A destination can be typed.** `DestinationSearch` looks up car parks by
+ *     name in the roster already in memory. No geocoder, no key, no third-party
+ *     origin, and the driver's destination never leaves the phone -- which is
+ *     the same promise the rest of this file makes, and would have been the
+ *     first thing an address search quietly broke.
  */
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { artifactsBase, horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
+import { DestinationSearch } from "./components/DestinationSearch";
 import { LotList } from "./components/LotList";
 import { LangToggle } from "./components/LangToggle";
 import { Scrubber } from "./components/Scrubber";
@@ -92,6 +107,31 @@ const ARTIFACTS_BASE = artifactsBase(import.meta.env.BASE_URL);
  * cap drop the no-forecast lots the ranker deliberately kept.
  */
 export const LIST_LIMIT = 20;
+
+/**
+ * How far the nearest known car park may be before the ranking stops meaning
+ * anything, in metres.
+ *
+ * `rankLots` deliberately has no distance cutoff -- it scores whatever roster it
+ * is handed against whatever point it is handed -- so without a check here the
+ * app answers "where should I park?" for a driver in Kaohsiung with a confident
+ * 84% on a car park 291 km away and a walk of several days.
+ *
+ * Nearest published car park, measured 2026-09-07 against the 1,075-lot roster:
+ *
+ *   | Taipei City Hall     |   0.19 km |
+ *   | Beitou, north edge   |   0.14 km |
+ *   | Muzha, south edge    |   0.40 km |
+ *   | Banqiao, New Taipei  |   2.70 km |  <- plausibly driving into Taipei
+ *   | Taoyuan Airport      |  23.45 km |  <- not
+ *   | Kaohsiung            | 290.86 km |
+ *
+ * 10 km sits between those two with a factor of ~4 of headroom on the inside
+ * and ~2.3 on the outside, which is why the exact number does not need to be
+ * argued over: no plausible destination lands near it. Deliberately generous
+ * towards New Taipei, whose drivers park in Taipei every day.
+ */
+export const COVERAGE_RADIUS_M = 10_000;
 
 /** Minutes ahead the list opens on: long enough to matter, short enough to be a real trip. */
 const DEFAULT_HORIZON_MIN = 15;
@@ -374,6 +414,23 @@ export default function App() {
    */
   const listed = useMemo(() => listRows(ranked, LIST_LIMIT), [ranked]);
 
+  /**
+   * The destination is somewhere this app cannot answer for.
+   *
+   * Read off the *nearest* lot rather than the best-ranked one: `ranked` is
+   * sorted by expected cost, so its first row is whichever car park won the
+   * trade between probability, walk and price -- which at 290 km is a lottery
+   * between a thousand equally hopeless candidates. Distance is the question
+   * being asked, so distance is what gets minimised.
+   *
+   * An empty ranking lands here too, and truthfully: with no car park in the
+   * roster, none is within `COVERAGE_RADIUS_M` of anywhere.
+   */
+  const outsideCoverage = useMemo(() => {
+    if (destination === null || artifacts === null) return false;
+    return ranked.every((row) => row.meters > COVERAGE_RADIUS_M);
+  }, [artifacts, destination, ranked]);
+
   function requestLocation() {
     if (typeof navigator === "undefined" || !navigator.geolocation) {
       setGeo("unavailable");
@@ -436,6 +493,18 @@ export default function App() {
       </header>
 
       <div className="controls">
+        {artifacts !== null && (
+          <DestinationSearch
+            lots={artifacts.lots.lots}
+            // Straight into the one destination path a map tap uses. A search
+            // result is a deliberate answer to "where are you going", exactly
+            // as a tap is, so it abandons a location request still in flight
+            // for free -- there is no second code path for it to forget to.
+            onSelect={(lot) => pickDestination({ lat: lot.y, lon: lot.x })}
+            lang={lang}
+          />
+        )}
+
         <button
           type="button"
           className="locate"
@@ -513,7 +582,15 @@ export default function App() {
           </p>
         )}
         {artifacts !== null && destination === null && <p className="notice">{s.startPrompt}</p>}
-        {artifacts !== null && destination !== null && (
+        {/* No heading above this one: "Ranked for your arrival" over an
+            explanation that nothing here is worth ranking would be the same
+            false claim the expiry heading exists to avoid. */}
+        {outsideCoverage && (
+          <p className="notice notice-stale" data-testid="outside-coverage" role="status">
+            {fillTemplate(s.outsideCoverage, { km: COVERAGE_RADIUS_M / 1000 })}
+          </p>
+        )}
+        {artifacts !== null && destination !== null && !outsideCoverage && (
           <>
             {/* The heading follows what the order actually means: with no
                 forecast behind it, the list is sorted by walk and price, and
@@ -522,14 +599,7 @@ export default function App() {
             <h2 className="list-head">
               {forecastExpired ? s.nearbyCarParks : s.rankedForArrival}
             </h2>
-            {listed.length === 0 ? (
-              // A bare heading over nothing reads as a bug. Say what happened.
-              <p className="notice" data-testid="no-lots">
-                {s.noLotsNearby}
-              </p>
-            ) : (
-              <LotList rows={listed} lang={lang} />
-            )}
+            <LotList rows={listed} lang={lang} />
           </>
         )}
       </main>

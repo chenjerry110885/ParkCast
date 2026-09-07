@@ -71,6 +71,26 @@ export interface Strings {
   retry: string;
   /** Shown before a destination is known -- the list has nothing to rank against. */
   startPrompt: string;
+  /** Visible label on the destination search box. */
+  searchLabel: string;
+  /** Example queries in the search box, shown while it is empty. */
+  searchPlaceholder: string;
+  /**
+   * What the search can and cannot find.
+   *
+   * Load-bearing rather than decorative. This searches car park *names* and
+   * districts, not addresses and not landmarks, so `市政府` finds nothing --
+   * the two car parks by Taipei City Hall are called 松壽廣場 and 府前廣場. A
+   * search box with no such caption reads as a general place search and earns
+   * every "it can't find anything" the limitation would otherwise get.
+   */
+  searchHint: string;
+  /** Accessible name for the results listbox. */
+  searchResultsLabel: string;
+  /** Announced when results change, e.g. "8 car parks match". Carries `{n}`. */
+  searchResultsTemplate: string;
+  /** Shown under the box when a query matches no car park at all. */
+  searchNoMatch: string;
   /** Heading over the ranked list. */
   rankedForArrival: string;
   /**
@@ -85,8 +105,15 @@ export interface Strings {
    * Says what expired and, just as importantly, what did not.
    */
   forecastTooOld: string;
-  /** Shown when nothing ranked at all -- an empty heading explains nothing. */
-  noLotsNearby: string;
+  /**
+   * Shown when the destination is outside the area the roster covers.
+   *
+   * `rankLots` has no distance cutoff -- it will happily rank Taipei car parks
+   * for a driver in Kaohsiung, 291 km and a confident probability away. This is
+   * the string that says so instead. Carries `{km}` for the radius, so the
+   * sentence cannot drift from `COVERAGE_RADIUS_M`.
+   */
+  outsideCoverage: string;
   /** Accessible name for the map region. The map itself carries no text. */
   mapLabel: string;
   /**
@@ -127,12 +154,20 @@ const en: Strings = {
   loading: "Loading forecast…",
   loadFailed: "Couldn't load the forecast.",
   retry: "Try again",
-  startPrompt: "Tap the map where you're headed, or “Use my location”, to rank the car parks around it.",
+  startPrompt:
+    "Search for a car park, tap the map where you're headed, or use your location, to rank the car parks around that point.",
+  searchLabel: "Search car parks",
+  searchPlaceholder: "e.g. 台北車站, 101, USPACE",
+  searchHint: "Searches car park names and districts — not addresses or landmarks.",
+  searchResultsLabel: "Matching car parks",
+  searchResultsTemplate: "{n} matching car parks",
+  searchNoMatch: "No car park name matches that. Try a district, or tap the map.",
   rankedForArrival: "Ranked for your arrival",
   nearbyCarParks: "Car parks nearby",
   forecastTooOld:
     "This forecast is too old to answer for your arrival time, so no chance of a space is shown. Names, walking distances and prices are still correct.",
-  noLotsNearby: "No car parks to rank here. Try another point on the map.",
+  outsideCoverage:
+    "ParkCast covers Taipei, and no car park it knows is within {km} km of here, so there is nothing worth ranking. The map still works — pick somewhere in the city.",
   mapLabel: "Map of car parks",
   mapLoading: "Loading map…",
   mapUnavailable: "This device can't draw the map. The ranked list still works.",
@@ -157,11 +192,18 @@ const zh: Strings = {
   loading: "載入預報中…",
   loadFailed: "無法載入預報。",
   retry: "重試",
-  startPrompt: "點選地圖上的目的地，或「使用目前位置」，排序附近的停車場。",
+  startPrompt: "搜尋停車場、點選地圖上的目的地，或使用目前位置，即可排序該地點附近的停車場。",
+  searchLabel: "搜尋停車場",
+  searchPlaceholder: "例如：台北車站、101、USPACE",
+  searchHint: "搜尋的是停車場名稱與行政區，不含地址或地標。",
+  searchResultsLabel: "符合的停車場",
+  searchResultsTemplate: "{n} 個符合的停車場",
+  searchNoMatch: "沒有符合的停車場名稱。可改以行政區搜尋，或直接點選地圖。",
   rankedForArrival: "依抵達時間排序",
   nearbyCarParks: "附近的停車場",
   forecastTooOld: "預報資料已過舊，無法推估您抵達時的狀況，因此不顯示有位機率。名稱、步行距離與價格仍然正確。",
-  noLotsNearby: "此處沒有可排序的停車場，請改點選地圖上的其他位置。",
+  outsideCoverage:
+    "停車先知涵蓋的範圍是臺北市，此處 {km} 公里內沒有本站收錄的停車場，因此沒有可排序的結果。地圖仍可使用，請改選市區內的地點。",
   mapLabel: "停車場地圖",
   mapLoading: "載入地圖中…",
   mapUnavailable: "此裝置無法顯示地圖，排序清單仍可使用。",

@@ -18,9 +18,10 @@
  */
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { GEO_WATCHDOG_MS, LIST_LIMIT, REFRESH_MS } from "../src/App";
+import App, { COVERAGE_RADIUS_M, GEO_WATCHDOG_MS, LIST_LIMIT, REFRESH_MS } from "../src/App";
 import { HEADER_SIZE, UNKNOWN } from "../src/artifacts";
-import { t } from "../src/i18n";
+import { haversineMeters } from "../src/geo";
+import { fillTemplate, t } from "../src/i18n";
 import type { Lot, LotsDoc } from "../src/types";
 
 const ROSTER_ID = 4242;
@@ -754,10 +755,100 @@ describe("the list cap", () => {
   });
 });
 
-/** A heading over nothing reads as a bug. It has to say what happened. */
-describe("an empty result set", () => {
-  /** A schema-valid pair with no lots in it at all. */
-  function stubEmpty() {
+/**
+ * The edge of what this app can answer.
+ *
+ * `rankLots` has no distance cutoff by design -- it scores whatever roster it is
+ * handed against whatever point it is handed -- so before `COVERAGE_RADIUS_M`
+ * the screen answered "where should I park?" for a driver in Kaohsiung with a
+ * ranked list of Taipei car parks 291 km away, every number in it true and the
+ * answer useless. The two boundary tests below are what pin the constant; the
+ * rest is what the user is told instead.
+ */
+describe("a destination outside the covered area", () => {
+  /** The expected notice, radius and all, so the string cannot drift from the constant. */
+  const notice = (lang: "en" | "zh") =>
+    fillTemplate(t(lang).outsideCoverage, { km: COVERAGE_RADIUS_M / 1000 });
+
+  /** A geolocation that lands exactly where the test says, not at `HERE`. */
+  function stubGeolocationAt(at: { lat: number; lon: number }) {
+    Object.defineProperty(navigator, "geolocation", {
+      value: {
+        getCurrentPosition: vi.fn((ok: PositionCallback) =>
+          ok({ coords: { latitude: at.lat, longitude: at.lon } }),
+        ),
+      },
+      configurable: true,
+    });
+  }
+
+  /** Metres from `at` to the nearest fixture lot -- the quantity under test. */
+  function nearestMeters(at: { lat: number; lon: number }): number {
+    return Math.min(...LOTS.map((lot) => haversineMeters(at, { lat: lot.y, lon: lot.x })));
+  }
+
+  async function renderAt(at: { lat: number; lon: number }) {
+    stubGeolocationAt(at);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: t("en").useMyLocation }));
+  }
+
+  /** Due north of the roster: 0.10° of latitude is a little over 11 km. */
+  const JUST_OUTSIDE = { lat: LOTS[0]!.y + 0.1, lon: LOTS[0]!.x };
+  /** ...and 0.08° is a little under 9 km, on the other side of the line. */
+  const JUST_INSIDE = { lat: LOTS[0]!.y + 0.08, lon: LOTS[0]!.x };
+  /** The measurement that started this: Kaohsiung, 291 km from the nearest lot. */
+  const KAOHSIUNG = { lat: 22.6273, lon: 120.3014 };
+
+  it("says so instead of ranking car parks a day's walk away", async () => {
+    expect(nearestMeters(KAOHSIUNG)).toBeGreaterThan(250_000);
+    await renderAt(KAOHSIUNG);
+
+    expect((await screen.findByTestId("outside-coverage")).textContent).toBe(notice("en"));
+    expect(screen.queryByTestId("lot-list")).toBeNull();
+    // ...and no heading claiming an order over an explanation that there is none.
+    expect(screen.queryByText(t("en").rankedForArrival)).toBeNull();
+    expect(screen.queryByText(t("en").nearbyCarParks)).toBeNull();
+  });
+
+  it("keeps the map and the rest of the page working out there", async () => {
+    await renderAt(KAOHSIUNG);
+    await screen.findByTestId("outside-coverage");
+
+    // The map draws every lot regardless of where the driver is: it is the
+    // *ranking* that is meaningless at 291 km, not the roster.
+    expect(await screen.findByText(t("en").mapUnavailable)).toBeInTheDocument();
+    expect(screen.getByTestId("staleness")).toBeInTheDocument();
+    expect(screen.getByLabelText(t("en").searchLabel)).toBeInTheDocument();
+  });
+
+  it("draws the line at COVERAGE_RADIUS_M, not somewhere near it", async () => {
+    expect(nearestMeters(JUST_OUTSIDE)).toBeGreaterThan(COVERAGE_RADIUS_M);
+    await renderAt(JUST_OUTSIDE);
+    expect(await screen.findByTestId("outside-coverage")).toBeInTheDocument();
+  });
+
+  it("still ranks from just inside it -- New Taipei is 2.7 km out, not 20", async () => {
+    expect(nearestMeters(JUST_INSIDE)).toBeLessThan(COVERAGE_RADIUS_M);
+    await renderAt(JUST_INSIDE);
+
+    expect(await screen.findByTestId("lot-list")).toBeInTheDocument();
+    expect(screen.queryByTestId("outside-coverage")).toBeNull();
+    expect(screen.getByText(t("en").rankedForArrival)).toBeInTheDocument();
+  });
+
+  it("says it in Chinese too", async () => {
+    await renderAt(KAOHSIUNG);
+    await screen.findByTestId("outside-coverage");
+    fireEvent.click(screen.getByRole("button", { name: "切換為中文" }));
+    await screen.findByRole("button", { name: t("zh").useMyLocation });
+    expect(screen.getByTestId("outside-coverage").textContent).toBe(notice("zh"));
+  });
+
+  it("covers an empty roster too, which is the same sentence and still true", async () => {
+    // A schema-valid pair with no lots in it: with nothing in the roster,
+    // nothing is within 10 km of anywhere. A bare heading over nothing was the
+    // old failure here, and it is still not what happens.
     stubFetch(encodeGrid([], 0), {
       v: 1,
       generated_at: BASE_DATA_TS + 213,
@@ -766,29 +857,234 @@ describe("an empty result set", () => {
       roster_id: ROSTER_ID,
       lots: [],
     });
-  }
-
-  async function renderEmptyLocated() {
-    stubEmpty();
     stubGeolocation("granted");
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: t("en").useMyLocation }));
-    return screen.findByTestId("no-lots");
+
+    expect((await screen.findByTestId("outside-coverage")).textContent).toBe(notice("en"));
+    expect(screen.queryByTestId("lot-list")).toBeNull();
+  });
+});
+
+/**
+ * Setting a destination by name.
+ *
+ * The GPS button answers "where am I" and the map answers "that spot there";
+ * neither answers "I am going to 台北車站 tomorrow morning", which is the
+ * question a driver actually has. This searches the roster already in memory --
+ * no geocoder, no key, no third-party origin, and the destination never leaves
+ * the phone. `search.test.ts` covers the matching; these cover the wiring, and
+ * the wiring is where the interesting failure is: a second destination path.
+ */
+describe("searching for a destination", () => {
+  /**
+   * One extra lot, 11 km north of the other four, so that picking it and
+   * picking a downtown one produce visibly different rankings.
+   *
+   * Spelled with 臺, like 76 of the published names, while a driver types 台.
+   */
+  const FAR_LOT: Lot = {
+    i: 4,
+    id: "TPE_BEITOU",
+    n: "臺北北投溫泉停車場",
+    a: "北投區",
+    y: 25.137,
+    x: 121.503,
+    c: 40,
+    t: "民營停車場",
+    p: { k: "exact", lo: 60, hi: 60 },
+  };
+
+  const SEARCHABLE = [...LOTS, FAR_LOT];
+
+  function stubSearchable() {
+    const perLot = [88, 61, 45, UNKNOWN, 70];
+    const body: number[] = [];
+    for (const lot of SEARCHABLE) {
+      const value = perLot[lot.i] ?? UNKNOWN;
+      for (let h = 0; h < N_HORIZONS; h += 1) body.push(value);
+    }
+    stubFetch(encodeGrid(body, SEARCHABLE.length), {
+      v: 1,
+      generated_at: BASE_DATA_TS + 213,
+      base_data_ts: BASE_DATA_TS,
+      n_lots: SEARCHABLE.length,
+      roster_id: ROSTER_ID,
+      lots: SEARCHABLE,
+    });
   }
 
-  it("explains itself instead of rendering a bare heading", async () => {
-    const notice = await renderEmptyLocated();
-    expect(notice.textContent).toBe(t("en").noLotsNearby);
+  /** The search box, once the roster it searches has arrived. */
+  function box(): HTMLInputElement {
+    return screen.getByLabelText(t("en").searchLabel) as HTMLInputElement;
+  }
+
+  async function renderSearchable(): Promise<HTMLInputElement> {
+    stubSearchable();
+    render(<App />);
+    await screen.findByLabelText(t("en").searchLabel);
+    return box();
+  }
+
+  function type(text: string) {
+    fireEvent.change(box(), { target: { value: text } });
+  }
+
+  /** The ids of the rendered options, in the order they are offered. */
+  function optionIds(): (string | null)[] {
+    return screen.queryAllByTestId("search-option").map((el) => el.getAttribute("data-lot-id"));
+  }
+
+  /** The id of the first ranked row. */
+  function firstRankedId(): string | null {
+    return screen.getAllByTestId("lot-row")[0]?.getAttribute("data-lot-id") ?? null;
+  }
+
+  it("sets the destination from a car park chosen by name", async () => {
+    await renderSearchable();
+    // Nothing is ranked until a destination exists -- the prompt, not a list.
+    expect(screen.getByText(t("en").startPrompt)).toBeInTheDocument();
     expect(screen.queryByTestId("lot-list")).toBeNull();
-    // The heading is still there; it is no longer alone.
-    expect(screen.getByText(t("en").rankedForArrival)).toBeInTheDocument();
+
+    type("北投");
+    expect(optionIds()).toEqual(["TPE_BEITOU"]);
+    fireEvent.keyDown(box(), { key: "Enter" });
+
+    expect(await screen.findByTestId("lot-list")).toBeInTheDocument();
+    // The chosen car park is where the driver is going, so it is 0 m away.
+    expect(firstRankedId()).toBe("TPE_BEITOU");
+    expect(screen.queryByText(t("en").startPrompt)).toBeNull();
   });
 
-  it("says it in Chinese too", async () => {
-    await renderEmptyLocated();
+  it("re-ranks around whichever car park was chosen", async () => {
+    await renderSearchable();
+    type("北投");
+    fireEvent.keyDown(box(), { key: "Enter" });
+    await screen.findByTestId("lot-list");
+    expect(firstRankedId()).toBe("TPE_BEITOU");
+
+    type("至善");
+    fireEvent.keyDown(box(), { key: "Enter" });
+
+    // A different point, a different order -- not a list that was computed once.
+    expect(firstRankedId()).toBe("TPE_ENTRY");
+  });
+
+  it("finds a 臺-spelled car park from the 台 a driver types, and back", async () => {
+    // The end-to-end half of the fold: 76 published names use 臺, 108 use 台,
+    // and the variant the user happens to type must not decide what they see.
+    await renderSearchable();
+    type("台北北投");
+    expect(optionIds()).toEqual(["TPE_BEITOU"]);
+    // ...and the option shows the feed's own spelling, which is on the sign.
+    expect(screen.getByTestId("search-option").textContent).toContain("臺北北投溫泉停車場");
+
+    type("臺北北投");
+    expect(optionIds()).toEqual(["TPE_BEITOU"]);
+  });
+
+  it("goes through the same destination path a map tap uses", async () => {
+    // The one that catches a second code path: a location request still in
+    // flight must be abandoned by a search pick exactly as it is by a tap,
+    // or a fix arriving a second later silently moves the destination.
+    stubSearchable();
+    Object.defineProperty(navigator, "geolocation", {
+      value: { getCurrentPosition: vi.fn() },
+      configurable: true,
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: t("en").useMyLocation }));
+    expect(screen.getByRole("button", { name: t("en").locating })).toBeDisabled();
+
+    type("北投");
+    fireEvent.keyDown(box(), { key: "Enter" });
+
+    await screen.findByTestId("lot-list");
+    const locate = screen.getByRole("button", { name: t("en").useMyLocation });
+    expect(locate).not.toBeDisabled();
+    expect(locate.getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("can be driven by the keyboard alone", async () => {
+    await renderSearchable();
+    type("停車場");
+    const offered = optionIds();
+    expect(offered.length).toBeGreaterThan(1);
+    expect(box().getAttribute("aria-expanded")).toBe("true");
+
+    // Down to the second option, down again, back up: Enter takes what is
+    // highlighted, and `aria-activedescendant` says which that is.
+    fireEvent.keyDown(box(), { key: "ArrowDown" });
+    fireEvent.keyDown(box(), { key: "ArrowDown" });
+    fireEvent.keyDown(box(), { key: "ArrowUp" });
+    const active = screen.getByRole("option", { selected: true });
+    expect(box().getAttribute("aria-activedescendant")).toBe(active.id);
+    expect(active.getAttribute("data-lot-id")).toBe(offered[1]);
+
+    fireEvent.keyDown(box(), { key: "Enter" });
+    await screen.findByTestId("lot-list");
+    expect(firstRankedId()).toBe(offered[1]);
+  });
+
+  it("dismisses the results on escape without losing the query", async () => {
+    await renderSearchable();
+    type("北投");
+    expect(optionIds()).toHaveLength(1);
+
+    fireEvent.keyDown(box(), { key: "Escape" });
+
+    expect(optionIds()).toHaveLength(0);
+    expect(box().getAttribute("aria-expanded")).toBe("false");
+    expect(box().value).toBe("北投");
+    // ...and Down brings them back rather than making the user retype.
+    fireEvent.keyDown(box(), { key: "ArrowDown" });
+    expect(optionIds()).toEqual(["TPE_BEITOU"]);
+  });
+
+  it("says nothing matched instead of ranking something that did not", async () => {
+    // 市政府 is the honest limitation, measured over the live roster: the car
+    // parks by Taipei City Hall are called 松壽廣場 and 府前廣場. This searches
+    // car park names, and it must say so rather than invent a landmark.
+    await renderSearchable();
+    type("市政府");
+
+    expect(screen.getByTestId("search-no-match").textContent).toBe(t("en").searchNoMatch);
+    expect(optionIds()).toHaveLength(0);
+    expect(screen.queryByTestId("lot-list")).toBeNull();
+    // The caption saying what is searched is on screen before the failure, too.
+    expect(screen.getByText(t("en").searchHint)).toBeInTheDocument();
+  });
+
+  it("makes no network request at all while searching", async () => {
+    // The whole reason there is no geocoder here. If this ever fails, the
+    // driver's destination started leaving the phone.
+    await renderSearchable();
+    const before = fetchMock.mock.calls.length;
+
+    for (const query of ["1", "10", "101", "USPACE", "市政府", "台北北投", "北投"]) type(query);
+    fireEvent.keyDown(box(), { key: "Enter" });
+    await screen.findByTestId("lot-list");
+
+    expect(fetchMock.mock.calls.length).toBe(before);
+  });
+
+  it("names the car parks in Chinese and the districts in the reader's language", async () => {
+    await renderSearchable();
+    type("北投");
+    const option = screen.getByTestId("search-option");
+    // The name matches the signage, in either UI language...
+    expect(option.textContent).toContain("臺北北投溫泉停車場");
+    expect(option.textContent).toContain("Beitou District");
+
     fireEvent.click(screen.getByRole("button", { name: "切換為中文" }));
     await screen.findByRole("button", { name: t("zh").useMyLocation });
-    expect(screen.getByTestId("no-lots").textContent).toBe(t("zh").noLotsNearby);
+
+    const zhBox = screen.getByLabelText(t("zh").searchLabel);
+    expect(screen.getByText(t("zh").searchHint)).toBeInTheDocument();
+    fireEvent.change(zhBox, { target: { value: "北投" } });
+    const zhOption = screen.getByTestId("search-option");
+    expect(zhOption.textContent).toContain("臺北北投溫泉停車場");
+    expect(zhOption.textContent).toContain("北投區");
   });
 });
 

@@ -154,6 +154,136 @@ button {
   accent-color: var(--accent);
 }
 
+/* --------------------------------------------------- destination search */
+
+/*
+ * The search takes its own full-width row, above the location button: it is the
+ * way in for a driver who knows where they are going, and at 360 px a text
+ * field sharing a line with a 12-rem button is a text field nobody can read.
+ */
+.search {
+  flex: 1 1 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-label {
+  font-size: 14px;
+  color: var(--muted);
+}
+
+/*
+ * The popup anchors to the *field*, not to the whole control, so it opens
+ * directly under the box the user is typing in rather than below the caption
+ * that explains it.
+ */
+.search-field {
+  position: relative;
+}
+
+.search-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 12px;
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+/*
+ * z-index 2 rather than `auto`: `.controls` is the stacking context (it is
+ * sticky with a z-index of its own), and inside it the popup has to sit over
+ * the location button and the scrubber that follow it in the DOM.
+ */
+.search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 2;
+  max-height: 45vh;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 22%);
+}
+
+/* 44 px tall: a thumb, not a mouse pointer -- the same floor as every other
+   tap target in this file. */
+.search-option {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-height: 44px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.search-option + .search-option {
+  border-top: 1px solid var(--border);
+}
+
+/*
+ * The keyboard's highlight. Not `:hover`: the arrow keys move this, and a
+ * hover-only style would leave a keyboard user with `aria-activedescendant`
+ * pointing at a row that looks like every other row.
+ */
+.search-option[aria-selected="true"] {
+  background: var(--border);
+}
+
+.search-option-name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.search-option-where {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* What the search can and cannot find. Quiet, but never dropped: it is the
+   reason `市政府` returns nothing, and that is a limitation, not a bug. */
+.search-hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.search-empty {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+/*
+ * Announced, not shown. Clipped rather than `display: none` or `hidden`, both
+ * of which take the element out of the accessibility tree and silence the live
+ * region entirely.
+ */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* ------------------------------------------------- status and staleness */
 
 .status:empty {
