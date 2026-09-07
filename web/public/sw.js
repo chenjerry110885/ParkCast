@@ -21,6 +21,18 @@
  * `PRECACHE` below is not a manifest -- it is the short, hand-written list of
  * files whose names are fixed forever because they are not hashed.
  *
+ * ## Nothing here may fail a request
+ *
+ * Every cache operation is best-effort and every failure is swallowed. A browser
+ * with site data blocked -- a private window, or "block all cookies" -- rejects
+ * `caches.open`, `caches.match` and `cache.put` outright, and a full quota
+ * rejects the write. Those rejections are reached from inside
+ * `event.respondWith`, so letting one through renders a network error for a
+ * response that was fetched successfully: strictly worse than shipping no worker
+ * at all, and persistent. Losing a cache entry is acceptable. Losing the
+ * response is not. That is what `cached()` and `keep()` are for, and it is why
+ * neither of them ever rejects.
+ *
  * ## Versioning
  *
  * A browser updates a worker when its **bytes** change, so editing this file at
@@ -45,6 +57,15 @@ const SCOPE = new URL("./", self.location.href).href;
  * available offline from the first load onward -- it is the one file Vite does
  * not hash, and the one the browser has already fetched by the time this worker
  * exists, so on-demand caching alone would never reach it on a first visit.
+ *
+ * **This is the only writer of the cached shell**, and that is load-bearing.
+ * Caching the navigation response as well would refresh `index.html` on every
+ * online visit while the hashed bundles it names are cached separately and
+ * later -- so losing signal in that window (driving into a basement, which is
+ * this app's own headline scenario) leaves a cached shell pointing at bundles
+ * that are not on disk, and the app opens as a blank white page with the right
+ * title. Writing the shell only here keeps the offline pair at one version of
+ * each. Online is unaffected: navigations are network-first regardless.
  */
 const PRECACHE = [
   "./",
@@ -92,16 +113,20 @@ const PASSTHROUGH = "passthrough";
  *     from disk every time. The cached copy is the fallback, and it carries its
  *     own timestamp, so falling back costs honesty nothing.
  *
- *  5. **Navigations** -- network-first. `index.html` is the one file Vite does
- *     *not* hash, so it is the one file for which "a cached URL can never be
- *     stale" is false: serving it cache-first would pin the app to whichever
- *     hashed bundle names the first visit happened to see, forever. Same
- *     strategy as the artifacts, for the same reason -- freshness matters and a
- *     stale copy is still a working one.
+ *  5. **Navigations** -- network-first, and *never written back*. `index.html`
+ *     is the one file Vite does *not* hash, so it is the one file for which "a
+ *     cached URL can never be stale" is false: serving it cache-first would pin
+ *     the app to whichever hashed bundle names the first visit happened to see,
+ *     forever. The fallback copy comes from `PRECACHE` alone -- see there for
+ *     why the runtime must not touch it.
  *
  *  6. **Everything else** -- cache-first. That is `/assets/*`, whose filenames
  *     Vite hashes, so a cached URL genuinely cannot be stale: a changed file has
- *     a different name and is simply a cache miss.
+ *     a different name and is simply a cache miss. It is also the unhashed
+ *     icons and the manifest, which is a real if minor caveat: those names are
+ *     fixed, so a cached copy *can* be stale, and nothing revalidates it until
+ *     `VERSION` is bumped. Traded on purpose -- an icon is not worth a
+ *     conditional request on every load.
  */
 function routeFor(request, scope) {
   if (request.method !== "GET") return PASSTHROUGH;
@@ -139,23 +164,57 @@ function staleCaches(names, current) {
  *
  * `206` is rejected explicitly and not merely by `ok` (which is true for 206),
  * because storing a partial response is the exact failure rule 2 above exists to
- * prevent. Opaque cross-origin responses are rejected because their status is
- * unreadable, so "did this succeed" is unanswerable -- and this app has no
- * third-party origins to fetch from in the first place.
+ * prevent.
+ *
+ * There is deliberately no separate test for `type === "opaque"`: an opaque
+ * response has an unreadable status, which the platform reports as `0`, so
+ * `status === 200` already excludes every one of them. The clause that used to
+ * be here was dead code, and the test that appeared to cover it passed
+ * `status: 0` and so proved only what the status check already guarantees.
  */
 function isCacheable(response) {
-  return Boolean(response) && response.status === 200 && response.type !== "opaque";
+  return Boolean(response) && response.status === 200;
 }
 
+/**
+ * Read from the cache, treating any storage failure as a miss.
+ *
+ * `caches.match` rejects outright where site data is blocked, and this is called
+ * from inside `respondWith`, so an unguarded rejection would fail *every*
+ * intercepted request in a private window. A miss falls through to the network,
+ * which is the correct behaviour for a browser that cannot store anything.
+ */
+async function cached(key) {
+  try {
+    return await caches.match(key, { cacheName: CACHE_NAME });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Store a response, best-effort.
+ *
+ * Both callers `await` this *before returning a response they already fetched
+ * successfully*, so a rejection here would turn a healthy 200 into a rendered
+ * network error -- and inside `networkFirst` it would be caught by the handler
+ * that exists for being offline, silently downgrading a fresh forecast to the
+ * stale cached one. Hence: swallow. A quota error costs a cache entry, and that
+ * is all it may cost.
+ */
 async function keep(request, response) {
   if (!isCacheable(response)) return;
-  const cache = await caches.open(CACHE_NAME);
-  await cache.put(request, response.clone());
+  try {
+    const cache = await caches.open(CACHE_NAME);
+    await cache.put(request, response.clone());
+  } catch {
+    // Out of quota, or storage is switched off. The response is unaffected.
+  }
 }
 
 async function cacheFirst(request) {
-  const cached = await caches.match(request, { cacheName: CACHE_NAME });
-  if (cached) return cached;
+  const hit = await cached(request);
+  if (hit) return hit;
   const response = await fetch(request);
   await keep(request, response);
   return response;
@@ -164,16 +223,19 @@ async function cacheFirst(request) {
 async function networkFirst(request, scope) {
   try {
     const response = await fetch(request);
-    await keep(request, response);
+    // Artifacts are written back; the document is not. See `PRECACHE`: a shell
+    // refreshed here would outrun the hashed bundles it names, and the pair is
+    // only consistent offline if one writer owns it.
+    if (request.mode !== "navigate") await keep(request, response);
     return response;
   } catch (error) {
-    const cached = await caches.match(request, { cacheName: CACHE_NAME });
-    if (cached) return cached;
+    const hit = await cached(request);
+    if (hit) return hit;
     // A navigation to `/ParkCast/index.html` and one to `/ParkCast/` are
     // different cache keys for the same document, and the precache only holds
     // the second. Offline is exactly when that difference must not matter.
     if (request.mode === "navigate") {
-      const shell = await caches.match(scope, { cacheName: CACHE_NAME });
+      const shell = await cached(scope);
       if (shell) return shell;
     }
     throw error;

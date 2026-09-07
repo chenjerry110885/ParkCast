@@ -18,7 +18,24 @@
     <meta name="theme-color" content="#1d5fd0" />
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- Replaced by React on a successful boot: `createRoot(...).render()`
+           clears the container's existing children on its first render, so this
+           is never visible in a working app.
+
+           It is here for the boot that does *not* succeed. `index.html` is
+           cached at install and the hashed bundles it names are cached later, so
+           an interrupted first visit followed by no signal can leave a cached
+           document whose scripts are not on disk. Without this, that is a pure
+           white page carrying the correct title -- indistinguishable from a
+           hung app. Styles are inline because the stylesheet is one of the files
+           that may be missing, and no colour is set so the app's own light and
+           dark themes still apply when it is only the script that failed. -->
+      <div style="margin: 0 auto; max-width: 26rem; padding: 4rem 1.5rem; font-family: system-ui, sans-serif; line-height: 1.6">
+        <p>ParkCast could not load. Reload once you are back online.</p>
+        <p lang="zh-Hant">停車先知無法載入，請於恢復連線後重新整理。</p>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

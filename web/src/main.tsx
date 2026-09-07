@@ -14,9 +14,13 @@ createRoot(document.getElementById('root')!).render(
  *
  * **Production only.** A worker sitting in front of the Vite dev server serves
  * yesterday's module for today's edit, and the resulting bug reads as haunted
- * code rather than as a caching problem. `import.meta.env.PROD` is a compile-time
- * constant, so this whole block is dropped from the dev bundle rather than
- * merely skipped at runtime.
+ * code rather than as a caching problem. In dev the guard is skipped at
+ * runtime, not compiled away: the module Vite serves opens with a literal
+ * `import.meta.env = {..."PROD": false...}` and still contains this `if`
+ * verbatim (checked against `vite dev`'s own output, not assumed). Only a
+ * production build folds the constant, and there it folds to `true`, so the
+ * block is kept and runs. Either way the behaviour is the one described -- but
+ * do not reach for `PROD` expecting dead-code elimination in dev.
  *
  * The URL is built from `BASE_URL` (`/ParkCast/` in a Pages build) so the
  * worker's scope is the app's own sub-path and not the whole origin.

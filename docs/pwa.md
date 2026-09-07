@@ -63,9 +63,60 @@ as haunted code rather than as a caching problem.
 |---|---|---|
 | `taipei.pmtiles`, anything under `basemap/`, anything with a `Range` header | **never intercepted** | 23 MB read by HTTP range request. Caching `206 Partial Content` naively is a well-known way to serve corrupt tiles. The browser's own HTTP cache handles it correctly. |
 | `artifacts/grid.bin`, `artifacts/lots.json` | **network-first**, cache as fallback | A forecast from the network beats one from disk every time. |
-| navigations (`index.html`) | **network-first**, cache as fallback | `index.html` is the one file Vite does *not* hash, so it is the one file for which "a cached URL cannot be stale" is false. Cache-first would pin the app to whichever hashed bundle names the first visit saw. |
-| everything else under scope (`assets/*`, icons, manifest) | **cache-first** | Vite hashes every asset filename, so a changed file has a different name and is simply a cache miss. |
-| non-GET, other origins, outside scope | **never intercepted** | |
+| navigations (`index.html`) | **network-first**, cache as fallback, and **never written back** | `index.html` is the one file Vite does *not* hash, so it is the one file for which "a cached URL cannot be stale" is false. Cache-first would pin the app to whichever hashed bundle names the first visit saw. The fallback copy is the one `install` stored and the runtime never replaces it -- see [one writer for the shell](#the-cached-shell-has-exactly-one-writer). |
+| hashed assets (`assets/*`) | **cache-first** | Vite hashes these filenames, so a changed file has a different name and is simply a cache miss. |
+| unhashed files under scope (`manifest.webmanifest`, `favicon.svg`, `icon-*.png`) | **cache-first, and nothing revalidates them** | A real if minor caveat, and the reason this is its own row: their names are fixed, so unlike `assets/*` a cached copy genuinely *can* be stale, and it stays until `VERSION` is bumped and `activate` drops the old cache. Traded on purpose -- an icon is not worth a conditional request on every load -- but it does mean re-running `build-icons.py` is not enough to ship a new icon. |
+| non-GET, other origins, outside scope | **never intercepted** | The origin check is not redundant with the scope check. Under `PARKCAST_BASE=/` the scope prefix is `/`, which every path starts with, so origin is the only thing left. |
+
+### The cached shell has exactly one writer
+
+`install` stores `index.html`; the runtime never does. This is load-bearing rather than tidy.
+
+`index.html` is unhashed and the bundles it names are cached separately and *later* -- so if the
+navigation response were also written back, an online visit would refresh the shell while the
+bundles it points at were still being fetched. Lose signal in that window -- driving into a basement,
+which is this app's entire premise -- and the cached shell references bundles that are not on disk.
+Measured, with the server genuinely stopped:
+
+```
+RESP 200 fromSW=true  /ParkCast/
+FAIL  net::ERR_FAILED type=Script
+RESP 200 fromSW=true  /ParkCast/assets/index-Bmp4thyU.css
+app rendered: false
+```
+
+A page with the right title and nothing in it. With one writer the offline pair stays at one version
+of each, and the same measurement renders the app in full. Online is unaffected: navigations are
+network-first either way.
+
+**And `index.html` ships a static fallback inside `#root`** -- two lines, English and 繁體中文,
+saying the app could not load and to reload when back online. React clears the container on its
+first render, so it is invisible in a working app (asserted both ways in the measurement above). It
+exists because the shell/bundle window cannot be closed completely without a precache manifest: the
+worker does not control the page that installs it, so a first visit interrupted before the second
+load has a cached document and no cached bundles. That case now shows a sentence instead of a white
+page.
+
+### Nothing in the worker may fail a request
+
+Every cache operation is best-effort and every failure is swallowed. This is not defensive
+programming for its own sake -- `caches.open`, `caches.match` and `cache.put` all reject on a full
+quota or in a browser with site data blocked, and all of them are reached from inside
+`event.respondWith`. A rejection that escapes is rendered as a network error **for a response that
+was fetched perfectly well**, which is strictly worse than shipping no worker at all, and a full
+quota does not clear itself.
+
+Measured with `Storage.overrideQuotaForOrigin` set to one byte over CDP, network healthy throughout:
+
+| | unguarded | guarded |
+|---|---|---|
+| cache-first miss | `REJECTED TypeError: Failed to fetch` | `OK status 200` |
+| artifact with a stale cached copy | served the stale copy | served the fresh network response |
+
+The second row is the subtler half. A `cache.put` rejection inside `networkFirst` was caught by the
+handler that exists for being *offline*, so a full quota quietly downgraded a fresh forecast to
+yesterday's -- contradicting the "a forecast from the network beats one from disk every time" row
+above while the network was fine.
 
 ### Why offline is honest here
 
@@ -113,6 +164,27 @@ None of that delays a *content* change. `index.html` is network-first, so a relo
 loads the new hashed bundles through the old worker immediately -- verified: after a rebuild the
 reloaded page ran `index-DFwMeP80.js` while the v1 worker was still in control.
 
+### `PARKCAST_BASE` takes a path, not a URL
+
+`vite.config.ts` lets `PARKCAST_BASE` override the deployment base, and describes it as being for "a
+root domain or a CDN prefix". A **path** works either way: `/ParkCast/` (the default) and `/` both
+deploy correctly, and `sw.js` derives its scope from its own location rather than hardcoding either.
+
+An **absolute URL** -- `PARKCAST_BASE=https://cdn.example.com/parkcast/` -- builds, serves, looks
+fine, and silently turns the entire PWA off:
+
+- `main.tsx` registers `${BASE_URL}sw.js`, which is now a cross-origin script. Measured in Edge 152:
+  `SecurityError: Failed to register a ServiceWorker: The origin of the provided scriptURL
+  ('https://cdn.example.com') does not match the current origin`. Registration failures are
+  swallowed on purpose, so nothing is logged and nothing looks broken -- there is simply no worker.
+- Even given a worker, the artifacts would be on another origin, and rule 1 routes another origin to
+  passthrough. Nothing cached, so nothing offline.
+
+This cannot be fixed inside the worker: a service worker may not be served cross-origin, by design.
+If the app ever needs a CDN, the document and `sw.js` have to stay on the app's own origin and only
+`assets/*` can move -- which also means the routing rules would need revisiting. Until then, treat
+`PARKCAST_BASE` as a path.
+
 ### Versioning
 
 A browser updates a worker when its **bytes** change, so editing `sw.js` at all ships a new worker.
@@ -141,3 +213,16 @@ Then, in DevTools:
   "ServiceWorker" in the Size column), and returning `206`.
 - After changing `sw.js` and rebuilding, the new worker sits in "waiting" until every tab on the app
   has been closed -- a reload alone will not hand over.
+
+**Two traps when checking offline behaviour, both measured the hard way.**
+
+*Emulated offline is not offline.* CDP's `Network.emulateNetworkConditions` does not apply to
+fetches made from *inside* a service worker, so a page can look offline while the worker is quietly
+still reaching the server -- which is exactly backwards for testing a worker. To test the real
+thing, **stop the server**. `vite preview` also snapshots `dist/` at boot, so restart it after any
+build that adds a file, or drive the checks against a static server that reads from disk per request.
+
+*A missing file is not always a 404.* `vite preview` answers an unknown path with `index.html` and a
+200, so deleting an asset to simulate a failed fetch gets the worker to cache HTML under a `.js`
+URL. GitHub Pages returns a real 404 there. Do not reason about caching behaviour from a
+preview-server 404.
