@@ -114,7 +114,7 @@ repo that is a tell. Task 4 needs icons anyway.
 - Modify: the tests covering `parse_metadata` and `publish_artifacts`
 - Modify: `CLAUDE.md`, `README.md` (counts and sizes change — **re-measure, do not do arithmetic**)
 
-- [ ] **Step 1: Write the tests first**
+- [x] **Step 1: Write the tests first**
 
 Cover, at minimum:
 
@@ -129,9 +129,9 @@ Cover, at minimum:
 6. A zero-car lot is still **parsed, still collected, still stored**. Assert this
    explicitly: the change must be invisible to the corpus.
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Add one field to `Lot` — suggested name `serves_cars: bool` — computed in
 `parse_metadata` from the **raw** `totalcar`, before `clean_count` and before the
@@ -162,7 +162,7 @@ the collection path. Two reasons, and the second is the load-bearing one:
 `MIN_PUBLISH_LOT_FRACTION` is 0.5 — a floor of ~544 — so dropping 14 lots cannot trip the
 collapse guard. Confirm rather than assume.
 
-- [ ] **Step 4: Re-measure and update the documented facts**
+- [x] **Step 4: Re-measure and update the documented facts**
 
 The roster count, `grid.bin` size and `lots.json` size all change. Run the publisher (or
 wait a tick) and read the real numbers off the real files. Update the CLAUDE.md
@@ -170,12 +170,12 @@ forecasting table and the README status table with **measured** values. Do not c
 them from 1,089 − 14 and write that down: that is exactly the class of drift that put a
 stale 17-byte header in CLAUDE.md through all of Plan 3.
 
-- [ ] **Step 5: Verify against the live artifacts**
+- [x] **Step 5: Verify against the live artifacts**
 
 Confirm all 14 ids are gone from the published `lots.json`, that the count dropped by
 exactly 14, and that no lot with a positive `totalcar` was lost.
 
-- [ ] **Step 6: Note what this does *not* fix**
+- [x] **Step 6: Note what this does *not* fix**
 
 These 14 lots' junk `free_car` history still feeds the **global climatology prior**
 through `Counts.glob`. Measure the size of that contamination (base rate with and without
@@ -183,7 +183,7 @@ them) and record the number in the ledger. Excluding them from history would mea
 invalidating the per-Parquet counter cache Plan 2b built, which is not a change to make
 as a side effect of a display fix — but the next person deserves the number, not a shrug.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/parkcast tests CLAUDE.md README.md
@@ -405,10 +405,49 @@ git commit -m "feat(web): installable PWA with an offline-capable shell"
 ## Deferred beyond 3d
 
 Street labels on the basemap (glyphs would need a CDN fetch and defeat the self-hosting);
-the 14 zero-car lots' contamination of the global climatology prior; deployment (there is
+**the 14 zero-car lots' contamination of the global climatology prior — quantified
+2026-09-07: they contribute 7,803 of 640,814 usable observations (1.22% of the corpus) at
+a 0.536 base rate of their own, holding the citywide prior at 0.8966 where it would
+otherwise be 0.9010, i.e. a 0.44 pp depression. It is not "their free_car is always high"
+as the display bug suggested — six of the fourteen report a constant 0 and pull the prior
+*down*. Excluding them from history would invalidate the per-Parquet counter cache Plan 2b
+built (`Counts` cannot subtract, so the whole cold corpus would re-fold), which is not a
+change to make as a side effect of a display fix**; deployment (there is
 no CI and the 23 MB basemap is gitignored, so shipping to Pages is its own plan); the
 ranker's price weighting; English glosses for the 8 operator types; choosing a licence.
 
 ## Review
 
-_(Populated as tasks complete.)_
+### Task 1 — complete
+
+`Lot.serves_cars` (default `True`) computed in `parse_metadata` from the **raw** `totalcar`,
+filtered in `publish_artifacts` only. Collection path untouched: `clean_count`, `validate`,
+`capacity_map`, the schema and the collector are byte-identical.
+
+**Measured on the live published files, before and after (not computed):**
+
+| | before | after |
+|---|---|---|
+| `n_lots` | 1,089 | **1,075** (−14 exactly) |
+| `grid.bin` | 26,157 B | **25,821 B** (= 21 + 1,075 × 24) |
+| `lots.json` | 185,902 B raw / 30,528 gz | **183,325 B raw / ~30,110 gz** |
+| priced | 97.5% | **97.8%** |
+| Python tests | 250 | **258** |
+
+Dropped set == the 14 zero-car ids exactly; nothing added; no positively-capacitated lot lost;
+`roster_id` and `base_data_ts` agree across grid.bin and lots.json. `MIN_PUBLISH_LOT_FRACTION`
+confirmed, not assumed: floor is 544.5 against the pre-change 1,089-lot header, and 1,075 clears it
+with 2× headroom.
+
+**Mutations, each caught by exactly the test that should catch it:**
+
+| mutation | test that failed |
+|---|---|
+| `_serves_cars` always `True` | `test_zero_car_capacity_means_the_lot_does_not_serve_cars` |
+| drop `lot.serves_cars` from the publish filter | `test_publish_artifacts_drops_a_lot_with_no_car_capacity` |
+| `int(raw) > 0` (treat `-9` as zero-car) | `test_sentinel_capacity_still_serves_cars` |
+| `capacity_car=capacity` (let `0` reach `validate`) | `test_zero_car_lots_are_still_parsed_collected_and_stored` |
+| filter on `capacity_car is not None` instead | `test_publish_artifacts_keeps_a_lot_whose_car_capacity_is_unknown` |
+
+The collector was rebuilt and recreated between the 08:11:30 and 08:16:30 ticks — **no tick lost**,
+and it published 1,075 lots at 08:16:36.

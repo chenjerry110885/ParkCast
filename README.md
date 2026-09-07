@@ -54,11 +54,11 @@ Running continuously since 2026-09-04. Live figures at the time of writing:
 
 | | |
 |---|---|
-| Observations collected | **521,368** across 445 five-minute ticks |
-| Lots forecast every 5 min | **1,088** × 24 horizons (+5 to +120 min) |
-| Lots with a parsed price | **97.5%** |
+| Observations collected | **640,814** usable, across 594 five-minute ticks |
+| Lots forecast every 5 min | **1,075** × 24 horizons (+5 to +120 min) |
+| Lots with a parsed price | **97.8%** |
 | Published payload | **33 KB gzipped**, both files |
-| Tests | **250** Python · **93** TypeScript |
+| Tests | **258** Python · **93** TypeScript |
 
 Plans 1, 2, 2b, 3a and 3b are complete. The map, time-scrubber and PWA install (3c) and the trained
 model with its evaluation (4) are still to come.

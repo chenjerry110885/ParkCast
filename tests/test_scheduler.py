@@ -688,10 +688,12 @@ def test_publish_failure_does_not_stop_collection(monkeypatch):
 # --- publish_artifacts must never blank good artifacts -----------------------
 
 
-def _make_lot(lot_id: str) -> Lot:
+def _make_lot(lot_id: str, *, serves_cars: bool = True,
+              capacity_car: int | None = 50) -> Lot:
     return Lot(id=lot_id, name=f"lot {lot_id}", area="中正區", lot_type="立體",
-               capacity_car=50, lat=25.05, lon=121.52,
-               service_time="00:00:00-23:59:59", fare_text="每小時30元")
+               capacity_car=capacity_car, lat=25.05, lon=121.52,
+               service_time="00:00:00-23:59:59", fare_text="每小時30元",
+               serves_cars=serves_cars)
 
 
 def test_publish_artifacts_with_no_lots_leaves_existing_files_untouched(tmp_path):
@@ -974,3 +976,60 @@ def test_publish_artifacts_keeps_a_lot_whose_history_is_only_in_the_cold_store(
 
     doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
     assert [l["id"] for l in doc["lots"]] == ["A", "COLDONLY"]
+
+
+def test_publish_artifacts_drops_a_lot_with_no_car_capacity(tmp_path):
+    """A motorcycle park is not a car park, however much history it has.
+
+    Measured 2026-09-07: 14 lots in the published roster declare totalcar 0, and
+    eight publish a 98-100% chance of a car space. The feed's free_car for them
+    is not a small error -- TPE1697 has 14 motorcycle bays and reports 25-31 free
+    cars -- so the answer is not merely imprecise, it is about a different
+    vehicle. `serves_cars` is the only thing that keeps them out; history alone
+    would let every one of them through.
+    """
+    conn = store.connect(tmp_path / "t.sqlite")
+    for lot_id in ("A", "MOTORCYCLE", "Z"):
+        _seed(conn, date(2026, 9, 4), lot=lot_id)
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(
+        conn,
+        [_make_lot("A"),
+         _make_lot("MOTORCYCLE", serves_cars=False, capacity_car=None),
+         _make_lot("Z")],
+        out_dir,
+    )
+    conn.close()
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    header = artifacts.decode_header((out_dir / "grid.bin").read_bytes())
+    ids = [l["id"] for l in doc["lots"]]
+
+    assert ids == ["A", "Z"], "the zero-car lot must not be published"
+    # The roster has to stay internally consistent, which is what roster_id is
+    # for: grid rows, header and lots.json must all describe the same two lots.
+    assert header["n_lots"] == doc["n_lots"] == len(ids) == 2
+    assert header["roster_id"] == doc["roster_id"] == artifacts.roster_id(ids)
+    grid_bytes = (out_dir / "grid.bin").stat().st_size
+    assert grid_bytes == artifacts.HEADER_SIZE + 2 * config.HORIZON_COUNT
+
+
+def test_publish_artifacts_keeps_a_lot_whose_car_capacity_is_unknown(tmp_path):
+    """-9 or a missing totalcar means unknown, and an unknown car park is still
+    a car park. Dropping it would trade one wrong answer for a missing one."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    for lot_id in ("A", "UNKNOWNCAP"):
+        _seed(conn, date(2026, 9, 4), lot=lot_id)
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(
+        conn,
+        [_make_lot("A"), _make_lot("UNKNOWNCAP", serves_cars=True, capacity_car=None)],
+        out_dir,
+    )
+    conn.close()
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert [l["id"] for l in doc["lots"]] == ["A", "UNKNOWNCAP"]
+    assert doc["lots"][1]["c"] is None

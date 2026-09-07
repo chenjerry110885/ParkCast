@@ -76,8 +76,9 @@ def _first_day_to_archive(conn, today: date) -> date:
 def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
     """Rebuild and republish grid.bin and lots.json from current history.
 
-    Lots are ordered by id and filtered to those with at least one usable
-    observation, so grid rows and lots.json indices line up exactly.
+    Lots are ordered by id and filtered to those that take cars at all and have
+    at least one usable observation, so grid rows and lots.json indices line up
+    exactly.
 
     Refuses to publish a set that is empty, one that has collapsed to less than
     MIN_PUBLISH_LOT_FRACTION of what is already published, or one with no
@@ -94,8 +95,15 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
     # is a two-hour tail, so filtering on it would drop any lot whose history
     # lives only in the cold store -- lots that still get an honest
     # climatology-only forecast and belong on the map.
+    #
+    # `serves_cars` is a *publishing* rule and lives only here. A lot with no car
+    # spaces is still parsed, still collected and still stored: pushing this
+    # upstream into `validate` would clamp its free_car to 0 from that moment on
+    # and manufacture a discontinuity inside the corpus Plan 4 trains on, which
+    # is a far worse outcome than the display bug it fixes.
     ordered = sorted(
-        (lot for lot in lots if lot.id in history.counts.lot), key=lambda lot: lot.id
+        (lot for lot in lots if lot.serves_cars and lot.id in history.counts.lot),
+        key=lambda lot: lot.id,
     )
     if not ordered:
         # Reachable with a perfectly good `lots` argument too: an empty

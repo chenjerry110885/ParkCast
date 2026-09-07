@@ -20,6 +20,27 @@ class Lot:
     lon: float
     service_time: str
     fare_text: str
+    # Whether this lot has car spaces at all, as opposed to an unknown number of
+    # them. `capacity_car` cannot answer that: it is None for both. Defaults to
+    # True so the only way to drop a lot from the roster is to have measured
+    # that it takes no cars -- an unset field can never quietly hide a car park.
+    serves_cars: bool = True
+
+
+def _serves_cars(raw: object) -> bool:
+    """Does this lot have car spaces at all?
+
+    `0` and `-9` are different facts and the feed uses both fields' conventions
+    here: `0` means "not a car park" (a motorcycle or coach park), while `-9`,
+    a missing key, or unparseable text mean "not reported". Only the first is
+    grounds for dropping the lot. Measured 2026-09-07: `totalcar` is positive
+    for 1,699 lots and exactly 0 for 56, with no -9 anywhere -- but that is a
+    measurement, not a guarantee, so unknown must stay a car park.
+    """
+    try:
+        return int(raw) != 0  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return True
 
 
 def parse_metadata(payload: dict) -> tuple[Lot, ...]:
@@ -36,7 +57,12 @@ def parse_metadata(payload: dict) -> tuple[Lot, ...]:
             continue
         seen.add(lot_id)
 
-        capacity = clean_count(entry.get("totalcar"))
+        # Read the raw value twice, deliberately: `clean_count` maps -9 to None
+        # and `capacity or None` maps 0 to None, so by the time capacity_car is
+        # built the difference between "no car spaces" and "not reported" is
+        # already gone. `serves_cars` has to be computed before both.
+        raw_capacity = entry.get("totalcar")
+        capacity = clean_count(raw_capacity)
         lots.append(
             Lot(
                 id=lot_id,
@@ -49,6 +75,7 @@ def parse_metadata(payload: dict) -> tuple[Lot, ...]:
                 lon=position[1],
                 service_time=entry.get("serviceTime", ""),
                 fare_text=entry.get("payex", ""),
+                serves_cars=_serves_cars(raw_capacity),
             )
         )
 

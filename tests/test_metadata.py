@@ -33,6 +33,78 @@ def test_capacity_is_none_when_zero_rather_than_zero():
     assert lots[0].capacity_car is None
 
 
+def _one(**overrides) -> dict:
+    entry = {"id": "X1", "name": "n", "area": "a", "type2": "t",
+             "tw97x": "302864.78", "tw97y": "2771988.95"}
+    entry.update(overrides)
+    return {"data": {"park": [entry]}}
+
+
+def test_zero_car_capacity_means_the_lot_does_not_serve_cars():
+    """totalcar=0 is a motorcycle or coach park. Its free_car is meaningless."""
+    lots = parse_metadata(_one(totalcar="0"))
+    assert lots[0].serves_cars is False
+
+
+def test_sentinel_capacity_still_serves_cars():
+    """-9 is 'not reported', not 'no car spaces'.
+
+    Conflating the two would drop a real car park the day the feed starts
+    sending -9 in this field. There is none today (measured 2026-09-07: 1,699
+    positive, 56 zero, no negatives), which is exactly why this test exists --
+    nothing else in the suite would catch that regression.
+    """
+    lots = parse_metadata(_one(totalcar="-9"))
+    assert lots[0].serves_cars is True
+    assert lots[0].capacity_car is None, "capacity is unknown, not zero"
+
+
+def test_absent_totalcar_still_serves_cars():
+    lots = parse_metadata(_one())
+    assert lots[0].serves_cars is True
+    assert lots[0].capacity_car is None
+
+
+def test_unparseable_totalcar_still_serves_cars():
+    lots = parse_metadata(_one(totalcar="n/a"))
+    assert lots[0].serves_cars is True
+    assert lots[0].capacity_car is None
+
+
+def test_positive_capacity_serves_cars():
+    lots = parse_metadata(_one(totalcar="120"))
+    assert lots[0].serves_cars is True
+    assert lots[0].capacity_car == 120
+
+
+def test_zero_car_lots_are_still_parsed_collected_and_stored(tmp_path):
+    """The roster change must be invisible to the corpus.
+
+    A zero-car lot stays in `parse_metadata`, stays in `capacity_map` with a
+    None capacity, and its raw free_car is stored unclamped. Letting capacity 0
+    reach `validate` would clamp free_car to 0 from that moment on and
+    manufacture a discontinuity inside the training data.
+    """
+    from parkcast import store
+    from parkcast.feed import FeedSnapshot, Observation
+
+    lots = parse_metadata(_one(id="TPE1697", totalcar="0"))
+    assert [lot.id for lot in lots] == ["TPE1697"], "still parsed"
+
+    caps = capacity_map(lots)
+    assert caps == {"TPE1697": None}, "still in the capacity map, with no bound"
+
+    conn = store.connect(tmp_path / "t.sqlite")
+    snapshot = FeedSnapshot(
+        data_ts=1788484980, observed_at=1788485010,
+        observations=(Observation("TPE1697", free_car=27, free_motor=3),),
+    )
+    store.insert_snapshot(conn, snapshot, caps)
+    stored = conn.execute("SELECT free_car FROM observations").fetchone()
+    conn.close()
+    assert stored == (27,), "stored unclamped; publishing must not reach back into storage"
+
+
 def test_capacity_map_covers_all_lots():
     lots = parse_metadata(_payload())
     caps = capacity_map(lots)

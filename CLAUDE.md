@@ -39,10 +39,32 @@ Measured 2026-09-04 — do not re-derive, and do not assume these have drifted w
 
 | Fact | Value |
 |---|---|
-| `grid.bin` size | **26,133 bytes** at 1,088 lots × 24 horizons (**21-byte** header: `<4sBIIHBBI`, incl. `roster_id`) |
-| `lots.json` size | **186 KB raw / 30 KB gzipped** at 1,089 published lots (compact keys, parsed price, no fare text) |
+| `grid.bin` size | **25,821 bytes** at 1,075 lots × 24 horizons (**21-byte** header: `<4sBIIHBBI`, incl. `roster_id`) — re-measured 2026-09-07 |
+| `lots.json` size | **183,325 bytes raw / ~30,110 gzipped** at 1,075 published lots (compact keys, parsed price, no fare text) — re-measured 2026-09-07 off the live files; gzip drifts a few bytes per tick with the timestamps |
 | P(free≥1) base rate | **0.844 at 19:00**, rising to **0.919 at 23:00** Taipei |
-| Lots in feed with history | 1,088 of 1,756 in metadata |
+| Lots in feed with history | **1,089** of 1,755 in metadata; **1,075 published** after dropping the 14 with no car spaces |
+
+### A lot with no car spaces is not published (measured 2026-09-07)
+
+The metadata roster grows *during* a day — 1,755 lots in the 2026-09-07 snapshot, 1,756 in the live
+feed by 08:12 — and the daily snapshot is deliberately never rewritten, so a count taken from a
+snapshot and one taken from the feed legitimately differ by a lot or two. Figures below are from
+the snapshot.
+
+`totalcar` is positive for **1,699** of the 1,755 lots and exactly **0** for **56**. There is no
+`-9` in this field today — a measurement, not a guarantee. **`0` and `-9` are different facts**:
+`0` means "not a car park" (a motorcycle or coach park), `-9`/missing means "not reported". 14 of
+the zero-car lots had history and were being published; eight of them advertised a **98–100%**
+chance of a car space at a park with no car bays (TPE1697 has 14 motorcycle bays and reports 25–31
+free cars). `Lot.serves_cars` drops them **at publish time only**.
+
+**The collection path is deliberately untouched.** A zero-car lot is still parsed, still collected
+and still stored with `capacity_car = None`. Letting capacity `0` reach `validate` would clamp
+`free_car` to 0 from that moment on and manufacture a discontinuity inside the corpus Plan 4 trains
+on. Their junk history therefore still feeds the global climatology prior: they are **7,803
+observations (1.22% of the corpus) at a 0.536 base rate**, holding the citywide prior at **0.8966**
+where it would otherwise be **0.9010** — a **0.44 pp** depression. Deferred, not fixed: excluding
+them from history would invalidate the per-Parquet counter cache.
 
 **The target is saturated.** ~85-92% of lots have a space at any time, so a citywide Brier score is
 dominated by easy cases and **climatology is a strong baseline**. Plan 4 must report skill on the
