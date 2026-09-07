@@ -85,7 +85,7 @@ under load, and the marginal cost of another user is a CDN hit.
 
 Three decisions make that possible:
 
-- **Precompute the grid.** 1,088 lots × 24 horizons is only 26,112 probabilities. Recomputing all of
+- **Precompute the grid.** 1,075 lots × 24 horizons is only 25,800 probabilities. Recomputing all of
   them every five minutes turns serving into a static lookup — no ML runtime at request time, and
   the model can get better without the app getting slower.
 - **Hot/cold storage split.** SQLite keeps a rolling 48 hours for serving; each completed day is
