@@ -271,6 +271,37 @@ The honest framing for the UI: this searches **car parks**, not the whole map. S
 typing 101 should find the car parks whose names contain 101, and picking one sets the
 destination to that point — from which the ranking then does its job normally.
 
+### Prototyped against the live roster before this was written
+
+A plain case-folded substring search over `n` (name) and `a` (district) already works:
+
+| query | hits | first results |
+|---|---|---|
+| `101` | 2 | 台北101停車場, 詮營信義101停車場 |
+| `車站` | 9 | 臺北車站東區地下, 臺北車站西側地上, 萬華車站地下 |
+| `uspace` | 33 | matches `USPACE…` — case-folding is doing real work |
+| `信義` | 97 | district match, as intended |
+| `市政府` | **0** | — |
+
+**`市政府` returning nothing is the honest limitation**, not a bug to fix: the car parks
+by Taipei City Hall are called 松壽廣場 and 府前廣場. This searches car park names, and the
+UI must say that rather than implying it can find any address.
+
+**One real defect, and it must be fixed here.** The feed is inconsistent about 臺 and 台:
+**76 lot names use 臺, 108 use 台, and no single name uses both.** So the variant a user
+happens to type decides which half of the roster they can see:
+
+| query | plain | with 臺→台 folded |
+|---|---|---|
+| `台北車站` | **1 of 4** | **4 of 4** |
+| `台大` | 1 | 4 |
+| `台北` / `臺北` | 40 / 64 | 104 / 104 |
+
+Fold `臺` to `台` **in the search key only**. Both are Traditional forms — this is variant
+normalisation, not simplification — and the **displayed name must stay exactly as the feed
+writes it**, because it has to match the sign on the building. Test both directions:
+typing either form finds lots spelled with the other.
+
 - [ ] **Step 1: Write the tests first (`search.ts` is pure and should be tested alone)**
 
 - Substring match on the lot name, anywhere in the string (Chinese has no word
