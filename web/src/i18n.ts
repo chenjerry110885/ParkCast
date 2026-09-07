@@ -90,6 +90,15 @@ export interface Strings {
   /** Accessible name for the map region. The map itself carries no text. */
   mapLabel: string;
   /**
+   * Shown in the map's place while its chunk downloads.
+   *
+   * MapLibre is 333 KB gzipped and is loaded lazily so the ranked list -- the
+   * app's actual answer -- paints without waiting for it. This is a *loading*
+   * state, not a failure: nothing has gone wrong, the picture is simply still
+   * on its way, and `mapUnavailable` is the string for the case that has.
+   */
+  mapLoading: string;
+  /**
    * Shown in place of the map when the device gives us no WebGL context.
    *
    * The ranked list is the app's actual output, so a map that cannot be drawn
@@ -125,6 +134,7 @@ const en: Strings = {
     "This forecast is too old to answer for your arrival time, so no chance of a space is shown. Names, walking distances and prices are still correct.",
   noLotsNearby: "No car parks to rank here. Try another point on the map.",
   mapLabel: "Map of car parks",
+  mapLoading: "Loading map…",
   mapUnavailable: "This device can't draw the map. The ranked list still works.",
 };
 
@@ -153,6 +163,7 @@ const zh: Strings = {
   forecastTooOld: "預報資料已過舊，無法推估您抵達時的狀況，因此不顯示有位機率。名稱、步行距離與價格仍然正確。",
   noLotsNearby: "此處沒有可排序的停車場，請改點選地圖上的其他位置。",
   mapLabel: "停車場地圖",
+  mapLoading: "載入地圖中…",
   mapUnavailable: "此裝置無法顯示地圖，排序清單仍可使用。",
 };
 

@@ -5,7 +5,7 @@
  * runs in this component, and nothing is ever sent anywhere -- the driver's
  * location never leaves the phone, because there is no server to send it to.
  *
- * Seven things here are load-bearing rather than cosmetic:
+ * Eight things here are load-bearing rather than cosmetic:
  *
  *   - **The staleness line.** The upstream feed publishes every five minutes
  *     with a ~3-minute lag, so the reading behind any forecast is already a few
@@ -38,8 +38,16 @@
  *     Feeding the map the ranked array instead, as this did, left the whole
  *     city invisible until the user happened to tap: the project's own
  *     "silently absent lot" failure, at 1,088 out of 1,088.
+ *   - **The list does not wait for the map.** MapLibre and its stylesheet are
+ *     333 KB gzipped -- more than the rest of the app together -- and a static
+ *     import made the ranked list, the thing that answers the user's question,
+ *     wait for the picture that illustrates it. `MapView` is loaded lazily
+ *     instead, behind a placeholder that reserves the map's exact height so the
+ *     list does not jump down the page when the chunk lands. `mapLots` is still
+ *     computed here, above the boundary, so the map is full the moment it
+ *     mounts -- the previous point is not weakened by this one.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { artifactsBase, horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
 import { LotList } from "./components/LotList";
 import { LangToggle } from "./components/LangToggle";
@@ -47,9 +55,21 @@ import { Scrubber } from "./components/Scrubber";
 import type { LatLon } from "./geo";
 import { detectLang, fillTemplate, t, type Lang } from "./i18n";
 import { toMapLot } from "./map/lotSource";
-import { MapView } from "./map/MapView";
 import { listRows, rankLots } from "./rank";
 import type { Grid, Lot, LotsDoc } from "./types";
+
+/**
+ * The map, and everything it drags in: MapLibre, pmtiles, the Protomaps theme
+ * and `maplibre-gl.css`. Split out of the entry chunk so the first paint costs
+ * what the list costs and not what the map costs.
+ *
+ * `./map/MapView` must stay the *only* path to that module, and it must stay a
+ * dynamic one -- a static `import` of anything inside `map/` from this file, or
+ * from anything this file imports eagerly, silently merges the chunk back in.
+ * `map/lotSource` above is deliberately not such a case: it is pure geometry
+ * with no MapLibre import of its own.
+ */
+const MapView = lazy(() => import("./map/MapView"));
 
 /**
  * Where the two artifacts live. Relative to the deployment root so the app
@@ -127,6 +147,31 @@ interface Artifacts {
 function probabilityForLot(grid: Grid, lot: Lot | undefined, horizonMin: number): number | null {
   const row = lot?.i;
   return row === undefined || row >= grid.nLots ? null : probabilityAt(grid, row, horizonMin);
+}
+
+/**
+ * What stands where the map will be while its chunk is still downloading.
+ *
+ * Two things make this a placeholder rather than a gap:
+ *
+ *   - It **reserves the map's height** (`.map-placeholder` and `.map-canvas`
+ *     share one `--map-height`), so the list sits where it will still be
+ *     sitting a moment later. A collapsing fallback would shove the whole list
+ *     down the page the instant the chunk landed -- a worse bug than the slow
+ *     first paint this split exists to fix.
+ *   - It reads as **loading, not broken**. Nothing has failed here: the answer
+ *     is already on screen and the illustration is on its way. `role="status"`
+ *     rather than `role="alert"` says the same thing to a screen reader, and
+ *     `mapUnavailable` remains the string for the case that really did fail.
+ */
+function MapPlaceholder({ lang }: { lang: Lang }) {
+  return (
+    <div className="map">
+      <p className="map-placeholder" role="status" data-testid="map-loading">
+        {t(lang).mapLoading}
+      </p>
+    </div>
+  );
 }
 
 export default function App() {
@@ -449,10 +494,17 @@ export default function App() {
           </p>
         )}
         {!loadFailed && (
-          // Every lot in the roster, never `listed` and never `ranked`: the list
-          // is capped at 20 rows, the ranking waits for a destination, and the
-          // map is the city either way.
-          <MapView lots={mapLots} destination={destination} onPick={pickDestination} lang={lang} />
+          // The boundary is around the map alone, so only the map waits for the
+          // map's chunk: everything below -- the list, the staleness line, the
+          // expiry notice -- renders on the first paint either way.
+          <Suspense fallback={<MapPlaceholder lang={lang} />}>
+            {/* Every lot in the roster, never `listed` and never `ranked`: the
+                list is capped at 20 rows, the ranking waits for a destination,
+                and the map is the city either way. `mapLots` is computed above
+                this boundary, so the roster is ready before the chunk is and
+                the map is never mounted empty. */}
+            <MapView lots={mapLots} destination={destination} onPick={pickDestination} lang={lang} />
+          </Suspense>
         )}
         {!loadFailed && artifacts === null && <p className="notice">{s.loading}</p>}
         {forecastExpired && (

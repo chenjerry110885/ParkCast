@@ -12,7 +12,9 @@
  * stubs: the artifacts are built as real bytes and go through the real
  * `loadArtifacts`, so the parse, the roster pairing and the ranking are all
  * exercised as shipped -- and the real `MapView` mounts, down its real
- * no-WebGL path, on every one of these renders.
+ * no-WebGL path, on every one of these renders. It mounts a tick *late* now,
+ * behind `React.lazy`, which is the subject of the last describe here: nothing
+ * else in this file waits for it, because nothing else on the screen does.
  */
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -787,5 +789,31 @@ describe("an empty result set", () => {
     fireEvent.click(screen.getByRole("button", { name: "切換為中文" }));
     await screen.findByRole("button", { name: t("zh").useMyLocation });
     expect(screen.getByTestId("no-lots").textContent).toBe(t("zh").noLotsNearby);
+  });
+});
+
+/**
+ * The map is 333 KB gzipped and the list is the answer, so the list is no
+ * longer behind it. This is the *after* picture: with the chunk in, the page is
+ * the page it always was.
+ *
+ * The two halves this cannot show live elsewhere, for one reason each:
+ * `mapChunk.test.tsx` proves the import is genuinely dynamic, which only the
+ * first render of a module registry can observe because `React.lazy` caches;
+ * and `mapLazy.test.tsx` holds the boundary open to show what the user reads
+ * while the chunk is still in flight, which a real import resolves too fast to
+ * catch.
+ */
+describe("the map is a separate chunk", () => {
+  it("still ranks, lists and draws once the chunk has landed", async () => {
+    await renderLocated();
+    // MapLibre's own no-WebGL notice: proof the real `MapView` mounted, late.
+    await screen.findByText(t("en").mapUnavailable);
+
+    expect(screen.queryByTestId("map-loading")).toBeNull();
+    expect(screen.getByTestId("lot-list")).toBeInTheDocument();
+    expect(within(rowFor("市府路一號停車場")).getByTestId("lot-probability").textContent).toContain(
+      "88%",
+    );
   });
 });

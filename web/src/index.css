@@ -222,11 +222,31 @@ button {
   border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
+
+  /*
+   * The map's height, named here because two elements have to agree on it: the
+   * canvas, and the placeholder that holds its space while MapLibre's chunk
+   * downloads. Two hard-coded copies of a `clamp()` would drift, and the day
+   * they did the list would jump down the page as the map arrived.
+   */
+  --map-height: clamp(240px, 42vh, 460px);
 }
 
 .map-canvas {
   width: 100%;
-  height: clamp(240px, 42vh, 460px);
+  height: var(--map-height);
+}
+
+/* Same height as the canvas, so nothing below it moves when the map lands. */
+.map-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--map-height);
+  margin: 0;
+  font-size: 14px;
+  color: var(--muted);
+  background: var(--surface);
 }
 
 /* MapLibre's attribution sits on the map, so it needs to stay legible on it. */

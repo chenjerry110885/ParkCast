@@ -14,6 +14,15 @@
  * exactly one place. Unknown lots are also drawn dimmer than known ones: two
  * channels saying the same true thing, for the reader who does not have the
  * legend memorised.
+ *
+ * **This module is a lazy boundary, and the component is a *default* export for
+ * that reason.** MapLibre and its stylesheet are 333 KB gzipped between them --
+ * more than everything else the app ships put together -- and a static import
+ * here made the ranked list, which is the app's actual answer, wait for all of
+ * it. `App.tsx` reaches this file through `React.lazy` instead, which needs a
+ * default export. There is deliberately no named component export: a stray
+ * `import { MapView }` anywhere would pull MapLibre straight back into the
+ * entry chunk, and nothing in the build output would say so.
  */
 import { useEffect, useMemo, useRef } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -44,7 +53,7 @@ export interface MapViewProps {
   lang: Lang;
 }
 
-export function MapView({ lots, destination, onPick, lang }: MapViewProps) {
+export default function MapView({ lots, destination, onPick, lang }: MapViewProps) {
   const { containerRef, map, unavailable } = useMapLibre();
   const s = t(lang);
 

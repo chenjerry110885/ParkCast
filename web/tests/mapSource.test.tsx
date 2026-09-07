@@ -12,6 +12,12 @@
  * goes through the real `loadArtifacts`, the real `App` and the real `MapView`
  * effects, and the assertions are on the FeatureCollection MapLibre would have
  * drawn.
+ *
+ * `MapView` now arrives behind `React.lazy`, so every test here waits for the
+ * map region before reading what was drawn on it. That wait is the *only*
+ * concession to the split: what is asserted afterwards is unchanged, because
+ * the guarantee is unchanged -- the whole roster is on the map before anything
+ * is tapped, and each dot reads its own declared grid row.
  */
 import { cleanup, render, screen } from "@testing-library/react";
 import type { FeatureCollection, Point } from "geojson";
@@ -19,6 +25,7 @@ import type { MapLibreMap } from "maplibre-gl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { HEADER_SIZE } from "../src/artifacts";
+import { t } from "../src/i18n";
 import { LOTS_SOURCE } from "../src/map/MapView";
 import type { LotProperties } from "../src/map/lotSource";
 import type { Lot, LotsDoc } from "../src/types";
@@ -171,6 +178,20 @@ function drawnLots(): FeatureCollection<Point, LotProperties> {
   return source.data as FeatureCollection<Point, LotProperties>;
 }
 
+/**
+ * Render, wait for the artifacts, then wait for the map's own chunk.
+ *
+ * The map is lazy, so it mounts a tick after the page does -- that is Task 2's
+ * whole point, and it is asserted in `mapLazy.test.tsx`. Here it is only
+ * something to wait for: the region carries the map's accessible name, and by
+ * the time it is on the page `MapView`'s source and data effects have run.
+ */
+async function renderMapped(): Promise<void> {
+  render(<App />);
+  await screen.findByTestId("staleness");
+  await screen.findByRole("region", { name: t("en").mapLabel });
+}
+
 beforeEach(() => {
   shared.map = makeFakeMap();
   vi.stubGlobal(
@@ -198,8 +219,7 @@ afterEach(() => {
 
 describe("the map before a destination", () => {
   it("draws every placeable lot with nothing tapped and no location taken", async () => {
-    render(<App />);
-    await screen.findByTestId("staleness");
+    await renderMapped();
 
     // The whole roster minus the row that could not be placed -- and, before
     // this was fixed, zero: the map was fed the ranking, which is empty until a
@@ -211,8 +231,7 @@ describe("the map before a destination", () => {
   });
 
   it("gives each dot the forecast for its own grid row, not for its position", async () => {
-    render(<App />);
-    await screen.findByTestId("staleness");
+    await renderMapped();
 
     // `TPE_C` declares row 2 and sits at position 1 once the unplaceable row is
     // dropped. Reading by position would hand it 50% -- its neighbour's number,
@@ -225,8 +244,7 @@ describe("the map before a destination", () => {
   it("keeps a lot with no forecast on the map rather than dropping it", async () => {
     // Guarding the other half of the honesty rule: an unknown lot is drawn grey
     // and flagged `known: false`, never filtered out and never coerced to 0.
-    render(<App />);
-    await screen.findByTestId("staleness");
+    await renderMapped();
 
     for (const feature of drawnLots().features) {
       expect(feature.properties.known).toBe(feature.properties.probability !== null);
