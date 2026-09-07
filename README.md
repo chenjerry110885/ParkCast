@@ -58,10 +58,11 @@ Running continuously since 2026-09-04. Live figures at the time of writing:
 | Lots forecast every 5 min | **1,075** × 24 horizons (+5 to +120 min) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **33 KB gzipped**, both files |
-| Tests | **258** Python · **93** TypeScript |
+| Tests | **258** Python · **165** TypeScript |
 
-Plans 1, 2, 2b, 3a and 3b are complete. The map, time-scrubber and PWA install (3c) and the trained
-model with its evaluation (4) are still to come.
+Plans 1 through 3d are complete: the collector, the forecast grid, the ranked list, the map and
+time-scrubber, search, and an installable offline-capable app. The trained model and its evaluation
+(Plan 4) are still to come, and need weeks of collected data before a comparison means anything.
 
 ---
 
@@ -72,7 +73,7 @@ Taipei open data ──▶ collector ──▶ SQLite (hot, 48h) ──▶ Parqu
    every 5 min                            │
                                           ▼
                               forecast ──▶ grid.bin  (26 KB)  every 5 min
-                                       └─▶ lots.json (186 KB) on roster change
+                                       └─▶ lots.json (183 KB) on roster change
                                           │
                                           ▼  CDN
                                    browser: ranking, distance,
@@ -156,8 +157,8 @@ npm run dev --prefix web
 **Tests:**
 
 ```bash
-python -m pytest          # 250
-npm test --prefix web     # 93
+python -m pytest          # 258
+npm test --prefix web     # 165
 ```
 
 ---
@@ -177,6 +178,27 @@ node scripts/build-basemap.mjs
 
 See [`docs/basemap.md`](docs/basemap.md) for what it needs, why it won't download anything for you,
 and how to verify the extractor binary before running it.
+
+---
+
+## Install and offline
+
+ParkCast installs as a PWA and keeps working with no signal — which matters, because the place you
+most want it is a basement car park. A cached forecast is not passed off as a live one: every
+artifact carries the timestamp of the reading behind it, so the app shows its real age and withdraws
+the probability entirely once it is too old to answer the question.
+
+The service worker deliberately leaves the 23 MB basemap alone: it is read by HTTP range request,
+and caching partial responses is a well-known way to serve corrupt tiles. Offline you get the full
+ranked list and no map tiles, which is the right half to keep.
+
+The icons are generated, not drawn — `zlib` and `struct`, no image library:
+
+```bash
+python scripts/build-icons.py
+```
+
+See [`docs/pwa.md`](docs/pwa.md) for the caching rules and their measured caveats.
 
 ---
 

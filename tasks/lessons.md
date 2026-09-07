@@ -74,3 +74,36 @@ and production.
 **Rule:** Prototype non-trivial plan-supplied logic against real or realistic data BEFORE writing it
 into a brief, especially SQL and anything touching time. When correcting an implementer, verify the
 correction itself first — a confidently wrong fix instruction is worse than the original bug.
+
+---
+
+## L005 — A working prototype proves the mechanism, not the requirements
+
+**Date:** 2026-09-07
+**Trigger:** Plan 3d. Three plan-supplied claims that had been checked, and were still wrong.
+
+**What happened:** Following L004, non-trivial logic was prototyped before being written into
+the brief. The icon generator was run, its output rendered and looked at — a clean, recognisable
+mark. It was handed over as verified. The implementer found that the *maskable* variant was not
+maskable: it carried a 10% transparent border, which an Android launcher's circular crop renders
+as chipped corners. The image was correct; it just did not meet the spec the manifest was about
+to claim it met.
+
+Two more in the same plan, both from the controller's own reasoning rather than from data:
+"app shell: cache-first, because Vite hashes every filename" — true of every file except
+`index.html`, the one file it does not hash, and therefore the one file cache-first would pin to
+the first visit's bundle names forever. And "a new service worker takes over on the next full
+load", which is simply false; measured in Edge 152, a same-tab reload left the old worker active
+and the new one waiting.
+
+**Why:** L004 says prototype before handing over, and that is right — but running something and
+looking at the result only proves it *works*. It does not prove it satisfies a specification
+nobody read. Every one of these three was an assertion about a standard (maskable icon safe
+zones, Vite's asset hashing, the service worker lifecycle), and none of them was checked against
+the standard.
+
+**Rule:** When a brief makes a claim *about a specification* — a manifest requirement, a caching
+guarantee, a lifecycle, a file format — cite where the claim comes from, or mark it explicitly as
+unverified so the implementer knows to check it rather than transcribe it. "I ran it and it looked
+right" is evidence about the mechanism only. And state the general rule with its exceptions
+attached: "Vite hashes every asset filename" invites the reader to include the one it does not.
