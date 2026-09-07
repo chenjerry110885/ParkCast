@@ -2,9 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ParkCast — 停車先知</title>
+    <meta
+      name="description"
+      content="The chance of a free parking space in Taipei when you arrive, not a stale count from five minutes ago."
+    />
+    <!-- Leading slashes on purpose: Vite rewrites a public-file href with the
+         deployment base (`/ParkCast/`). Relative would break. See docs/pwa.md. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- iOS ignores the manifest and masks nothing, so it gets the full-bleed
+         variant; the plain mark's transparent corners would render black. -->
+    <link rel="apple-touch-icon" href="/icon-maskable-512.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#1d5fd0" />
   </head>
   <body>
     <div id="root"></div>

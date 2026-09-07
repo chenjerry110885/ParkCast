@@ -12,12 +12,18 @@ import { defineConfig } from 'vitest/config'
  *
  * Dev and test stay at `/`: `command` is `serve` for both, and pinning them to
  * the sub-path would only make every local URL longer.
+ *
+ * `preview` is the exception, and needs asking for by name. It serves the
+ * *build*, whose HTML already points at `/ParkCast/assets/...`, so serving it
+ * from `/` gives a blank page and a wall of 404s -- and `command` is `serve`
+ * there too, which is why `isPreview` has to carry the distinction. This is the
+ * only way to check a Pages build locally, service worker scope included.
  */
 const PAGES_BASE = '/ParkCast/'
 
 // https://vite.dev/config/
-export default defineConfig(({ command }) => ({
-  base: process.env.PARKCAST_BASE ?? (command === 'build' ? PAGES_BASE : '/'),
+export default defineConfig(({ command, isPreview }) => ({
+  base: process.env.PARKCAST_BASE ?? (command === 'build' || isPreview ? PAGES_BASE : '/'),
   plugins: [react()],
   test: {
     // jsdom, not node: later tasks render components against this same config.
