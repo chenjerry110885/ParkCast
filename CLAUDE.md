@@ -176,9 +176,10 @@ rollover ordering: `run_forever` archives completed days *before* pruning, so th
 than deleted.
 
 **Planned, not yet done (decided 2026-09-09):** move the collector to a spare desktop that stays
-powered on. The service is already a Docker container with a bind-mounted `data/`, so the move is
-`docker compose up -d --build` on the other machine plus a copy of `data/`. Until then the gaps
-above keep accruing, and the corpus is the only thing in this project that cannot be rebuilt.
+powered on. **Runbook: [`docs/collector-move.md`](docs/collector-move.md)** — read it before
+starting, because the two ways to lose the corpus (copying a live WAL, and running two collectors
+at once) are both easy and both silent. Until the move happens the gaps above keep accruing, and
+`data/` is the only thing in this project that cannot be rebuilt.
 
 **Non-negotiable:** the collector runs from day one. Every day it is not running is a
 training day that cannot be recovered.
