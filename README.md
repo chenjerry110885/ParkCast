@@ -108,6 +108,32 @@ Three share one interface, so a trained model can be scored against them on iden
 - **Blend** — persistence decaying into climatology with a 30-minute half-life. The current reading
   is strong evidence about the next five minutes and almost none about two hours from now.
 
+### Ranking
+
+A probability is not yet an answer. The ranker turns one into a decision by scoring each car park
+as the **expected cost of the whole trip**, in NT$:
+
+```
+cost  =  p x (walk + fare)  +  (1 - p) x (circling + cost of the best reliable alternative)
+```
+
+You do not pay a car park's fare for a space it did not have, and arriving to find it full costs
+more than the time spent circling — you still have to get somewhere that has one, and pay for it.
+That second half is derived from the roster being ranked rather than tuned, so failing in a dense
+district costs less than failing in a sparse one.
+
+Getting this wrong is instructive, so it is worth recording that it *was* wrong. The original score
+charged the fare unconditionally and priced a failure at a flat twelve minutes, which made the
+entire probability range worth NT$60 — the same as 960 m of walking. Being a kilometre closer
+therefore cancelled being certainly full, and a car park the model gave a **1% chance** could
+outrank one at **100%**. `scripts/probe-ranker.py` scores both models on one grid and reports where
+the worst such lot lands: **first place before, third after**. It exits non-zero if a likely-full
+lot is ever the top recommendation.
+
+The count of such orderings only fell from 25 to 19, and deliberately was not tuned to zero — a lot
+at 12% that is half the distance for the same price is a bet a driver can reasonably take. It is
+the *position* that had to change.
+
 ---
 
 ## Honest limitations

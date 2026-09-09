@@ -95,20 +95,37 @@ that both have a space, a driver takes the cheaper one. Measured across four rea
 the top ten results differ by at most 9 points of probability but by a factor of three in price,
 so price and walking are the live variables. Do not "fix" this.
 
-**Price outweighing *probability* is a separate matter and is currently a defect.**
-`CIRCLING_PENALTY_MIN` is 12 minutes, so the whole probability range 0→1 is worth NT$60 — which
-is also 12 minutes of walking, **960 m on foot**, or NT$30/hour of price. Being a kilometre closer
-therefore cancels being certainly full.
+**`cost` is the expected cost of the whole trip in NT$, and means it literally** (changed
+2026-09-09):
 
-`scripts/probe-ranker.py` measures this against the live artifacts. Measured 2026-09-07: the
-forecast is **bimodal, not saturated** — 15.6% of lots below 50%, 81.7% at or above 90%, only 2.7%
-in between — and searching all 168 tight destinations found **89 inversions**, including a lot at
-**P=1% ranked 9th, above one at P=100%**. Accounting for the fact that a failed attempt must still
-reach the alternative, the risky lot costs 168.8 against the reliable option's 110.0, while the
-shipped model scores them 109.4 and 110.0.
+    cost = p x (walk + fare)  +  (1 - p) x (circling + cost of the best reliable alternative)
 
-Re-run the probe before and after any change to the four ranker constants. It exits non-zero when
-an inversion exists.
+You do not pay this car park's fare for a space it did not have, and a failed attempt is charged
+for the trip it forces rather than for circling alone. `RELIABLE_P` (0.9) defines which lots can
+serve as that alternative; the fallback is one scalar per ranking, derived from the roster rather
+than tuned, so failing in a dense district costs less than failing in a sparse one. At `p = 1` the
+failure branch vanishes and the score is simply walk plus fare.
+
+**What it replaced, and why.** The old score was `walk + fare + (1 - p) x circling`: it charged the
+fare unconditionally and never charged the onward trip, so the entire probability range was worth
+one circling penalty — NT$60, which is also 12 minutes of walking and **960 m on foot**. Being a
+kilometre closer cancelled being certainly full.
+
+`scripts/probe-ranker.py` measures this against the live artifacts and scores **both models on one
+grid**, because the roster and the forecast move through the day and a before/after taken an hour
+apart credits the calibration with whatever the clock did. Measured 2026-09-09 over every
+destination whose own lot is under 50%:
+
+| | inversions | worst position reached |
+|---|---|---|
+| legacy | 25 | **#1** |
+| shipped | 19 | **#3** |
+
+The count is not the point and should not be tuned to zero — a lot at 12% that is half the distance
+for the same price is a defensible bet, and squeezing those out would mean over-weighting
+probability to flatter a metric. **Position is the point.** The probe exits non-zero only when a
+likely-full lot reaches *first place*, i.e. when the app's own top recommendation is a car park it
+believes is full. Re-run it after any change to the ranker constants.
 
 ### The app is bilingual: English and 繁體中文
 

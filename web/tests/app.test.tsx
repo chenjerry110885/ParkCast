@@ -1015,7 +1015,14 @@ describe("searching for a destination", () => {
     fireEvent.keyDown(box(), { key: "Enter" });
 
     // A different point, a different order -- not a list that was computed once.
-    expect(firstRankedId()).toBe("TPE_ENTRY");
+    expect(firstRankedId()).not.toBe("TPE_BEITOU");
+    // TPE_ENTRY is the car park that was searched for and is zero metres away,
+    // and it still does not win: at P=45% it is a coin flip that loses more
+    // often than not, while TPE_RANGE is 16 points likelier for one minute's
+    // walk and NT$10. Expected trip cost 95.4 against 101.2. Before the failure
+    // branch was modelled this went the other way, on the strength of the zero
+    // walk alone -- which is the whole reason the model changed.
+    expect(firstRankedId()).toBe("TPE_RANGE");
   });
 
   it("finds a 臺-spelled car park from the 台 a driver types, and back", async () => {

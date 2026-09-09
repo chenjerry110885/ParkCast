@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { UNKNOWN_RESERVE, listRows, rankLots } from "../src/rank";
+import {
+  CIRCLING_PENALTY_MIN,
+  EXPECTED_HOURS,
+  TIME_VALUE,
+  UNKNOWN_RESERVE,
+  listRows,
+  rankLots,
+} from "../src/rank";
 
 const lot = (id: string, lat: number, p: unknown) =>
   ({ i: 0, id, n: id, a: "中正區", y: lat, x: 121.52, c: 50, t: "民營停車場", p }) as never;
@@ -177,5 +184,87 @@ describe("listRows", () => {
     // The expired-artifact case: every row is unknown, the head *is* the group,
     // and growing the list by five arbitrary extras would help nobody.
     expect(listRows(ranking(50, 0), 20)).toHaveLength(20);
+  });
+});
+
+/**
+ * The failure branch.
+ *
+ * `cost` claims to be an expected cost in NT$, and until 2026-09-09 it was not
+ * one: it charged every lot its own fee whether or not you got in, and charged
+ * a failed attempt only the time spent circling -- never the trip to wherever
+ * you actually ended up. The probability term was therefore capped at
+ * `CIRCLING_PENALTY_MIN * TIME_VALUE`, NT$60 at the shipped constants, which is
+ * also 12 minutes of walking. Being a kilometre closer cancelled being
+ * certainly full, and `scripts/probe-ranker.py` found 89 orderings that said so.
+ */
+describe("rankLots: the cost of arriving to find no space", () => {
+  const priced = (n: number) => ({ k: "exact", lo: n, hi: n });
+
+  it("ranks a certain space above a hopeless one a kilometre nearer", () => {
+    // The real inversion, reproduced: 嘟嘟房捷運北投站 at P=1% and NT$50 a visit,
+    // standing where the driver is, against 復興路 at P=100%, NT$40 a visit and
+    // 1,066 m away. The old model scored them 109.4 and 110.0 and put the lot
+    // that is certainly full first, ninth in a list of ten.
+    const out = rankLots({
+      destination: at, horizonMin: 15,
+      lots: [lot("hopeless-here", 25.05, priced(25)),
+             lot("certain-far", 25.0596, priced(20))],
+      probability: (i) => (i === 0 ? 0.01 : 1),
+    });
+    expect(out[0]!.id).toBe("certain-far");
+  });
+
+  it("charges a failed attempt for the trip it forces, not just for circling", () => {
+    const out = rankLots({
+      destination: at, horizonMin: 15,
+      lots: [lot("coin-flip", 25.05, priced(30)),
+             lot("certain-far", 25.0596, priced(30))],
+      probability: (i) => (i === 0 ? 0.5 : 1),
+    });
+    const flip = out.find((r) => r.id === "coin-flip")!;
+    const far = out.find((r) => r.id === "certain-far")!;
+    // Half the time you pay the near lot's own cost; the other half you pay the
+    // circling penalty AND the far lot's cost, having gained nothing.
+    expect(flip.cost).toBeCloseTo(
+      0.5 * (flip.walkMin * TIME_VALUE + 60) +
+        0.5 * (CIRCLING_PENALTY_MIN * TIME_VALUE + far.cost!),
+      6,
+    );
+  });
+
+  it("still reduces to walking plus money for a lot that is certain", () => {
+    // p = 1 removes the failure branch entirely, so the score is exactly what a
+    // driver pays: the walk and the fare, and nothing speculative on top.
+    const out = rankLots({
+      destination: at, horizonMin: 15,
+      lots: [lot("sure-thing", 25.0505, priced(45))],
+      probability: () => 1,
+    });
+    expect(out[0]!.cost).toBeCloseTo(out[0]!.walkMin * TIME_VALUE + 45 * EXPECTED_HOURS, 6);
+  });
+
+  it("keeps working when nothing in the roster is reliable", () => {
+    // No lot clears RELIABLE_P, so there is no trustworthy alternative to fall
+    // back to. The ranking must still be an ordering, not a crash or a tie.
+    const out = rankLots({
+      destination: at, horizonMin: 15,
+      lots: [lot("bad-near", 25.05, priced(50)), lot("better-near", 25.05, priced(50))],
+      probability: (i) => (i === 0 ? 0.1 : 0.4),
+    });
+    expect(out[0]!.id).toBe("better-near");
+    expect(out.every((r) => Number.isFinite(r.cost!))).toBe(true);
+  });
+
+  it("leaves a lot with no forecast out of the failure arithmetic", () => {
+    // An unknown probability still means an unknown cost and last place: the
+    // fallback term must not quietly manufacture a number for it.
+    const out = rankLots({
+      destination: at, horizonMin: 15,
+      lots: [lot("no-forecast", 25.05, priced(10)), lot("known", 25.0505, priced(90))],
+      probability: (i) => (i === 0 ? null : 0.95),
+    });
+    expect(out[0]!.id).toBe("known");
+    expect(out[1]!.cost).toBeNull();
   });
 });

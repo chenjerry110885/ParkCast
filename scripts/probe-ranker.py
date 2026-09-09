@@ -66,6 +66,7 @@ def load_constants() -> dict[str, float]:
         "EXPECTED_HOURS": _const(rank, "EXPECTED_HOURS"),
         "CIRCLING_PENALTY_MIN": _const(rank, "CIRCLING_PENALTY_MIN"),
         "MEDIAN_PRICE_FALLBACK": _const(rank, "MEDIAN_PRICE_FALLBACK"),
+        "RELIABLE_P": _const(rank, "RELIABLE_P"),
         "WALK_METERS_PER_MIN": _const(geo, "WALK_METERS_PER_MIN"),
         "EARTH_RADIUS_M": _const(geo, "EARTH_RADIUS_M"),
     }
@@ -108,19 +109,49 @@ class Ranker:
         mid = (price["lo"] + price["hi"]) / 2
         return mid if price["k"] == "entry" else mid * self.k["EXPECTED_HOURS"]
 
-    def rank(self, destination: tuple[float, float], column: int) -> list[dict]:
+    def fallback_cost(self, scored: list[dict]) -> float:
+        """`fallbackCost` from rank.ts: the cheapest reliable lot, scored simply."""
+        penalty = self.k["CIRCLING_PENALTY_MIN"] * self.k["TIME_VALUE"]
+        reliable = any_forecast = math.inf
+        for r in scored:
+            if r["p"] is None:
+                continue
+            simple = r["certain"] + (1 - r["p"]) * penalty
+            any_forecast = min(any_forecast, simple)
+            if r["p"] >= self.k["RELIABLE_P"]:
+                reliable = min(reliable, simple)
+        if math.isfinite(reliable):
+            return reliable
+        return any_forecast if math.isfinite(any_forecast) else 0.0
+
+    def rank(self, destination: tuple[float, float], column: int,
+             legacy: bool = False) -> list[dict]:
+        """`legacy=True` scores the way the ranker did before 2026-09-09.
+
+        Kept so a change to the model can be argued about on one grid rather
+        than on two runs an hour apart. The roster and the forecast both move,
+        and comparing across that is how a calibration change gets credited
+        with an improvement the time of day actually produced.
+        """
         scored = []
         for lot in self.lots:
             meters = haversine_m(destination, (lot["y"], lot["x"]), self.k["EARTH_RADIUS_M"])
             walk = self.walk_min(meters)
             fee = self.fee(lot["p"])
             p = self.probability(lot, column)
-            certain = walk * self.k["TIME_VALUE"] + fee
-            risk = None if p is None else (1 - p) * self.k["CIRCLING_PENALTY_MIN"] * self.k["TIME_VALUE"]
             scored.append({
                 "lot": lot, "p": p, "meters": meters, "walk": walk, "fee": fee,
-                "certain": certain, "cost": None if risk is None else certain + risk,
+                "certain": walk * self.k["TIME_VALUE"] + fee,
             })
+        penalty = self.k["CIRCLING_PENALTY_MIN"] * self.k["TIME_VALUE"]
+        fallback = self.fallback_cost(scored)
+        for r in scored:
+            if r["p"] is None:
+                r["cost"] = None
+            elif legacy:
+                r["cost"] = r["certain"] + (1 - r["p"]) * penalty
+            else:
+                r["cost"] = r["p"] * r["certain"] + (1 - r["p"]) * (penalty + fallback)
         # Unknown-probability lots sort last, then by cost -- exactly as rank.ts does.
         scored.sort(key=lambda r: (r["cost"] is None, r["cost"] if r["cost"] is not None else r["certain"]))
         return scored
@@ -129,7 +160,10 @@ class Ranker:
 def report_exchange_rates(k: dict[str, float]) -> None:
     span = k["CIRCLING_PENALTY_MIN"] * k["TIME_VALUE"]
     print("EXCHANGE RATES implied by the shipped constants")
-    print(f"  a certain space over a certainly-full one is worth NT${span:.0f}")
+    print("  A failed attempt costs the circling penalty PLUS the trip it forces,")
+    print("  so the worth of a certain space is not a constant -- it depends on how")
+    print("  good the neighbourhood's best reliable alternative is. The floor is:")
+    print(f"  circling alone = NT${span:.0f}")
     print(f"    = {span / k['TIME_VALUE']:.0f} minutes of walking")
     print(f"    = NT${span / k['EXPECTED_HOURS']:.0f} per hour of parking price")
     print(f"    = {span / k['TIME_VALUE'] * k['WALK_METERS_PER_MIN']:.0f} metres on foot")
@@ -151,59 +185,69 @@ def report_spread(ranker: Ranker, column: int) -> None:
     print("  and the wrong one when it is not. That is why it is measured here.\n")
 
 
-def report_inversions(ranker: Ranker, column: int, top: int, gap: float) -> int:
-    """Search every tight neighbourhood for a likely-full lot beating a reliable one.
-
-    The destination is each low-probability lot's own position, which is the
-    hardest case on purpose: it puts the risky lot at zero walking distance,
-    where it has every advantage the model can give it.
-    """
+def count_inversions(ranker: Ranker, column: int, top: int, gap: float,
+                     legacy: bool) -> list[tuple[int, dict, dict]]:
+    """Every top-`top` ordering that puts a likely-full lot above a much better one."""
     starts = [l for l in ranker.lots
               if (p := ranker.probability(l, column)) is not None and p < LIKELY_FULL]
-    print(f"INVERSION SEARCH -- {len(starts)} destinations (every lot under {LIKELY_FULL:.0%})")
-    print(f"  looking for: a lot under {LIKELY_FULL:.0%} ranked above one at least "
-          f"{gap:.0%} better, inside the top {top}")
-
     found = []
     for start in starts:
-        rows = ranker.rank((start["y"], start["x"]), column)[:top]
+        rows = ranker.rank((start["y"], start["x"]), column, legacy=legacy)[:top]
         for i, row in enumerate(rows):
             if row["p"] is None or row["p"] >= LIKELY_FULL:
                 continue
             better = [q for q in rows[i + 1:] if q["p"] is not None and q["p"] - row["p"] > gap]
             if better:
                 found.append((i + 1, row, better[0]))
+    return found
 
-    print(f"  found: {len(found)}\n")
-    for position, row, beaten in sorted(found, key=lambda f: -(f[2]["p"] - f[1]["p"]))[:8]:
+
+def report_inversions(ranker: Ranker, column: int, top: int, gap: float) -> int:
+    """Search every tight neighbourhood for a likely-full lot beating a reliable one.
+
+    The destination is each low-probability lot's own position, which is the
+    hardest case on purpose: it puts the risky lot at zero walking distance,
+    where it has every advantage the model can give it.
+
+    Both models are scored on the same grid, because the roster and the forecast
+    both move through the day and a before/after taken an hour apart would
+    credit the calibration with whatever the clock did.
+    """
+    starts = sum(1 for l in ranker.lots
+                 if (p := ranker.probability(l, column)) is not None and p < LIKELY_FULL)
+    print(f"INVERSION SEARCH -- {starts} destinations (every lot under {LIKELY_FULL:.0%})")
+    print(f"  looking for: a lot under {LIKELY_FULL:.0%} ranked above one at least "
+          f"{gap:.0%} better, inside the top {top}")
+
+    was = count_inversions(ranker, column, top, gap, legacy=True)
+    found = count_inversions(ranker, column, top, gap, legacy=False)
+    print(f"  legacy model (walk + fare + (1-p) x circling): {len(was)}")
+    print(f"  shipped model (expected cost of the trip):     {len(found)}")
+    worst_pos = min((f[0] for f in found), default=None)
+    worst_was = min((f[0] for f in was), default=None)
+    print(f"  highest such lot reaches position: legacy #{worst_was}, shipped #{worst_pos}")
+    print("  Position is the number that matters. A likely-full lot deep in a list is")
+    print("  a trade-off the driver can see and reject; one at the top is the app")
+    print("  recommending a car park it believes is full.")
+    print()
+
+    for position, row, beaten in sorted(found, key=lambda f: (f[0], -(f[2]["p"] - f[1]["p"])))[:6]:
         print(f"  #{position} {row['lot']['n'][:24]:24s} P={row['p']:>4.0%} "
               f"{row['meters']:>5.0f}m NT${row['fee']:>5.0f}  ranks above  "
               f"{beaten['lot']['n'][:24]:24s} P={beaten['p']:>4.0%} "
               f"{beaten['meters']:>5.0f}m NT${beaten['fee']:>5.0f}")
         _explain(row, beaten, ranker.k)
-    return len(found)
+    return worst_pos if worst_pos is not None else 0
 
 
 def _explain(risky: dict, reliable: dict, k: dict[str, float]) -> None:
-    """Why the model prefers the risky lot, and what it leaves out.
-
-    `CIRCLING_PENALTY_MIN` is the time lost *circling*. It does not include
-    getting to wherever you end up instead, so the model charges a failed
-    attempt less than a failed attempt costs. Spelling both out is the point of
-    this probe: the gap between them is the argument for changing the constant,
-    and it is an argument only if it is quantified.
-    """
+    """The two branches of the score, so an inversion can be argued with."""
     p = risky["p"]
-    fallback = reliable["cost"]
-    modelled = risky["cost"]
-    # What trying the risky lot really costs: you pay its fee only if you get in,
-    # and otherwise you pay the circling time AND the whole fallback trip.
-    honest = p * (risky["walk"] * k["TIME_VALUE"] + risky["fee"]) + (1 - p) * (
-        k["CIRCLING_PENALTY_MIN"] * k["TIME_VALUE"] + fallback
-    )
-    print(f"      model scores it {modelled:6.1f} vs the reliable option's {fallback:6.1f}")
-    print(f"      but a failed attempt also has to reach that option: {honest:6.1f}"
-          f"  ({'still better' if honest < fallback else 'worse — the model is under-charging failure'})")
+    success = risky["certain"]
+    failure = k["CIRCLING_PENALTY_MIN"] * k["TIME_VALUE"] + reliable["cost"]
+    print(f"      {p:.0%} x NT${success:.1f} (park here) + {1 - p:.0%} x NT${failure:.1f} "
+          f"(circle, then go there) = NT${risky['cost']:.1f}")
+    print(f"      against going straight there: NT${reliable['cost']:.1f}")
 
 
 def main() -> int:
@@ -230,10 +274,14 @@ def main() -> int:
           f"column {args.column} (+{(args.column + 1) * 5} min)\n")
     report_exchange_rates(k)
     report_spread(ranker, args.column)
-    found = report_inversions(ranker, args.column, args.top, args.gap)
-    # Non-zero when the thing the project exists to prevent is reachable, so this
-    # can be wired into a check later without rewriting it.
-    return 1 if found else 0
+    worst = report_inversions(ranker, args.column, args.top, args.gap)
+    # The gate is *first place*, not the raw count. Several of the orderings this
+    # reports are genuine trade-offs -- a lot at 12% that is half the distance and
+    # the same price is a reasonable bet, and tuning until the count reaches zero
+    # would mean over-weighting probability to flatter a metric. What must never
+    # happen is a car park the model believes is full being the app's own top
+    # recommendation, so that is what fails the check.
+    return 1 if worst == 1 else 0
 
 
 if __name__ == "__main__":

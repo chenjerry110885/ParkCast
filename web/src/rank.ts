@@ -71,6 +71,20 @@ export const EXPECTED_HOURS = 2;
 export const CIRCLING_PENALTY_MIN = 12;
 
 /**
+ * The chance at or above which a car park counts as somewhere you can *plan* to
+ * end up, and so can serve as the fallback a failed attempt falls back to.
+ *
+ * Something has to play that role. Without it the model has no way to say what
+ * arriving to find no space actually costs, and has to guess a flat penalty --
+ * which is what it used to do, and why a lot at P=1% could outrank one at
+ * P=100% a kilometre away. Ninety per cent is where a driver stops hedging: the
+ * measured roster is bimodal, 15.6% of lots below 50% and 81.7% at or above
+ * 90%, with only 2.7% in between, so the threshold sits in the empty middle and
+ * nothing lands near enough to it for the exact value to decide an ordering.
+ */
+export const RELIABLE_P = 0.9;
+
+/**
  * The rate an unpriced lot is *scored* at: NT$/hour, the citywide median of the
  * 1,040 lots whose fare text does parse (measured over the shipped `lots.json`,
  * 2026-09-06).
@@ -197,7 +211,77 @@ function usableProbability(p: number | null): number | null {
 }
 
 /**
+ * What a failed attempt forces you to do next, in NT$.
+ *
+ * The cost of arriving to find no space is not just the time spent circling --
+ * you still have to get to a car park that does have one, and pay for it. That
+ * second half varies enormously by where you are: failing in Xinyi costs a
+ * couple of minutes, failing in Beitou can cost a kilometre. A single tuned
+ * constant cannot express that, which is why this is derived from the roster
+ * being ranked rather than chosen.
+ *
+ * The cheapest *reliable* lot, scored the simple way. Preferring a reliable one
+ * matters: a fallback you might also be turned away from is not a fallback, and
+ * the recursion that would properly account for that has to stop somewhere.
+ * Stopping after one step is the honest approximation, and it is a conservative
+ * one -- the true cost of a chain of failures is higher, never lower.
+ *
+ * When nothing clears `RELIABLE_P` the cheapest lot with any forecast is used
+ * instead. That is an incoherent fallback in principle -- it may itself be full
+ * -- but it is the best available, and it keeps the ordering meaningful in the
+ * one situation where the ranking matters most, which is a neighbourhood where
+ * everything is nearly full.
+ *
+ * Note that the best reliable lot's own fallback is itself. That is harmless:
+ * it is weighted by `1 - p`, which is at most `1 - RELIABLE_P` for exactly the
+ * lots this can happen to, so it can move that lot's score by no more than a
+ * tenth of one circling penalty. Paying for a second pass to remove a rounding
+ * error would be the wrong trade.
+ */
+function fallbackCost(
+  scored: readonly { probability: number | null; certain: number }[],
+): number {
+  let reliable = Infinity;
+  let anyForecast = Infinity;
+  for (const s of scored) {
+    if (s.probability === null) continue;
+    const simple = s.certain + (1 - s.probability) * CIRCLING_PENALTY_MIN * TIME_VALUE;
+    if (simple < anyForecast) anyForecast = simple;
+    if (s.probability >= RELIABLE_P && simple < reliable) reliable = simple;
+  }
+  if (Number.isFinite(reliable)) return reliable;
+  if (Number.isFinite(anyForecast)) return anyForecast;
+  // Nothing has a forecast at all, so every lot is about to score `null` anyway
+  // and this value reaches no arithmetic that survives.
+  return 0;
+}
+
+/**
  * Score every lot and sort by ascending expected cost.
+ *
+ * `cost` is the expected cost of the whole trip in NT$, and is meant literally:
+ * with probability `p` you park here and pay the walk and the fare, and with
+ * probability `1 - p` you pay the circling penalty and then the cost of going
+ * somewhere that has a space. That is one arithmetic statement of what a driver
+ * is choosing between, and it is why the two branches carry different money --
+ * you do not pay this car park's fare for a space it did not have.
+ *
+ * It did not always say that. Until 2026-09-09 the score was `walk + fare +
+ * (1 - p) x circling`: it charged the fare unconditionally and never charged
+ * the trip a failure forces, so the entire probability range was worth one
+ * circling penalty -- NT$60, which is also 12 minutes of walking. Being a
+ * kilometre closer therefore cancelled being certainly full, and
+ * `scripts/probe-ranker.py` found 89 orderings in the live roster that said so,
+ * including a lot at P=1% ranked above one at P=100%. For a project whose whole
+ * claim is that it ranks by probability, that was the wrong bug to have.
+ *
+ * The new form reduces to the old one exactly where it should: at `p = 1` the
+ * failure branch vanishes and the score is the walk plus the fare, which is
+ * simply what the driver pays.
+ *
+ * Price still outweighs walking distance for most realistic pairs, which is
+ * deliberate and ratified -- see `EXPECTED_HOURS`. This changes only what
+ * probability is worth against both of them.
  *
  * Lots with no forecast are kept and ranked last -- never dropped. Silently
  * removing a car park is a worse failure than showing it with "no data": the
@@ -211,35 +295,44 @@ export function rankLots(input: RankInput): Ranked[] {
     const walkMin = walkMinutes(meters);
     const money = priceOf(lot.p);
     const probability = usableProbability(input.probability(index, input.horizonMin));
-
-    // The two terms that do not depend on P -- the whole story for a lot whose
+    // What parking *here* costs once you are in: the whole story for a lot whose
     // probability is unknown, and the sort key within that group.
     const certain = walkMin * TIME_VALUE + money.fee;
-    const risk = probability === null ? null : (1 - probability) * CIRCLING_PENALTY_MIN * TIME_VALUE;
-
-    const row: Ranked = {
-      lot,
-      id: lot.id,
-      index,
-      probability,
-      hourly: money.hourly,
-      perEntry: money.perEntry,
-      priceKnown: money.priceKnown,
-      meters,
-      walkMin,
-      cost: risk === null ? null : certain + risk,
-    };
-    return { row, certain };
+    return { lot, index, meters, walkMin, money, probability, certain };
   });
 
-  scored.sort((a, b) => {
+  // One scalar for the whole ranking, computed before any lot is scored: the
+  // alternative a driver falls back to does not depend on which lot they tried.
+  const fallback = fallbackCost(scored);
+
+  const rows = scored.map((s) => {
+    const row: Ranked = {
+      lot: s.lot,
+      id: s.lot.id,
+      index: s.index,
+      probability: s.probability,
+      hourly: s.money.hourly,
+      perEntry: s.money.perEntry,
+      priceKnown: s.money.priceKnown,
+      meters: s.meters,
+      walkMin: s.walkMin,
+      cost:
+        s.probability === null
+          ? null
+          : s.probability * s.certain +
+            (1 - s.probability) * (CIRCLING_PENALTY_MIN * TIME_VALUE + fallback),
+    };
+    return { row, certain: s.certain };
+  });
+
+  rows.sort((a, b) => {
     const aUnknown = a.row.cost === null;
     const bUnknown = b.row.cost === null;
     if (aUnknown !== bUnknown) return aUnknown ? 1 : -1;
     return (a.row.cost ?? a.certain) - (b.row.cost ?? b.certain);
   });
 
-  return scored.map((s) => s.row);
+  return rows.map((r) => r.row);
 }
 
 /**
