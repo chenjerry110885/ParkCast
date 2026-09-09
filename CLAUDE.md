@@ -88,6 +88,28 @@ than no price: **unknown must be a first-class value.** The UI shows it as unkno
 drops the price term for that lot — never substitutes zero, never substitutes an average, never
 guesses.
 
+### Ranker calibration — ratified and open parts
+
+**Price outweighing walking distance is intended (ratified 2026-09-07).** Between two car parks
+that both have a space, a driver takes the cheaper one. Measured across four real destinations,
+the top ten results differ by at most 9 points of probability but by a factor of three in price,
+so price and walking are the live variables. Do not "fix" this.
+
+**Price outweighing *probability* is a separate matter and is currently a defect.**
+`CIRCLING_PENALTY_MIN` is 12 minutes, so the whole probability range 0→1 is worth NT$60 — which
+is also 12 minutes of walking, **960 m on foot**, or NT$30/hour of price. Being a kilometre closer
+therefore cancels being certainly full.
+
+`scripts/probe-ranker.py` measures this against the live artifacts. Measured 2026-09-07: the
+forecast is **bimodal, not saturated** — 15.6% of lots below 50%, 81.7% at or above 90%, only 2.7%
+in between — and searching all 168 tight destinations found **89 inversions**, including a lot at
+**P=1% ranked 9th, above one at P=100%**. Accounting for the fact that a failed attempt must still
+reach the alternative, the risky lot costs 168.8 against the reliable option's 110.0, while the
+shipped model scores them 109.4 and 110.0.
+
+Re-run the probe before and after any change to the four ranker constants. It exits non-zero when
+an inversion exists.
+
 ### The app is bilingual: English and 繁體中文
 
 Required, and it shapes the artifact format rather than being a later polish pass. The upstream feed

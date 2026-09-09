@@ -46,6 +46,17 @@ export const TIME_VALUE = 5;
  * typical Taipei short-stay: a meal, a film, a shopping trip. It converts an
  * hourly rate into the money actually spent, so a cheap lot's advantage is
  * weighed at the size it really has.
+ *
+ * A consequence, raised as a question and **ratified 2026-09-07**: at two hours,
+ * price outweighs walking distance for most realistic pairs of lots. That is
+ * deliberate. Between two car parks that both have a space, a driver takes the
+ * cheaper one, and the measured spread bears the ordering out -- across four
+ * real destinations the top ten differ by at most 9 points of probability but by
+ * a factor of three in price, so price and walking *are* the live variables and
+ * a ranking that ignored them would be ignoring the whole decision.
+ *
+ * This says nothing about price versus *probability*. See
+ * `CIRCLING_PENALTY_MIN`, and `scripts/probe-ranker.py`, which measures it.
  */
 export const EXPECTED_HOURS = 2;
 
