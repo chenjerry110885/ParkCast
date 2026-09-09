@@ -60,7 +60,7 @@ the time of writing:
 | Lots forecast every 5 min | **1,077** × 24 horizons (+5 to +120 min) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **33 KB gzipped**, both files |
-| Tests | **258** Python · **165** TypeScript |
+| Tests | **258** Python · **186** TypeScript |
 
 Plans 1 through 3d are complete: the collector, the forecast grid, the ranked list, the map and
 time-scrubber, search, and an installable offline-capable app. The trained model and its evaluation
@@ -202,7 +202,7 @@ npm run dev --prefix web
 
 ```bash
 python -m pytest          # 258
-npm test --prefix web     # 165
+npm test --prefix web     # 186
 ```
 
 ---

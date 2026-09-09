@@ -175,6 +175,11 @@ rollover ordering: `run_forever` archives completed days *before* pruning, so th
 2026-09-07 sitting past the 48-hour window were compacted to Parquet at 08:06:43 on resume rather
 than deleted.
 
+**Planned, not yet done (decided 2026-09-09):** move the collector to a spare desktop that stays
+powered on. The service is already a Docker container with a bind-mounted `data/`, so the move is
+`docker compose up -d --build` on the other machine plus a copy of `data/`. Until then the gaps
+above keep accruing, and the corpus is the only thing in this project that cannot be rebuilt.
+
 **Non-negotiable:** the collector runs from day one. Every day it is not running is a
 training day that cannot be recovered.
 
