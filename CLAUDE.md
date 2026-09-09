@@ -135,10 +135,28 @@ with a card and its budget alerts explicitly *do not* cap spending; Oracle's alw
 documents idle reclamation that this workload trips on every criterion.
 
 **Consequence that must be disclosed, not hidden.** Whenever the machine sleeps, collection stops.
-2026-09-05 lost ~10.7 hours (~129 ticks) that way. These gaps are **time-correlated**, not random —
-hours the machine is habitually asleep will have thin or empty climatology buckets. Plan 4 must
-report per-bucket support alongside its skill numbers, and the README must state the limitation.
-`restart: unless-stopped` already brings the collector back on boot, so only genuine downtime is lost.
+Measured 2026-09-09 with `scripts/corpus-coverage.py`, over the first six days:
+
+| day | slots of 288 | |
+|---|---|---|
+| 2026-09-04 | 66 | 23% (started mid-day) |
+| 2026-09-05 | 158 | 55% |
+| 2026-09-06 | 287 | **100%** |
+| 2026-09-07 | 128 | 44% |
+| 2026-09-08 | **0** | nothing at all |
+| **overall** | **640 / 1,728** | **37%** |
+
+The gaps are **time-correlated, not random**, and the shape is the problem rather than the volume:
+**12:00–14:30 was collected on one day in six** — the lunch-and-errands window, when parking is
+most contested and the app is most wanted. Plan 4 must report per-bucket support alongside every
+skill number; a citywide average will otherwise lean on the hours that happened to be collected.
+
+`restart: unless-stopped` only fires when the container *exits*. A sleeping host does not exit it —
+the process resumes mid-`sleep()` on wake, which is what happened on 2026-09-09 after a 44-hour
+suspend. **Do not claim the restart policy covers this; it does not.** What did work is the
+rollover ordering: `run_forever` archives completed days *before* pruning, so the 150,312 rows for
+2026-09-07 sitting past the 48-hour window were compacted to Parquet at 08:06:43 on resume rather
+than deleted.
 
 **Non-negotiable:** the collector runs from day one. Every day it is not running is a
 training day that cannot be recovered.

@@ -50,12 +50,14 @@ arrival-time forecast is the same machinery extended.
 
 ## Status
 
-Running continuously since 2026-09-04. Live figures at the time of writing:
+Collecting since 2026-09-04, **though not continuously — see the limitations below.** Figures at
+the time of writing:
 
 | | |
 |---|---|
-| Observations collected | **640,814** usable, across 594 five-minute ticks |
-| Lots forecast every 5 min | **1,075** × 24 horizons (+5 to +120 min) |
+| Observations collected | **749,102**, across 640 five-minute ticks |
+| Collection coverage | **37%** of elapsed time (`python scripts/corpus-coverage.py`) |
+| Lots forecast every 5 min | **1,077** × 24 horizons (+5 to +120 min) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **33 KB gzipped**, both files |
 | Tests | **258** Python · **165** TypeScript |
@@ -112,11 +114,27 @@ Three share one interface, so a trained model can be scored against them on iden
 
 These are the parts most worth reading.
 
-**The corpus has time-correlated gaps.** The collector runs on a laptop, not a cloud host — a
-deliberate choice under a hard no-cost, no-new-attack-surface constraint. When the machine sleeps,
-collection stops. 2026-09-05 lost ~10.7 hours that way. Those gaps are **not random**: hours the
-machine is habitually asleep will have thin or empty climatology buckets, so the evaluation must
-report per-bucket support alongside any skill number.
+**The corpus has time-correlated gaps, and they are worse than "some missing data".** The
+collector runs on a laptop, not a cloud host — a deliberate choice under a hard no-cost,
+no-new-attack-surface constraint. When the machine sleeps, collection stops. Measured over the
+first six days:
+
+```
+2026-09-04     66/288   23%  .....................................###########
+2026-09-05    158/288   55%  #+####+###########+.....................########
+2026-09-06    287/288  100%  ######+#########################################
+2026-09-07    128/288   44%  ######+######..+###+###+........................
+2026-09-08      0/288    0%  ................................................
+```
+
+**37% of elapsed five-minute slots.** One whole day missing. And the gaps are emphatically not
+random: **12:00–14:30 was collected on one day in six** — the lunch-and-errands window, which is
+exactly when a driver most wants this app and when parking is most contested.
+
+That is a sampling problem, not a volume problem, and no amount of further collection fixes the
+part already lost. Any evaluation has to report per-bucket support next to its skill number, and a
+citywide average that quietly leans on the hours that *were* collected would be a much prettier
+number than the data supports. `python scripts/corpus-coverage.py` regenerates the table above.
 
 **The target is saturated.** 85–92% of lots have a space at any given hour. A citywide Brier score is
 therefore dominated by easy cases, and climatology is a genuinely strong baseline. Any model claim
