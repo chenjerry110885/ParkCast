@@ -1,7 +1,7 @@
 # Moving the collector to another machine
 
-The collector currently runs on a laptop that sleeps, and the corpus shows it: 37% coverage over
-the first six days, with 12:00–14:30 captured on one day in six (`python scripts/corpus-coverage.py`).
+The collector currently runs on a laptop that sleeps, and the corpus shows it: **34.4% coverage**
+over seven days, with **12:00–14:30 captured on one day in seven** (`python scripts/corpus-coverage.py`).
 Moving it to a machine that stays on is the fix. This is the runbook.
 
 It is written to be followed by someone — or some session — with no memory of how the project got
@@ -14,7 +14,7 @@ here. The repository is the handoff.
 | | how | notes |
 |---|---|---|
 | Code, docs, scripts, `CLAUDE.md` | **git** | 114 tracked files. `git clone` is the whole story. |
-| `data/` | **by hand** | ~62 MB. **Irreplaceable — see below.** |
+| `data/` | **by hand** | 40 MB, **2.6 MB zipped** — SQLite is mostly empty pages. **Irreplaceable — see below.** |
 | `web/public/basemap/taipei.pmtiles` | regenerate | 24 MB, `node scripts/build-basemap.mjs` |
 | `web/public/artifacts/` | regenerate | `node scripts/sync-artifacts.mjs`, dev only |
 
@@ -83,9 +83,15 @@ only wanted if you also intend to run the web app or the scripts there.
 ```bash
 git clone https://github.com/chenjerry110885/ParkCast.git
 cd ParkCast
-# put the copied data/ directory here, at the repo root, before starting anything
+# unzip the archive here, at the repo root: it restores data/ plus the manifest
+tar -xf parkcast-data-<date>.zip          # or right-click -> Extract All
+python scripts/verify-corpus.py           # must print "Safe to start the collector"
 docker compose -f docker/docker-compose.yml up -d --build
 ```
+
+**Do not skip the verify step, and do not start the collector if it fails.** Once the collector is
+running it writes into `hot.sqlite`, and a damaged file becomes a damaged file with new data on top
+of it. Re-copy from the source instead, which is still intact because you left it alone.
 
 `docker-compose.yml` bind-mounts `../data` and sets `TZ: Asia/Taipei`. There are no ports, no
 secrets and no environment to configure. `restart: unless-stopped` brings it back after a reboot.
@@ -102,6 +108,22 @@ Within about five minutes the log should show a `tick data_ts=… rows=…` foll
 machine, give or take the minutes the collector was down. **If coverage is lower, stop and work out
 why before letting it run** — a fresh `hot.sqlite` alongside intact Parquet files looks healthy and
 is not.
+
+#### Why a hash manifest and not just a look at the files
+
+Because the failures are silent. Measured 2026-09-10 on a deliberately damaged copy: one byte
+flipped inside a 26 MB `hot.sqlite`, leaving its size unchanged.
+
+```
+quick_check   : ok
+integrity_chk : ok
+row count     : 64,268     <- the correct number
+```
+
+**SQLite does not checksum page contents**, so a corrupted database reports itself healthy, returns
+the right row count, and hands back one observation that is quietly wrong. `verify-corpus.py`
+caught it in the same run that caught a Parquet file short by a single byte and a deleted artifact.
+Hashing the whole corpus takes about a second.
 
 ---
 
