@@ -174,9 +174,16 @@ structurally — so ParkCast shows a **range** rather than resolving a tier and 
 weekday price on a Sunday. Lots it cannot price show **"price unknown"** and no number at all: a
 wrong price is worse than no price.
 
-**No model yet.** Everything above ships on baselines. The trained model replaces them only if it
-beats *both* on time-split held-out data — and if it does not, that negative result gets published
-as-is.
+**No model yet, and the baselines have now been measured.** `scripts/evaluate-forecast.py` runs a
+leak-free, time-split, walk-forward backtest. First result (2026-09-10): the shipped blend beats
+both baselines out to about 15 minutes — **+7.6% Brier skill over persistence at the app's default
+horizon** — and is *worse* than persistence beyond 30 minutes.
+
+The cause is measurable rather than mysterious: not one prediction had six or more training
+observations behind its climatology bucket, because buckets are 30-minutes-of-*week* and the
+training window was 2.2 days. **Climatology cannot work on less than a week of data.** The number
+to re-run, not to defend — and it is published here before it is flattering, which was the point of
+protecting the evaluation from scope cuts.
 
 ---
 

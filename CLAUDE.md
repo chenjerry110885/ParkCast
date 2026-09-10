@@ -3,6 +3,8 @@
 Probabilistic parking availability forecasting for Taipei. Predicts **P(有位)** at the
 user's *arrival time* instead of displaying stale current counts.
 
+- **Start here:** [`docs/state-of-play.md`](docs/state-of-play.md) — where the project is right now,
+  the first forecast evaluation, which machine collects, and what to do next
 - **Design spec:** [`docs/superpowers/specs/2026-09-04-parkcast-design.md`](docs/superpowers/specs/2026-09-04-parkcast-design.md) — read this before implementing anything
 - **Repo:** https://github.com/chenjerry110885/ParkCast (public)
 - **Commit identity:** `Jerry Chen <chenjerry1108@gmail.com>` (set as **local** config; global stays as the work address)
@@ -87,6 +89,38 @@ parsing is not good enough. The ranker shows price as a visible column, so a wro
 than no price: **unknown must be a first-class value.** The UI shows it as unknown and the ranker
 drops the price term for that lot — never substitutes zero, never substitutes an average, never
 guesses.
+
+### The forecast has been evaluated (2026-09-10) — it does not pass its own gate everywhere
+
+`python scripts/evaluate-forecast.py`. Time-split, walk-forward, leak-free by the train/test
+contract in `forecast.py`. Full numbers and caveats in [`docs/state-of-play.md`](docs/state-of-play.md).
+
+**Citywide the shipped Blend loses to persistence** (Brier 0.0249 vs 0.0239). Split by horizon, the
+aggregate turns out to hide a crossover:
+
+| horizon | persistence | blend | blend vs persistence |
+|---|---|---|---|
+| 5 min | 0.0101 | 0.0095 | **+5.6%** |
+| 15 min | 0.0187 | 0.0173 | **+7.6%** |
+| 30 min | 0.0243 | 0.0246 | −1.2% |
+| 60 min | 0.0328 | 0.0367 | −11.9% |
+| 120 min | 0.0410 | 0.0452 | −10.2% |
+
+Same shape on the 234 hard lots. **The forecast beats both baselines to ~15–20 min and is worse
+than "is it free now?" beyond 30.** The app's default horizon (15) sits inside the winning band.
+
+**The cause is structural, not a bad method.** Zero predictions had ≥6 training observations behind
+their climatology bucket (111,284 had none at all). Buckets are 30-minutes-*of-week* and recur
+weekly, so a 2.2-day training window visits each at most once. **Climatology cannot work on less
+than a week of data.** Re-run the evaluation after 3–4 weeks of desktop collection before drawing
+any conclusion about the method — and before training a model, which would learn from the same thin
+data and be measured against a strong persistence baseline.
+
+Calibration is sound where the mass is: the 0.9–1.0 band holds 145,365 of 169,542 predictions and
+says 0.988 against 0.986 observed.
+
+**Do not cap the horizon slider to improve the metric.** Deleting a feature to flatter a number is
+the opposite of how this project has handled every other inconvenient measurement.
 
 ### Ranker calibration — ratified and open parts
 
