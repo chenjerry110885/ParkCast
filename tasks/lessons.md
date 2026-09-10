@@ -136,3 +136,28 @@ answer, which is the expensive kind.
 port, profile and process per run; assert a control that is *expected to fail* and confirm it
 does; and never verify a caching change against a server that cannot 404. If an experiment
 reports "no difference", suspect the rig before believing the result.
+
+### L006 amendment — `document.hidden` is a proxy, and it lies (2026-09-10)
+
+Plans 3c and 3d both recorded that a hidden Browser pane "sets `document.hidden`, so
+`requestAnimationFrame` never fires", and that taking a screenshot forces real frames. Both
+halves are wrong, and following them wastes exactly the time they were written to save.
+
+Measured while reviewing the app on 2026-09-10, with a blank map on screen:
+
+```
+hidden: false          visibility: "visible"
+rafFiredWithin600ms: FALSE
+webglContextLost: false     canvas 1084x604     MapLibre mounted
+```
+
+The page reported itself visible, a screenshot had already been taken, and frames still were not
+being produced — the tool itself then said so plainly: *"The Browser pane is currently hidden. The
+page is not rendered while it is not displayed."* Every DOM-level thing worked; only WebGL was
+blank, because WebGL is the one thing that needs a frame.
+
+**Rule:** probe the property you actually depend on, not a flag that usually correlates with it.
+"Will this paint?" is answered by scheduling a `requestAnimationFrame` and seeing whether it fires,
+never by reading `document.hidden`. And when a canvas is blank while the DOM around it is correct,
+suspect the compositor before the code: check `rAF`, `isContextLost()` and the network panel — if
+tiles are arriving as `206`s, the app is fine and the rig is not.
