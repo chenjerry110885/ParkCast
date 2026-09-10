@@ -60,11 +60,12 @@ the time of writing:
 | Lots forecast every 5 min | **1,077** × 24 horizons (+5 to +120 min) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **33 KB gzipped**, both files |
-| Tests | **258** Python · **186** TypeScript |
+| Tests | **275** Python · **186** TypeScript |
 
 Plans 1 through 3d are complete: the collector, the forecast grid, the ranked list, the map and
-time-scrubber, search, and an installable offline-capable app. The trained model and its evaluation
-(Plan 4) are still to come, and need weeks of collected data before a comparison means anything.
+time-scrubber, search, and an installable offline-capable app. **The forecast has now been
+evaluated** — see the limitations below for what it found. A *trained* model is still to come, and
+deliberately so: the corpus needs weeks more before beating the baselines would mean anything.
 
 ---
 

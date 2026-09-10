@@ -8,7 +8,7 @@ Written for a session starting cold. `CLAUDE.md` has the standing facts; this ha
 ## Where the project is
 
 Plans 1 through 3d are complete: collector, forecast grid, ranked list, map, time-scrubber,
-search, and an installable offline-capable PWA. **275 Python tests, 181 TypeScript.** The app
+search, and an installable offline-capable PWA. **275 Python tests, 186 TypeScript.** The app
 works end to end and has never been deployed.
 
 The forecast has now been **evaluated for the first time** (below). That is the newest and most
