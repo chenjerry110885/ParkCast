@@ -1194,8 +1194,8 @@ Run by the controller. Re-read each file before editing. Keep the 2026-09-10 eva
 
 ### Task 7: Hand back
 
-- [ ] Summarise the change and its measured effect for the user.
-- [ ] **Ask** whether to commit (list the proposed messages — no `Co-Authored-By`), and whether to deploy to the collector: `docker compose -f docker/docker-compose.yml up -d --build --force-recreate` just after a tick (minute ≡1 mod 5, around second 40), then confirm the next two ticks log `published N lots x 24 horizons, M not updating` and the row count keeps growing. Nothing is committed or deployed without a yes.
+- [x] Summarise the change and its measured effect for the user.
+- [x] **Ask** whether to commit (list the proposed messages — no `Co-Authored-By`), and whether to deploy to the collector: `docker compose -f docker/docker-compose.yml up -d --build --force-recreate` just after a tick (minute ≡1 mod 5, around second 40), then confirm the next two ticks log `published N lots x 24 horizons, M not updating` and the row count keeps growing. Nothing is committed or deployed without a yes.
 
 ---
 
@@ -1243,3 +1243,5 @@ Executed 2026-09-14 on branch `feat/not-updating-lots`, subagent-driven: a fresh
 It also corrected one of the controller's Task 3 rulings: `run_forever` publishes before it prunes, so the first publish after a gap longer than 48 h does not work from an empty store, and there serving can withhold what the replay does not.
 
 **Deferred by the final review** (recorded, not done): a gap-aware rule that ends runs at collector gaps and requires ticks across a silent period; measuring coverage against the ticks the store holds rather than calendar slots, so a frozen lot that also sends `-9` often is still caught; pruning before the first publish after a restart; and `scripts/refresh-demo-artifacts.py`, which on a stale corpus shows silent lots with very large hour counts.
+
+**Committed and deployed** (2026-09-14): five commits `a24b774..a41539a` on `feat/not-updating-lots`. The collector was rebuilt from `a41539a` and recreated at 09:06:58, six seconds after a tick: no tick missed (the next reading landed exactly 300 s later), the pre-deploy tick's 1,165 rows intact, and the first publish read `published 1090 lots x 24 horizons, 112 not updating`. The first push was refused (403): this desktop's GitHub login is `chenjerry1108`, which has no push access to `chenjerry110885/ParkCast`.

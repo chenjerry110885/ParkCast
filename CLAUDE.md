@@ -129,7 +129,7 @@ withheld (12.2%)** — 49 stuck at a mid value, 46 at 0, 23 at capacity, and 15 
 24 h, which had been getting a climatology-only percentage. Every other grid row is byte-identical to
 the plain Blend grid. The rule costs **0.22 s** per publish — one backwards walk of the primary key;
 a mixed-direction `ORDER BY` would add a sort, and a test pins the query plan — and a steady-state
-publish took 0.73 s.
+publish took 0.73 s. **Deployed to the collector 2026-09-14 09:06; its first live publish withheld 112** — the count moves as feeds freeze and recover.
 
 **`report.find_frozen_lots` is not this, and cannot be used as a detector.** It counts ≥72 identical
 consecutive observations (6 h) and flagged **494 / 468 / 495** lots on the full days 09-11 / 09-12 /

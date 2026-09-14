@@ -58,7 +58,7 @@ Figures at the time of writing (2026-09-14):
 | Readings collected | **1,986,840**, across 1,702 five-minute ticks |
 | Collection coverage | **58.6%** of elapsed five-minute slots through 09-13 (`python scripts/corpus-coverage.py`) — 34.4% when the collector moved off the laptop |
 | Lots forecast every 5 min | **1,090** × 24 horizons (+5 to +120 min) |
-| Lots withheld as *not updating* | **133** on a snapshot at 2026-09-14 01:13 — live once the collector runs Plan 3e (see the limitations) |
+| Lots withheld as *not updating* | **112** at the first live publish (2026-09-14 09:11); 133 on a snapshot at 01:13 — the count moves as feeds freeze and recover (see the limitations) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **34.5 KB gzipped**, both files |
 | Tests | **306** Python · **191** TypeScript |

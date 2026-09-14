@@ -30,10 +30,12 @@ A dated zip of the laptop corpus plus a SHA-256 manifest is at `~/Documents/park
 laptop. `python scripts/verify-corpus.py` checks a copy against the manifest — a **corrupted SQLite
 file passes `PRAGMA integrity_check` and returns the right row count**, so the hash is not paranoia.
 
-**Plan 3e is only live once the collector is rebuilt.** The running container keeps the image it was
-started with. After `docker compose -f docker/docker-compose.yml up -d --build --force-recreate`, the
-publish log line should read `published N lots x 24 horizons, M not updating`; without the suffix,
-the old code is still running.
+**Plan 3e has been live on the collector since 2026-09-14 09:06.** It was rebuilt from `a41539a` and
+recreated just after a tick: no tick was missed (the next reading landed exactly 300 s after the last
+one, whose 1,165 rows were intact), and the first publish read `published 1090 lots x 24 horizons,
+112 not updating`. A container keeps the image it was started with, so after any future change deploy
+with `docker compose -f docker/docker-compose.yml up -d --build --force-recreate` and check the
+publish log line for the new behaviour.
 
 ## Working on a machine that is not the collector
 
@@ -140,8 +142,7 @@ happens 0.105.
 
 ## What to do next
 
-1. **Deploy Plan 3e to the collector** (rebuild and recreate just after a tick; confirm the new log
-   line). Until then the published artifacts still show frozen lots as 0% and 100%.
+1. ~~Deploy Plan 3e to the collector~~ — **done 2026-09-14 09:06**; see "Which machine is which".
 2. **Guard the collector against people.** Proposed, not done: rename the compose project from
    `docker` to `parkcast` (one container recreate); and a small watchdog *outside* the container that
    warns when the newest reading is more than 15 minutes old, since the collector cannot notice its
