@@ -17,10 +17,10 @@ I measured the official feed before writing any code:
 |---|---|
 | Publish cadence | exactly **5 minutes** |
 | Publish lag | **+2:45 to +3:15**, consistently |
-| Lots that change between ticks | **42–47%** |
+| Lots that change between ticks | **40–47%** in the daytime (9–12% overnight) |
 
-So the number an app shows you is already **3–8 minutes old**, and nearly half the city changed
-while you were reading it. A display of "current availability" is a display of the past.
+So the number an app shows you is already **3–8 minutes old**, and in the daytime nearly half the
+city changed while you were reading it. A display of "current availability" is a display of the past.
 
 And "現在有幾位?" — how many spaces are there *now* — is the wrong question anyway. A driver eighteen
 minutes away needs to know about their **arrival time**, and needs to choose between options. That is
@@ -50,22 +50,24 @@ arrival-time forecast is the same machinery extended.
 
 ## Status
 
-Collecting since 2026-09-04, **though not continuously — see the limitations below.** Figures at
-the time of writing:
+Collecting since 2026-09-04 — on a laptop that slept until 2026-09-10, on an always-on desktop since.
+Figures at the time of writing (2026-09-14):
 
 | | |
 |---|---|
-| Observations collected | **749,102**, across 640 five-minute ticks |
-| Collection coverage | **37%** of elapsed time (`python scripts/corpus-coverage.py`) |
-| Lots forecast every 5 min | **1,077** × 24 horizons (+5 to +120 min) |
+| Readings collected | **1,986,840**, across 1,702 five-minute ticks |
+| Collection coverage | **58.6%** of elapsed five-minute slots through 09-13 (`python scripts/corpus-coverage.py`) — 34.4% when the collector moved off the laptop |
+| Lots forecast every 5 min | **1,090** × 24 horizons (+5 to +120 min) |
+| Lots withheld as *not updating* | **133** on a snapshot at 2026-09-14 01:13 — live once the collector runs Plan 3e (see the limitations) |
 | Lots with a parsed price | **97.8%** |
-| Published payload | **33 KB gzipped**, both files |
-| Tests | **275** Python · **186** TypeScript |
+| Published payload | **34.5 KB gzipped**, both files |
+| Tests | **306** Python · **191** TypeScript |
 
-Plans 1 through 3d are complete: the collector, the forecast grid, the ranked list, the map and
-time-scrubber, search, and an installable offline-capable app. **The forecast has now been
-evaluated** — see the limitations below for what it found. A *trained* model is still to come, and
-deliberately so: the corpus needs weeks more before beating the baselines would mean anything.
+Plans 1 through 3e are complete: the collector, the forecast grid, the ranked list, the map and
+time-scrubber, search, an installable offline-capable app, and — 3e — no forecast at all for a car
+park whose feed has stopped updating. **The forecast has been evaluated three times**; see the
+limitations below for what that found. A *trained* model is still to come, and deliberately so: the
+corpus needs weeks more before beating the baselines would mean anything.
 
 ---
 
@@ -76,7 +78,7 @@ Taipei open data ──▶ collector ──▶ SQLite (hot, 48h) ──▶ Parqu
    every 5 min                            │
                                           ▼
                               forecast ──▶ grid.bin  (26 KB)  every 5 min
-                                       └─▶ lots.json (183 KB) on roster change
+                                       └─▶ lots.json (188 KB) every 5 min, cacheable while the roster holds
                                           │
                                           ▼  CDN
                                    browser: ranking, distance,
@@ -89,11 +91,12 @@ under load, and the marginal cost of another user is a CDN hit.
 
 Three decisions make that possible:
 
-- **Precompute the grid.** 1,075 lots × 24 horizons is only 25,800 probabilities. Recomputing all of
+- **Precompute the grid.** 1,090 lots × 24 horizons is only 26,160 probabilities. Recomputing all of
   them every five minutes turns serving into a static lookup — no ML runtime at request time, and
   the model can get better without the app getting slower.
 - **Hot/cold storage split.** SQLite keeps a rolling 48 hours for serving; each completed day is
-  rolled into a compressed Parquet file. About 230 MB per year.
+  rolled into a compressed Parquet file of 229–245 KB, about 85 MB a year. (The raw daily metadata
+  snapshots kept beside them are 2.17 MB a day, and are most of the store.)
 - **Counts, not observations.** Climatology needs `(hits, total)` per time-of-week bucket, and a
   completed day's counts never change — so the corpus folds into a cached counter once per file. Per
   tick work is flat regardless of corpus age.
@@ -108,6 +111,9 @@ Three share one interface, so a trained model can be scored against them on iden
   with a certainty.
 - **Blend** — persistence decaying into climatology with a 30-minute half-life. The current reading
   is strong evidence about the next five minutes and almost none about two hours from now.
+
+None of them answers for a car park whose feed has stopped updating: the grid says "no forecast" for
+it, and the app says why.
 
 ### Ranking
 
@@ -141,10 +147,26 @@ the *position* that had to change.
 
 These are the parts most worth reading.
 
-**The corpus has time-correlated gaps, and they are worse than "some missing data".** The
-collector runs on a laptop, not a cloud host — a deliberate choice under a hard no-cost,
-no-new-attack-surface constraint. When the machine sleeps, collection stops. Measured over the
-first six days:
+**Some car parks' feeds stop updating, and the app used to believe them.** Over 82 hours of unbroken
+collection, 92 car parks did not change their reading once. The ones stuck at 0 free were shown as a
+**0%** chance of a space; the ones stuck at a fixed number or at capacity as **100%** —
+陽明山花鐘停車場 reported all 34 of its spaces free for an entire weekend. For 3–4% of destinations
+the top recommendation was one of these lots. That is exactly the complaint this project exists to
+answer, made by this project.
+
+A car park whose reading has not changed for 24 hours — or that has sent no reading for 24 hours —
+now gets **no forecast**: it stays on the map, grey, and appears in the list when it is near the
+destination, saying **"Not updating · No change in 30 h"**. It is not dropped, because a missing car
+park is invisible and one that says its data is stale is something a driver can act on. It does not
+say "lost connection", because for most of these lots the feed still sends a number; all anyone can
+see is that it stopped moving. On a snapshot at 2026-09-14 01:13 that was **133 of 1,090** car parks.
+The threshold is a judgment: the share of car parks with an unchanged run falls smoothly from 80% at
+3 hours to 9% at 72, so there is no clean line, and a 3-space lot that is genuinely full all day can
+be caught by it.
+
+**The corpus has time-correlated gaps, and the first week's stay.** The collector runs on a local
+machine, not a cloud host — a deliberate choice under a hard no-cost, no-new-attack-surface
+constraint. Until 2026-09-10 that was a laptop, and when it slept, collection stopped:
 
 ```
 2026-09-04     66/288   23%  .....................................###########
@@ -152,39 +174,49 @@ first six days:
 2026-09-06    287/288  100%  ######+#########################################
 2026-09-07    128/288   44%  ######+######..+###+###+........................
 2026-09-08      0/288    0%  ................................................
+2026-09-09     41/288   14%  ................+######.........................
+2026-09-10    170/288   59%  ................##+...##########################   <- desktop from 11:03
+2026-09-11    287/288  100%  #####################################+##########
+2026-09-12    288/288  100%  ################################################
+2026-09-13    262/288   91%  ##########################################+....+   <- a Pause click in Docker Desktop
 ```
 
-**37% of elapsed five-minute slots.** One whole day missing. And the gaps are emphatically not
-random: **12:00–14:30 was collected on one day in six** — the lunch-and-errands window, which is
-exactly when a driver most wants this app and when parking is most contested.
+**58.6% of five-minute slots through 09-13**, up from 34.4% when it moved. The gaps that matter are
+not random: on the laptop **12:00–14:30 was collected on one day in six** — the lunch-and-errands
+window, when a driver most wants this app and parking is most contested. It is now five days in ten.
+That is a sampling problem, not a volume problem, and later collection does not fill a hole in the
+past, so any evaluation reports per-bucket support next to its skill number.
 
-That is a sampling problem, not a volume problem, and no amount of further collection fixes the
-part already lost. Any evaluation has to report per-bucket support next to its skill number, and a
-citywide average that quietly leans on the hours that *were* collected would be a much prettier
-number than the data supports. `python scripts/corpus-coverage.py` regenerates the table above.
+The desktop also showed that an always-on machine is not a monitored one: its only real gap was a
+person pausing the container, which Docker's restart policy cannot see and the collector does not
+log.
 
-**The target is saturated.** 85–92% of lots have a space at any given hour. A citywide Brier score is
-therefore dominated by easy cases, and climatology is a genuinely strong baseline. Any model claim
-has to beat *climatology*, not just persistence, and report skill on the hard subset — lots at or
-near capacity — or the evaluation flatters itself.
+**The target is saturated.** At a typical hour 85–92% of lots have a space — 92–94% at night, dipping
+to 77.5% at Saturday lunchtime. A citywide Brier score is therefore dominated by easy cases, and
+climatology is a genuinely strong baseline. Any model claim has to beat *climatology*, not just
+persistence, and report skill on the hard subset — lots at or near capacity — or the evaluation
+flatters itself.
 
-**Prices are parsed from Chinese prose, and 2.5% cannot be.** The feed gives one free-text string per
+**Prices are parsed from Chinese prose, and 2.2% cannot be.** The feed gives one free-text string per
 lot covering hourly rates, per-entry fees, monthly rentals and several vehicle classes at once.
 Where the rate genuinely varies by weekday, hour or event, the text does not expose the conditions
 structurally — so ParkCast shows a **range** rather than resolving a tier and confidently showing a
 weekday price on a Sunday. Lots it cannot price show **"price unknown"** and no number at all: a
 wrong price is worse than no price.
 
-**No model yet, and the baselines have now been measured.** `scripts/evaluate-forecast.py` runs a
-leak-free, time-split, walk-forward backtest. First result (2026-09-10): the shipped blend beats
-both baselines out to about 15 minutes — **+7.6% Brier skill over persistence at the app's default
-horizon** — and is *worse* than persistence beyond 30 minutes.
+**No model yet, and the baselines have been measured three times — with a result that reversed.**
+`scripts/evaluate-forecast.py` runs a leak-free, time-split, walk-forward backtest, scoring only the
+forecasts the app actually publishes. The first run (2026-09-10) found the shipped blend beating
+persistence out to about 15 minutes and *losing* beyond 30. With three unbroken days of data behind
+it, the latest (2026-09-14) has it ahead at every horizon: **+14.4% Brier skill over persistence at
+the app's default 15 minutes, +21.9% at 120**, and +8.2% at 120 minutes on the lots that actually fill
+up.
 
-The cause is measurable rather than mysterious: not one prediction had six or more training
-observations behind its climatology bucket, because buckets are 30-minutes-of-*week* and the
-training window was 2.2 days. **Climatology cannot work on less than a week of data.** The number
-to re-run, not to defend — and it is published here before it is flattering, which was the point of
-protecting the evaluation from scope cuts.
+That is a second sample, not a proof: the two test periods differ in days and hours, and neither is a
+confidence interval. The likeliest reason — consistent with the data, not yet proven — is each car
+park's own rate, which three unbroken days filled in; the time-of-week buckets still have at most two
+days behind them. The numbers get re-run, not defended, when every bucket has three days behind it
+around 2026-10-01.
 
 ---
 
@@ -193,11 +225,13 @@ protecting the evaluation from scope cuts.
 **Collector** (Python 3.13, Docker):
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d --build
+docker compose -f docker/docker-compose.yml up -d --build --force-recreate
 ```
 
 It polls on the feed's publish phase — minute ≡1 (mod 5), second 30 — so it reads new data about
-twenty seconds after it appears rather than up to five minutes later.
+twenty seconds after it appears rather than up to five minutes later. See
+[`docker/README.md`](docker/README.md) before operating it: a paused container is not covered by the
+restart policy, and `data/` must never be read from the host while it runs.
 
 **Web app** (Node 22):
 
@@ -209,8 +243,8 @@ npm run dev --prefix web
 **Tests:**
 
 ```bash
-python -m pytest          # 258
-npm test --prefix web     # 186
+python -m pytest          # 306 (or in a docker-collector container; see docker/README.md)
+npm test --prefix web     # 191
 ```
 
 ---

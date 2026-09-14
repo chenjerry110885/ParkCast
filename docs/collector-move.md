@@ -1,8 +1,9 @@
 # Moving the collector to another machine
 
-The collector currently runs on a laptop that sleeps, and the corpus shows it: **34.4% coverage**
+The collector used to run on a laptop that sleeps, and the corpus showed it: **34.4% coverage**
 over seven days, with **12:00–14:30 captured on one day in seven** (`python scripts/corpus-coverage.py`).
-Moving it to a machine that stays on is the fix. This is the runbook.
+On 2026-09-10 it moved to a desktop that stays on, by following this runbook. What the move
+measured is at the end, and the runbook is kept for the next one.
 
 It is written to be followed by someone — or some session — with no memory of how the project got
 here. The repository is the handoff.
@@ -80,6 +81,12 @@ up": that is how you end up with two corpora.
 Needs Docker, and that is all — the image builds Python 3.13 itself. Node 22 and a Python venv are
 only wanted if you also intend to run the web app or the scripts there.
 
+**Do not clone into a synced folder.** OneDrive, Dropbox and their kind sync, lock and — with
+files-on-demand — dehydrate files underneath a live bind mount, and `data/` holds a WAL-mode SQLite
+database rewritten every five minutes. On the desktop the first clone landed in a OneDrive folder
+because that was the working directory; every file in it came back with the `ReparsePoint`
+attribute, and the repository was re-cloned to `D:\Projects\ParkCast` before any data arrived.
+
 ```bash
 git clone https://github.com/chenjerry110885/ParkCast.git
 cd ParkCast
@@ -100,7 +107,10 @@ secrets and no environment to configure. `restart: unless-stopped` brings it bac
 
 ```bash
 docker compose -f docker/docker-compose.yml logs --tail 20
-python scripts/corpus-coverage.py | tail -5
+# Coverage, from inside the container: once the collector is writing, never read data/ from the host.
+docker cp scripts/corpus-coverage.py docker-collector-1:/tmp/coverage.py
+docker exec docker-collector-1 python /tmp/coverage.py --cold /app/data/cold --hot /app/data/hot.sqlite | tail -5
+docker exec docker-collector-1 rm -f /tmp/coverage.py
 ```
 
 Within about five minutes the log should show a `tick data_ts=… rows=…` followed by
@@ -108,6 +118,10 @@ Within about five minutes the log should show a `tick data_ts=… rows=…` foll
 machine, give or take the minutes the collector was down. **If coverage is lower, stop and work out
 why before letting it run** — a fresh `hot.sqlite` alongside intact Parquet files looks healthy and
 is not.
+
+Under Git Bash on Windows, put `MSYS_NO_PATHCONV=1` in front of the two `docker exec` lines, or Git
+Bash rewrites `/tmp/coverage.py` into a Windows path. For anything heavier than this, see "Analysing
+the corpus while it runs" in [`docker/README.md`](../docker/README.md).
 
 #### Why a hash manifest and not just a look at the files
 
@@ -143,3 +157,38 @@ Two things change and should be written down rather than assumed:
 
 If the new machine also sleeps, check its power settings before concluding the move worked. One
 full day of coverage is the signal to look for, not one successful tick.
+
+---
+
+## What the move measured (2026-09-10 → 2026-09-13)
+
+**The transfer.** On the laptop the collector turned out to be stopped already, but with a 25 MB
+write-ahead log left behind: the shutdown had not been clean. With nothing writing, the log was
+folded into `hot.sqlite` (64,268 rows before and after, `integrity_check` ok, WAL zero bytes), and
+`data/` was zipped with its manifest inside — 40 MB to 2.6 MB. The transfer stripped the hyphens
+from the outer file names (`parkcastdata20260910.zip`); that was harmless only because the manifest
+travels *inside* the zip under its real name. On the desktop, `verify-corpus.py` found 16 of 16
+files identical, coverage matched the laptop's figure exactly (694 of 2,016 slots), and the first
+tick took the store from 64,268 to 65,439 rows. `archive_day` recognised the moved cold store and
+left `2026-09-09.parquet` untouched.
+
+**The first days.**
+
+| day | slots of 288 | |
+|---|---|---|
+| 2026-09-10 | 170 | 14 on the laptop that morning, then unbroken from 11:03 |
+| 2026-09-11 | 287 | the one missing reading, 18:53, was never published by the city |
+| 2026-09-12 | **288** | |
+| 2026-09-13 | 262 | 26 slots lost to a Docker Desktop **Pause** click, 21:26–23:44 |
+
+Coverage of the whole corpus rose from 34.4% to **58.6%** (1,687 of 2,880 slots through 09-13),
+and 12:00–14:30 went from one collected day in seven to five in ten. The host never slept or
+rebooted and the container never restarted. The poll landed a median **210 s** after each reading
+(p99 256 s, max 406 s). 25 of 989 polls (2.5%) found no new reading on the first try; all but one
+filled on the in-slot retry.
+
+The one real gap was not the machine at all — it was a person pressing Pause, which the restart
+policy cannot see and the collector does not log; see "A pause is not a stop" in
+[`docker/README.md`](../docker/README.md). A powered-on host removes sleep as a cause of gaps. It
+does not remove people, crashes or feed outages, which is why coverage stays something to measure
+rather than assume.
