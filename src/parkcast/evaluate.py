@@ -33,6 +33,8 @@ was checked against the hot store on a day held in both: it recovers the true
 `data_ts` exactly, because the feed publishes on a fixed phase.
 """
 import sqlite3
+from array import array
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -40,7 +42,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from parkcast import config
+from parkcast import config, liveness
 from parkcast.compact import SLOTS_PER_DAY, SLOT_SECONDS, day_bounds
 from parkcast.forecast import Blend, Climatology, Persistence, load_history, week_bucket
 
@@ -167,14 +169,66 @@ def hard_lots(conn, cold_dir: Path | None, *, before_ts: int, threshold: float) 
     }
 
 
+def reading_series(labels: dict[int, dict[str, int]]) -> dict[str, tuple[array, array]]:
+    """Each lot's readings as ascending (data_ts, free_car) arrays, for `withheld_at`.
+
+    `array` rather than lists of tuples: the corpus already sits in memory once
+    as `labels`, and a second copy of it as Python objects would cost far more
+    than the lookups it serves.
+    """
+    series: dict[str, tuple[array, array]] = {}
+    for ts in sorted(labels):
+        for lot_id, free in labels[ts].items():
+            stamps, values = series.setdefault(lot_id, (array("q"), array("q")))
+            stamps.append(ts)
+            values.append(free)
+    return series
+
+
+def withheld_at(series, *, origin: int, window_start: int) -> dict[str, int]:
+    """The lots the app would have shown as not updating when publishing `origin`.
+
+    The serving rule in `liveness`, replayed on what the collector's hot store
+    would have held then -- readings in [window_start, origin] and nothing
+    later -- so deciding to withhold a lot can no more see the future than the
+    forecasters can.
+    """
+    withheld = {}
+    for lot_id, (stamps, values) in series.items():
+        lo = bisect_left(stamps, window_start)
+        hi = bisect_right(stamps, origin)
+        run = liveness.unchanged_run((stamps[i], values[i]) for i in range(hi - 1, lo - 1, -1))
+        since = liveness.withheld_since(run, as_of=origin, window_start=window_start)
+        if since is not None:
+            withheld[lot_id] = since
+    return withheld
+
+
 @dataclass
 class Result:
     origins: list[int] = field(default_factory=list)
     by_model: dict[str, list[Prediction]] = field(default_factory=dict)
+    #: (origin, horizon, lot) labels skipped because the app showed the lot as
+    #: not updating at that origin: no forecast was published, so none is scored.
+    withheld: int = 0
 
     @property
     def n_predictions(self) -> int:
         return sum(len(v) for v in self.by_model.values())
+
+
+def _hot_window_start(stamps: Sequence[int], origin: int) -> int:
+    """The oldest reading the collector's hot store would still hold when publishing `origin`.
+
+    `stamps` is the whole corpus timeline, including readings after `origin` --
+    the backtest needs those as labels -- so the search is bounded at the
+    origin and the answer is never later than it. With nothing collected in the
+    retention window the store would be empty; `origin` itself is returned, a
+    window with nothing in it, which withholds nothing, as the serving path would.
+    """
+    hi = bisect_right(stamps, origin)
+    first = bisect_left(stamps, origin - config.HOT_RETENTION_SEC, 0, hi)
+    return stamps[first] if first < hi else origin
 
 
 def backtest(
@@ -183,6 +237,7 @@ def backtest(
     *,
     origins: Iterable[int],
     horizons: Sequence[int],
+    withhold_not_updating: bool = True,
 ) -> Result:
     """Score every forecaster at every origin, on identical inputs.
 
@@ -190,9 +245,16 @@ def backtest(
     in predictions. All three forecasters share that history, which is what
     makes the comparison fair: they differ in what they do with the data, never
     in which data they got.
+
+    `withhold_not_updating` replays the publishing rule in `liveness`: a lot the
+    app would have shown as not updating at an origin is scored by no
+    forecaster there, and counted in `Result.withheld` instead. On by default,
+    because the evaluation measures what ships; off only to compare.
     """
     labels = load_labels(conn, cold_dir)
     result = Result(by_model={name: [] for name, _ in FORECASTERS})
+    stamps = sorted(labels)
+    series = reading_series(labels) if withhold_not_updating else {}
 
     for origin in origins:
         # +1 so the reading *at* the origin is inside the history -- it is the
@@ -201,6 +263,10 @@ def backtest(
         history = load_history(conn, cold_dir=cold_dir, before_ts=origin + 1)
         if not history.counts.glob[1]:
             continue
+        withheld: dict[str, int] = {}
+        if withhold_not_updating and stamps:
+            window_start = _hot_window_start(stamps, origin)
+            withheld = withheld_at(series, origin=origin, window_start=window_start)
         models = [(name, cls(history)) for name, cls in FORECASTERS]
         result.origins.append(origin)
 
@@ -212,6 +278,9 @@ def backtest(
             bucket_counts = history.counts.bucket
             key_bucket = week_bucket(target)
             for lot_id, free in actual.items():
+                if lot_id in withheld:
+                    result.withheld += 1
+                    continue
                 outcome = 1 if free >= 1 else 0
                 support = bucket_counts.get((lot_id, key_bucket), (0, 0))[1]
                 for name, model in models:

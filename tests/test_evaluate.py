@@ -7,25 +7,31 @@ does not crash, does not look wrong, and invalidates every claim built on it.
 """
 import pytest
 
-from parkcast import store
+from parkcast import config, store
 from parkcast.compact import compact_day, day_bounds
 from parkcast.evaluate import (
     Prediction,
+    _hot_window_start,
     backtest,
     brier,
     calibration,
     choose_origins,
     hard_lots,
     load_labels,
+    reading_series,
     skill,
+    withheld_at,
 )
 from parkcast.feed import FeedSnapshot, Observation
+from parkcast.liveness import not_updating
 from datetime import date
 
 
 @pytest.fixture
 def conn(tmp_path):
     c = store.connect(tmp_path / "t.sqlite")
+    # Some tests below write hundreds of ticks; durability is not under test.
+    c.execute("PRAGMA synchronous=OFF")
     yield c
     c.close()
 
@@ -210,3 +216,97 @@ def test_backtest_scores_every_forecaster_on_the_same_inputs(conn):
     assert counts["persistence"] == counts["climatology"] == counts["blend"] == 1, (
         "a fair comparison needs the same predictions from each, not a different sample"
     )
+
+
+# --- the not-updating rule -------------------------------------------------
+
+
+def test_a_lot_not_updating_at_the_origin_is_withheld_from_every_forecaster(conn):
+    """The app publishes no forecast for it, so there is nothing to score -- and
+    persistence is perfect on a reading that never moves, so scoring it anyway
+    flatters the baseline."""
+    origin = 1_700_000_000
+    for i in range(26 * 12 + 1):
+        write(conn, origin - i * 300, lot="FROZEN", free=34)
+        write(conn, origin - i * 300, lot="LIVE", free=i % 5)
+    write(conn, origin + 900, lot="FROZEN", free=34)
+    write(conn, origin + 900, lot="LIVE", free=3)
+
+    result = backtest(conn, cold_dir=None, origins=[origin], horizons=[15])
+    for name, preds in result.by_model.items():
+        assert {x.lot_id for x in preds} == {"LIVE"}, f"{name} scored a withheld lot"
+    assert result.withheld == 1
+
+
+def test_withholding_cannot_see_past_the_origin(conn):
+    """Deciding to withhold is as bound by the cutoff as forecasting is. A lot
+    that froze only *after* the origin was live at it and must be scored."""
+    origin = 1_700_000_000
+    for i in range(6):
+        write(conn, origin - i * 300, lot="A", free=i)
+    for i in range(1, 26 * 12 + 1):
+        write(conn, origin + i * 300, lot="A", free=9)
+
+    result = backtest(conn, cold_dir=None, origins=[origin], horizons=[15])
+    assert result.withheld == 0
+    assert len(result.by_model["blend"]) == 1
+
+
+def test_withholding_can_be_turned_off_to_compare(conn):
+    origin = 1_700_000_000
+    for i in range(26 * 12 + 1):
+        write(conn, origin - i * 300, lot="FROZEN", free=34)
+    write(conn, origin + 900, lot="FROZEN", free=34)
+
+    result = backtest(conn, cold_dir=None, origins=[origin], horizons=[15],
+                      withhold_not_updating=False)
+    assert result.withheld == 0
+    assert len(result.by_model["blend"]) == 1
+
+
+def test_the_hot_window_starts_at_the_oldest_reading_it_would_hold():
+    ret = config.HOT_RETENTION_SEC
+    origin = 1_700_000_000
+    stamps = [origin - ret - 300, origin - ret + 300, origin - 600, origin, origin + 300]
+    assert _hot_window_start(stamps, origin) == origin - ret + 300
+
+
+def test_the_hot_window_never_starts_after_the_origin():
+    """A collector gap longer than the retention window, ending after the origin:
+    nothing was collected in [origin - retention, origin], so the store would be
+    empty. The window must not start in the future."""
+    ret = config.HOT_RETENTION_SEC
+    origin = 1_700_000_000
+    stamps = [origin - ret - 3600, origin + 300, origin + 600]
+    assert _hot_window_start(stamps, origin) == origin
+
+
+def test_a_corpus_younger_than_the_window_starts_at_its_first_reading():
+    origin = 1_700_000_000
+    stamps = [origin - 3600, origin - 300, origin]
+    assert _hot_window_start(stamps, origin) == origin - 3600
+
+
+def test_the_backtest_withholds_exactly_what_publishing_would(conn):
+    """Serving and replay are one rule over two data paths: the hot store
+    (`liveness.not_updating`) and the corpus labels (`withheld_at` from
+    `_hot_window_start`). On a store inside the retention window they must agree
+    lot for lot, down to when each lot last updated."""
+    origin = 1_700_000_000
+    for i in range(30 * 12 + 1):                  # 30 h, inside the 48 h window
+        ts = origin - i * 300
+        write(conn, ts, lot="FROZEN", free=34)
+        write(conn, ts, lot="LIVE", free=i % 5)
+        if i >= 26 * 12:                          # silent for the newest 26 h
+            write(conn, ts, lot="SILENT", free=7)
+        if i % 5 == 0:                            # too sparse to trust
+            write(conn, ts, lot="SPARSE", free=9)
+
+    labels = load_labels(conn, None)
+    lots = ["FROZEN", "LIVE", "SILENT", "SPARSE"]
+    served = not_updating(conn, lots, as_of=origin)
+    replayed = withheld_at(reading_series(labels), origin=origin,
+                           window_start=_hot_window_start(sorted(labels), origin))
+
+    assert served == replayed
+    assert set(served) == {"FROZEN", "SILENT"}, "the comparison must not be vacuous"

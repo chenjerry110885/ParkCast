@@ -53,6 +53,8 @@ def main() -> int:
                     help="share of the collected timespan held out (default 0.30)")
     ap.add_argument("--origins", type=int, default=48, help="how many origins to score")
     ap.add_argument("--every-minutes", type=int, default=30, help="spacing between origins")
+    ap.add_argument("--include-not-updating", action="store_true",
+                    help="also score lots the app shows as not updating (to compare)")
     args = ap.parse_args()
 
     conn = store.connect(config.DB_PATH)
@@ -77,12 +79,18 @@ def main() -> int:
     hard = hard_lots(conn, config.PARQUET_DIR, before_ts=cutoff, threshold=HARD_THRESHOLD)
     print(f"  hard set {len(hard)} lots free <{HARD_THRESHOLD:.0%} of the time in training")
 
-    result = backtest(conn, config.PARQUET_DIR, origins=origins, horizons=HORIZONS)
+    result = backtest(conn, config.PARQUET_DIR, origins=origins, horizons=HORIZONS,
+                      withhold_not_updating=not args.include_not_updating)
     if not any(result.by_model.values()):
         raise SystemExit("no predictions scored -- the test period has no paired labels")
 
     base = sum(p.outcome for p in result.by_model["blend"]) / len(result.by_model["blend"])
     print(f"\n  scored   {len(result.by_model['blend']):,} predictions per forecaster")
+    if args.include_not_updating:
+        print("  withheld nothing -- lots shown as not updating are scored too (--include-not-updating)")
+    else:
+        print(f"  withheld {result.withheld:,} labels for lots the app showed as not updating at "
+              f"their origin (no forecast is published for them, so none is scored)")
     print(f"  base rate {base:.3f} of them had a space "
           f"(a forecast of a flat {base:.3f} scores {base * (1 - base):.4f})")
 
