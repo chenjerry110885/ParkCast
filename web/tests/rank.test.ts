@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { haversineMeters } from "../src/geo";
 import {
   CIRCLING_PENALTY_MIN,
+  DRIVE_MIN_PER_KM,
   EXPECTED_HOURS,
   TIME_VALUE,
   UNKNOWN_RESERVE,
@@ -225,10 +227,12 @@ describe("rankLots: the cost of arriving to find no space", () => {
     const flip = out.find((r) => r.id === "coin-flip")!;
     const far = out.find((r) => r.id === "certain-far")!;
     // Half the time you pay the near lot's own cost; the other half you pay the
-    // circling penalty AND the far lot's cost, having gained nothing.
+    // circling penalty, the drive over to the far lot AND its cost, having
+    // gained nothing.
+    const km = haversineMeters({ lat: 25.05, lon: 121.52 }, { lat: 25.0596, lon: 121.52 }) / 1000;
     expect(flip.cost).toBeCloseTo(
       0.5 * (flip.walkMin * TIME_VALUE + 60) +
-        0.5 * (CIRCLING_PENALTY_MIN * TIME_VALUE + far.cost!),
+        0.5 * (CIRCLING_PENALTY_MIN * TIME_VALUE + DRIVE_MIN_PER_KM * TIME_VALUE * km + far.cost!),
       6,
     );
   });
@@ -266,5 +270,68 @@ describe("rankLots: the cost of arriving to find no space", () => {
     });
     expect(out[0]!.id).toBe("known");
     expect(out[1]!.cost).toBeNull();
+  });
+});
+
+/**
+ * The drive a failure forces.
+ *
+ * Until 2026-09-14 the failure branch charged circling plus the fallback's cost,
+ * and nothing for getting from the car park that turned you away to the one you
+ * fall back to. As `p` falls towards zero a lot's own position then stops
+ * mattering: every hopeless car park in the city scored about the same, cheaper
+ * than a certain space a kilometre out, and they filled the tail of the list
+ * from kilometres away. On the 09:43 grid, 797 of 1,090 destinations had a lot
+ * under 50% more than 1.5 km away in their top 20.
+ */
+describe("rankLots: the drive a failure forces", () => {
+  const priced = (n: number) => ({ k: "exact", lo: n, hi: n });
+  /** The latitude `km` kilometres north of the destination, on its meridian. */
+  const north = (km: number) => at.lat + km / 111.195;
+
+  it("does not let a hopeless lot across the city outrank a sure space nearer", () => {
+    // The Shilin case in miniature: a lot at 2% 5.9 km away ranked above lots
+    // certain to have a space 1.2-1.7 km away. Without the drive it scored
+    // circling plus the fallback, NT$146, against NT$160 for the sure lot.
+    const out = rankLots({
+      destination: at, horizonMin: 15,
+      lots: [lot("fallback", north(0.3), priced(30)),
+             lot("hopeless-far", north(5.9), priced(30)),
+             lot("sure-nearer", north(1.55), priced(30))],
+      probability: (i) => (i === 1 ? 0.02 : 1),
+    });
+    expect(out.map((r) => r.id)).toEqual(["fallback", "sure-nearer", "hopeless-far"]);
+  });
+
+  it("measures that drive from the lot that failed to the lot it falls back to", () => {
+    // Two lots equally far from the destination, equally priced and equally
+    // unlikely, on opposite sides of it. One is beside the car park a driver
+    // would go on to; failing at the other means driving back across town.
+    const out = rankLots({
+      destination: at, horizonMin: 15,
+      lots: [lot("wrong-side", north(-0.8), priced(30)),
+             lot("beside-fallback", north(0.8), priced(30)),
+             lot("fallback", north(1.0), priced(30))],
+      probability: (i) => (i === 2 ? 1 : 0.3),
+    });
+    const order = out.map((r) => r.id);
+    expect(order.indexOf("beside-fallback")).toBeLessThan(order.indexOf("wrong-side"));
+  });
+
+  it("charges the fallback lot nothing for driving to itself", () => {
+    // A roster of one: the lot is its own fallback, and a failure there costs
+    // circling and a second try, not a drive of zero kilometres priced as more.
+    const out = rankLots({
+      destination: at, horizonMin: 15,
+      lots: [lot("only", north(1.0), priced(30))],
+      probability: () => 0.95,
+    });
+    const only = out[0]!;
+    const certain = only.walkMin * TIME_VALUE + 30 * EXPECTED_HOURS;
+    const fallback = certain + (1 - 0.95) * CIRCLING_PENALTY_MIN * TIME_VALUE;
+    expect(only.cost).toBeCloseTo(
+      0.95 * certain + (1 - 0.95) * (CIRCLING_PENALTY_MIN * TIME_VALUE + fallback),
+      6,
+    );
   });
 });

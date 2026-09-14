@@ -8,12 +8,14 @@
  * head -- how likely a space is, how far they then walk, and what it costs --
  * into one comparable number, in NT$.
  *
- *     cost = walkMin * TIME_VALUE
- *          + hourly * EXPECTED_HOURS
- *          + (1 - p) * CIRCLING_PENALTY_MIN * TIME_VALUE
+ *     cost = p * (walkMin * TIME_VALUE + fee)
+ *          + (1 - p) * (CIRCLING_PENALTY_MIN * TIME_VALUE
+ *                       + DRIVE_MIN_PER_KM * TIME_VALUE * km to the fallback lot
+ *                       + the fallback lot's own cost)
  *
- * The third term is the one that converts a probability into a decision: it
- * charges a lot for the risk of arriving and finding nothing.
+ * The second line is the one that converts a probability into a decision: it
+ * charges a lot for the risk of arriving to find nothing, and for everything
+ * that failure then forces. See `rankLots`.
  *
  * `cost` is a *sort key*, not something the UI shows. The spec is explicit that
  * P, walking time and price appear as three separate visible columns and are
@@ -25,10 +27,10 @@ import { haversineMeters, walkMinutes, type LatLon } from "./geo";
 import type { Lot, Price } from "./types";
 
 /* ------------------------------------------------------------------ *
- * The cost model. Four numbers, and every one of them is a judgment
- * call rather than a measurement -- so they live here, named, where a
- * reader can find them and argue with them, instead of inline in an
- * expression where they would quietly become folklore.
+ * The cost model. Every number here is a judgment call rather than a
+ * measurement -- so they live here, named, where a reader can find
+ * them and argue with them, instead of inline in an expression where
+ * they would quietly become folklore.
  * ------------------------------------------------------------------ */
 
 /**
@@ -61,14 +63,47 @@ export const TIME_VALUE = 5;
 export const EXPECTED_HOURS = 2;
 
 /**
- * Minutes lost when you arrive and there is no space: re-routing, driving to
- * the next candidate, and circling once you get there. Twelve minutes is a
- * middling estimate for dense Taipei; it is the most opinionated number here,
- * because it sets the exchange rate between probability and everything else. At
- * these values, a lot that is certain to have a space is worth about 12 extra
- * minutes of walking over one that is certainly full.
+ * Minutes lost on the spot when you arrive and there is no space: noticing,
+ * re-routing, and circling again once you reach the next candidate. Twelve
+ * minutes is a middling estimate for dense Taipei; it is the most opinionated
+ * number here, because it sets the floor of what a failed attempt costs -- NT$60,
+ * or 12 minutes of walking, before the drive to the next candidate and that
+ * candidate's own cost are added.
+ *
+ * The drive is *not* in here. Until 2026-09-14 this comment said it was, but no
+ * single number can hold it -- it is a few hundred metres in Xinyi and several
+ * kilometres on Yangmingshan -- and nothing charged it by distance. It is now
+ * priced separately: see `DRIVE_MIN_PER_KM`.
  */
 export const CIRCLING_PENALTY_MIN = 12;
+
+/**
+ * Minutes of driving per kilometre of straight-line distance: what a failed
+ * attempt is charged for getting from the car park that turned you away to the
+ * one you fall back to.
+ *
+ * Failing leaves you where that car park is, not where you were going, so what
+ * failing costs grows with how far away it is. Leaving the drive out made a
+ * hopeless lot's position irrelevant: as `p` falls towards zero its score tends
+ * to circling plus the fallback, the same anywhere in the city and cheaper than a
+ * certain space a kilometre out. On the 2026-09-14 09:43 grid, 797 of 1,090
+ * destinations had a lot under 50% more than 1.5 km away in their top 20, and
+ * 13 had one under 10% more than 3 km away in their top three.
+ *
+ * 2.4 minutes a straight-line kilometre is 25 km/h as the crow flies -- about
+ * 30 km/h on streets a fifth longer than the straight line, the quick end of
+ * driving across Taipei, so close to the least this drive can cost. A straight
+ * line because the ranker has no road network; the constant absorbs the detour.
+ * The minutes are priced at `TIME_VALUE`, like circling. That rate is meant for
+ * time out of the car and overstates time behind the wheel, while fuel is not
+ * counted at all; one time value keeps the exchange rate with circling where it
+ * was set.
+ *
+ * Like the rest, a judgment and not a measurement, and not one to tune towards
+ * a metric. It is not a knife-edge either: `scripts/probe-ranker.py` reports
+ * what NT$15 and NT$20 a kilometre would do beside it.
+ */
+export const DRIVE_MIN_PER_KM = 2.4;
 
 /**
  * The chance at or above which a car park counts as somewhere you can *plan* to
@@ -232,28 +267,37 @@ function usableProbability(p: number | null): number | null {
  * one situation where the ranking matters most, which is a neighbourhood where
  * everything is nearly full.
  *
+ * It returns where that lot is as well as what it costs, because a failure is
+ * also charged the drive to it -- see `DRIVE_MIN_PER_KM`. One lot for the whole
+ * ranking rather than the best alternative from each lot tried: which reliable
+ * lot is cheapest is decided mostly by its walk to the destination, so it is the
+ * same lot either way, and finding it per lot would compare every pair of car
+ * parks on every move of the time slider.
+ *
  * Note that the best reliable lot's own fallback is itself. That is harmless:
- * it is weighted by `1 - p`, which is at most `1 - RELIABLE_P` for exactly the
- * lots this can happen to, so it can move that lot's score by no more than a
- * tenth of one circling penalty. Paying for a second pass to remove a rounding
- * error would be the wrong trade.
+ * the drive to itself is zero, and the rest is weighted by `1 - p`, which is at
+ * most `1 - RELIABLE_P` for exactly the lots this can happen to, so it can move
+ * that lot's score by no more than a tenth of one circling penalty. Paying for a
+ * second pass to remove a rounding error would be the wrong trade.
  */
 function fallbackCost(
-  scored: readonly { probability: number | null; certain: number }[],
-): number {
-  let reliable = Infinity;
-  let anyForecast = Infinity;
+  scored: readonly { probability: number | null; certain: number; position: LatLon }[],
+): { cost: number; at: LatLon | null } {
+  let reliable: { cost: number; at: LatLon | null } = { cost: Infinity, at: null };
+  let anyForecast: { cost: number; at: LatLon | null } = { cost: Infinity, at: null };
   for (const s of scored) {
     if (s.probability === null) continue;
     const simple = s.certain + (1 - s.probability) * CIRCLING_PENALTY_MIN * TIME_VALUE;
-    if (simple < anyForecast) anyForecast = simple;
-    if (s.probability >= RELIABLE_P && simple < reliable) reliable = simple;
+    if (simple < anyForecast.cost) anyForecast = { cost: simple, at: s.position };
+    if (s.probability >= RELIABLE_P && simple < reliable.cost) {
+      reliable = { cost: simple, at: s.position };
+    }
   }
-  if (Number.isFinite(reliable)) return reliable;
-  if (Number.isFinite(anyForecast)) return anyForecast;
+  if (reliable.at !== null) return reliable;
+  if (anyForecast.at !== null) return anyForecast;
   // Nothing has a forecast at all, so every lot is about to score `null` anyway
   // and this value reaches no arithmetic that survives.
-  return 0;
+  return { cost: 0, at: null };
 }
 
 /**
@@ -261,10 +305,11 @@ function fallbackCost(
  *
  * `cost` is the expected cost of the whole trip in NT$, and is meant literally:
  * with probability `p` you park here and pay the walk and the fare, and with
- * probability `1 - p` you pay the circling penalty and then the cost of going
- * somewhere that has a space. That is one arithmetic statement of what a driver
- * is choosing between, and it is why the two branches carry different money --
- * you do not pay this car park's fare for a space it did not have.
+ * probability `1 - p` you pay the circling penalty, the drive from here to
+ * somewhere that has a space, and the cost of parking there. That is one
+ * arithmetic statement of what a driver is choosing between, and it is why the
+ * two branches carry different money -- you do not pay this car park's fare for
+ * a space it did not have.
  *
  * It did not always say that. Until 2026-09-09 the score was `walk + fare +
  * (1 - p) x circling`: it charged the fare unconditionally and never charged
@@ -279,9 +324,18 @@ function fallbackCost(
  * failure branch vanishes and the score is the walk plus the fare, which is
  * simply what the driver pays.
  *
+ * It was still missing a piece until 2026-09-14: the failure branch charged the
+ * fallback's cost but not the drive to it, as if every failure happened at the
+ * destination. As `p` fell towards zero a lot's own position stopped mattering,
+ * and car parks the model thought hopeless, kilometres away, filled the tail of
+ * 797 of 1,090 lists while the top of every one stayed right -- which is all
+ * the probe was checking. Charging the drive by distance put that at 366, and a
+ * lot under 10% more than 3 km away in a top three at 1 destination instead of
+ * 13, while changing first place for 1. See `DRIVE_MIN_PER_KM`.
+ *
  * Price still outweighs walking distance for most realistic pairs, which is
- * deliberate and ratified -- see `EXPECTED_HOURS`. This changes only what
- * probability is worth against both of them.
+ * deliberate and ratified -- see `EXPECTED_HOURS`. Neither change touched it:
+ * both live in the failure branch, which a certain space never reaches.
  *
  * Lots with no forecast are kept and ranked last -- never dropped. Silently
  * removing a car park is a worse failure than showing it with "no data": the
@@ -291,19 +345,24 @@ function fallbackCost(
  */
 export function rankLots(input: RankInput): Ranked[] {
   const scored = input.lots.map((lot, index) => {
-    const meters = haversineMeters(input.destination, { lat: lot.y, lon: lot.x });
+    const position = { lat: lot.y, lon: lot.x };
+    const meters = haversineMeters(input.destination, position);
     const walkMin = walkMinutes(meters);
     const money = priceOf(lot.p);
     const probability = usableProbability(input.probability(index, input.horizonMin));
     // What parking *here* costs once you are in: the whole story for a lot whose
     // probability is unknown, and the sort key within that group.
     const certain = walkMin * TIME_VALUE + money.fee;
-    return { lot, index, meters, walkMin, money, probability, certain };
+    return { lot, index, position, meters, walkMin, money, probability, certain };
   });
 
-  // One scalar for the whole ranking, computed before any lot is scored: the
-  // alternative a driver falls back to does not depend on which lot they tried.
+  // One fallback for the whole ranking, found before any lot is scored.
   const fallback = fallbackCost(scored);
+  // NT$ to drive from a lot that turned you away to the fallback lot.
+  const drive = (from: LatLon): number =>
+    fallback.at === null
+      ? 0
+      : (DRIVE_MIN_PER_KM * TIME_VALUE * haversineMeters(from, fallback.at)) / 1000;
 
   const rows = scored.map((s) => {
     const row: Ranked = {
@@ -320,7 +379,8 @@ export function rankLots(input: RankInput): Ranked[] {
         s.probability === null
           ? null
           : s.probability * s.certain +
-            (1 - s.probability) * (CIRCLING_PENALTY_MIN * TIME_VALUE + fallback),
+            (1 - s.probability) *
+              (CIRCLING_PENALTY_MIN * TIME_VALUE + drive(s.position) + fallback.cost),
     };
     return { row, certain: s.certain };
   });
