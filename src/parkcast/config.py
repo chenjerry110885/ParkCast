@@ -75,3 +75,21 @@ ARTIFACT_DIR = DATA_DIR / "artifacts"
 # would otherwise replace a 1,088-lot grid with the city losing 96% of its
 # parking -- the same failure the empty guard already covers, one notch down.
 MIN_PUBLISH_LOT_FRACTION = 0.5
+
+# --- feed liveness ---
+# How long a lot may go without an update before its forecast is withheld. A
+# lot's "last update" is the start of its current run of identical readings, or
+# its last reading if it stopped reporting -- see `liveness.last_update`.
+#
+# Measured 2026-09-14 over 82 h of unbroken collection: the longest unchanged
+# run falls smoothly -- 80% of lots have one of 3 h, 28% of 12 h, 12.8% of 24 h,
+# 8.6% of 72 h -- so there is no natural gap to pick. Overnight runs of 6-12 h
+# are ordinary, which is why the daily report's 72-observation
+# `find_frozen_lots` flags ~45% of lots on a full day. 24 h is the shortest
+# window that always spans a daytime period, and a live car park's count moves
+# at least once across one.
+NOT_UPDATING_AFTER_SEC = 24 * 3600
+# A run is only trusted to have been unchanged if readings exist on at least
+# this share of its 5-minute slots. Without it, a lot that read 5 before a long
+# collector outage and 5 again after it would look frozen straight across it.
+NOT_UPDATING_MIN_COVERAGE = 0.5

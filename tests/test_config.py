@@ -31,3 +31,10 @@ def test_climatology_buckets_are_a_whole_number_of_compaction_slots():
         f"CLIMATOLOGY_BUCKET_MIN={config.CLIMATOLOGY_BUCKET_MIN} min is not a "
         f"multiple of the {SLOT_SECONDS}s compaction slot"
     )
+
+
+def test_not_updating_thresholds_are_the_measured_ones():
+    """Measured 2026-09-14 -- see the comment on NOT_UPDATING_AFTER_SEC. A silent
+    edit changes which car parks the app withholds a forecast for."""
+    assert config.NOT_UPDATING_AFTER_SEC == 24 * 3600
+    assert config.NOT_UPDATING_MIN_COVERAGE == 0.5
