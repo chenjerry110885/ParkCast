@@ -8,6 +8,7 @@ from parkcast import artifacts, config, scheduler, store
 from parkcast.collector import TickResult
 from parkcast.compact import day_bounds
 from parkcast.feed import FeedSnapshot, Observation
+from parkcast.grid import UNKNOWN
 from parkcast.metadata import Lot
 from parkcast.scheduler import next_poll_ts, taipei_date
 
@@ -1033,3 +1034,37 @@ def test_publish_artifacts_keeps_a_lot_whose_car_capacity_is_unknown(tmp_path):
     doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
     assert [l["id"] for l in doc["lots"]] == ["A", "UNKNOWNCAP"]
     assert doc["lots"][1]["c"] is None
+
+
+def test_publish_artifacts_withholds_a_lot_that_is_not_updating(tmp_path):
+    """Measured 2026-09-14: 120 of 1,090 published lots had not changed their
+    reading in over 24 hours, and the app gave them a confident 0% or 100%.
+    They stay on the roster -- a missing car park is invisible -- with no
+    forecast in any column, and lots.json says when they last updated."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    conn.execute("PRAGMA synchronous=OFF")    # 313 ticks; durability is not under test
+    start, _ = day_bounds(date(2026, 9, 4))
+    for i in range(26 * 12 + 1):
+        ts = start + i * 300
+        store.insert_snapshot(
+            conn,
+            FeedSnapshot(ts, ts + 200, (Observation("FROZEN", 34, None),
+                                        Observation("LIVE", i % 7, None))),
+            {"FROZEN": 50, "LIVE": 50},
+        )
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(conn, [_make_lot("FROZEN"), _make_lot("LIVE")], out_dir)
+    conn.close()
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    body = (out_dir / "grid.bin").read_bytes()[artifacts.HEADER_SIZE:]
+    n = config.HORIZON_COUNT
+    row = {l["id"]: body[l["i"] * n:(l["i"] + 1) * n] for l in doc["lots"]}
+
+    assert [l["id"] for l in doc["lots"]] == ["FROZEN", "LIVE"], "withheld, not dropped"
+    assert set(row["FROZEN"]) == {UNKNOWN}, "every horizon must say 'no forecast', never a number"
+    assert UNKNOWN not in row["LIVE"], "a live lot keeps its forecast"
+    assert doc["lots"][0]["u"] == start
+    assert "u" not in doc["lots"][1]
+    assert doc["base_data_ts"] == start + 26 * 12 * 300

@@ -2,7 +2,7 @@
 import json
 import struct
 import zlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from parkcast import config
@@ -100,7 +100,8 @@ def _price_field(price: Price) -> dict:
 
 
 def build_lots_json(
-    lots: Sequence[Lot], *, generated_at: int, base_data_ts: int
+    lots: Sequence[Lot], *, generated_at: int, base_data_ts: int,
+    not_updating: Mapping[str, int] | None = None,
 ) -> bytes:
     """Compact metadata, index-aligned with the grid's rows.
 
@@ -126,23 +127,33 @@ def build_lots_json(
 
     Short keys and unescaped UTF-8: at ~1,100 lots this is the difference
     between a 234 KB file and something several times larger.
+
+    `u` is present only on a lot whose feed is not updating (`liveness`): the
+    unix time of its last update, while every cell of its grid row is UNKNOWN.
+    Absent on a live lot, so there is no value to misread. Additive rather than
+    a schema change: a client that ignores it shows "no data" for that row,
+    which is still true, so `v` stays where it is.
     """
     lot_ids = [lot.id for lot in lots]
+    withheld = not_updating or {}
+    rows = []
+    for i, lot in enumerate(lots):
+        row = {
+            "i": i, "id": lot.id, "n": lot.name, "a": lot.area,
+            "y": round(lot.lat, 5), "x": round(lot.lon, 5),
+            "c": lot.capacity_car, "t": lot.lot_type,
+            "p": _price_field(parse_fare(lot.fare_text)),
+        }
+        if lot.id in withheld:
+            row["u"] = withheld[lot.id]
+        rows.append(row)
     payload = {
         "v": VERSION,
         "generated_at": generated_at,
         "base_data_ts": base_data_ts,
         "n_lots": len(lot_ids),
         "roster_id": roster_id(lot_ids),
-        "lots": [
-            {
-                "i": i, "id": lot.id, "n": lot.name, "a": lot.area,
-                "y": round(lot.lat, 5), "x": round(lot.lon, 5),
-                "c": lot.capacity_car, "t": lot.lot_type,
-                "p": _price_field(parse_fare(lot.fare_text)),
-            }
-            for i, lot in enumerate(lots)
-        ]
+        "lots": rows,
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 

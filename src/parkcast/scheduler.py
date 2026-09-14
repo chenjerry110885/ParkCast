@@ -12,7 +12,7 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from parkcast import artifacts, config, store
+from parkcast import artifacts, config, liveness, store
 from parkcast.collector import collect_once
 from parkcast.compact import compact_day
 from parkcast.forecast import Blend, load_history
@@ -89,7 +89,6 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
     collection and must never be able to stop it.
     """
     history = load_history(conn, cold_dir=config.PARQUET_DIR)
-    forecaster = Blend(history)
     # `counts.lot`, not `recent`: the filter asks "has this lot ever produced a
     # usable observation", which is a question about the whole corpus. `recent`
     # is a two-hour tail, so filtering on it would drop any lot whose history
@@ -155,6 +154,11 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
     # One list drives the grid's rows, the header's roster and lots.json alike,
     # so the three cannot describe different sets of lots.
     lot_ids = [lot.id for lot in ordered]
+    # A lot whose feed has stopped updating keeps its row, with no forecast in
+    # it: a frozen reading published as 0% or 100% was the app telling drivers
+    # something the data could not support. Publishing-only -- see `liveness`.
+    withheld = liveness.not_updating(conn, lot_ids, as_of=history.latest_ts)
+    forecaster = liveness.Withholding(Blend(history), withheld)
     grid = build_grid(forecaster, lot_ids, history.latest_ts)
     # One set of generation values for both files: the row order is recomputed
     # every tick, so a client pairing this grid with an older lots.json must be
@@ -167,9 +171,12 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
     artifacts.publish(
         out_dir,
         grid_blob=artifacts.encode_grid(grid, lot_ids=lot_ids, **identity),
-        lots_blob=artifacts.build_lots_json(ordered, **identity),
+        lots_blob=artifacts.build_lots_json(ordered, not_updating=withheld, **identity),
     )
-    log.info("published %s lots x %s horizons", len(ordered), config.HORIZON_COUNT)
+    log.info(
+        "published %s lots x %s horizons, %s not updating",
+        len(ordered), config.HORIZON_COUNT, len(withheld),
+    )
 
 
 def run_forever(

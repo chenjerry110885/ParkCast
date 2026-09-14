@@ -224,3 +224,21 @@ def test_the_raw_fare_text_is_not_shipped_to_the_client():
               service_time="", fare_text="計時：小型車100元/時。")
     blob = build_lots_json([lot], generated_at=1, base_data_ts=1)
     assert "計時" not in blob.decode("utf-8")
+
+
+# --- not_updating: a withheld lot's row carries when it last updated --------
+
+
+def test_a_lot_that_is_not_updating_carries_its_last_update():
+    doc = json.loads(build_lots_json([lot(1), lot(2)], generated_at=1, base_data_ts=1,
+                                     not_updating={"TPE0002": 1_788_900_000}))
+    assert "u" not in doc["lots"][0], "a live lot must carry no key to misread"
+    assert doc["lots"][1]["u"] == 1_788_900_000
+
+
+def test_not_updating_is_additive_and_leaves_the_schema_version_alone():
+    """An older client ignores `u` and shows "no data" for the lot's UNKNOWN
+    row -- still true -- so this is not a breaking change."""
+    doc = json.loads(build_lots_json([lot(1)], generated_at=1, base_data_ts=1,
+                                     not_updating={"TPE0001": 5}))
+    assert doc["v"] == VERSION == 1
