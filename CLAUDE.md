@@ -196,30 +196,52 @@ the top ten results differ by at most 9 points of probability but by a factor of
 so price and walking are the live variables. Do not "fix" this.
 
 **`cost` is the expected cost of the whole trip in NT$, and means it literally** (changed
-2026-09-09):
+2026-09-09, and again 2026-09-14):
 
-    cost = p x (walk + fare)  +  (1 - p) x (circling + cost of the best reliable alternative)
+    cost = p x (walk + fare)
+         + (1 - p) x (circling + drive to the fallback lot + cost of the fallback lot)
 
 You do not pay this car park's fare for a space it did not have, and a failed attempt is charged
 for the trip it forces rather than for circling alone. `RELIABLE_P` (0.9) defines which lots can
-serve as that alternative; the fallback is one scalar per ranking, derived from the roster rather
-than tuned, so failing in a dense district costs less than failing in a sparse one. At `p = 1` the
-failure branch vanishes and the score is simply walk plus fare.
+serve as that alternative; the fallback is one lot per ranking, derived from the roster rather than
+tuned, so failing in a dense district costs less than failing in a sparse one. The drive is
+`DRIVE_MIN_PER_KM` (2.4) x `TIME_VALUE` = **NT$12 per straight-line km** from the lot that failed to
+the fallback lot. At `p = 1` the failure branch vanishes and the score is simply walk plus fare.
 
 **What it replaced, and why.** The old score was `walk + fare + (1 - p) x circling`: it charged the
 fare unconditionally and never charged the onward trip, so the entire probability range was worth
 one circling penalty — NT$60, which is also 12 minutes of walking and **960 m on foot**. Being a
 kilometre closer cancelled being certainly full.
 
-`scripts/probe-ranker.py` measures this against the live artifacts and scores **both models on one
-grid**, because the roster and the forecast move through the day and a before/after taken an hour
-apart credits the calibration with whatever the clock did. Measured 2026-09-09 over every
-destination whose own lot is under 50%:
+**The drive (2026-09-14).** The 09-09 model charged the fallback's cost but not the drive to it, as
+if every failure happened at the destination. As `p -> 0` a lot's own position then stopped
+mattering: every hopeless car park in the city scored about circling plus the fallback, cheaper than
+a certain space a kilometre out, and they filled the tail of the list — for a Shilin destination a
+lot at 2%, 5.9 km away, at #13. The probe gated only first place, which stayed right, so nobody
+measured the tail for five days.
 
-| | inversions | worst position reached |
-|---|---|---|
-| legacy | 25 | **#1** |
-| shipped | 19 | **#3** |
+2.4 min per straight-line km is 25 km/h as the crow flies, about 30 km/h on streets a fifth longer:
+the quick end of Taipei driving, so near the least the drive can cost. It is a judgment, not a
+measurement, and is not to be tuned against the probe. Rejected after measuring: a walking-distance
+tier (it put 3 likely-full lots at #1) and a probability tier (a cliff that contradicts the
+defensible-bet rule below and makes the inversion count zero by construction).
+
+`scripts/probe-ranker.py` measures this against the live artifacts and scores **every model on one
+grid**, because the roster and the forecast move through the day and a before/after taken an hour
+apart credits the calibration with whatever the clock did. Measured on the 2026-09-14 09:43 grid at
++15 min, every lot's position as a destination (1,090); *far* is under 50% and over 1.5 km,
+*hopeless* under 10% and over 3 km, and the counts are destinations:
+
+| | inversions (73) | worst position | far in top 20 | far in top 5 | hopeless in top 3 | farthest top-20 row, median / p90 |
+|---|---|---|---|---|---|---|
+| before 09-09 | 29 | **#1** | 17 | 0 | 0 | 1.67 / 2.17 km |
+| 09-09 | 34 | #4 | **797** | 63 | 13 | 5.49 / 10.80 km |
+| shipped, NT$12/km | 22 | #5 | 366 | 9 | 1 | 1.66 / 3.03 km |
+
+NT$15 and NT$20/km (reported beside it as what-ifs) give 299 and 213 far, 0 hopeless — not a
+knife-edge. First place changed for 1 destination, where an 85% and a 97% lot NT$1 apart swapped.
+Most of the residual is Yangmingshan, where even the nearest alternatives are kilometres apart. (On
+2026-09-09's own grid the first two models measured 25 inversions reaching #1 and 19 reaching #3.)
 
 The count is not the point and should not be tuned to zero — a lot at 12% that is half the distance
 for the same price is a defensible bet, and squeezing those out would mean over-weighting

@@ -121,13 +121,14 @@ A probability is not yet an answer. The ranker turns one into a decision by scor
 as the **expected cost of the whole trip**, in NT$:
 
 ```
-cost  =  p x (walk + fare)  +  (1 - p) x (circling + cost of the best reliable alternative)
+cost  =  p x (walk + fare)  +  (1 - p) x (circling + drive to the best reliable alternative + its cost)
 ```
 
 You do not pay a car park's fare for a space it did not have, and arriving to find it full costs
-more than the time spent circling — you still have to get somewhere that has one, and pay for it.
-That second half is derived from the roster being ranked rather than tuned, so failing in a dense
-district costs less than failing in a sparse one.
+more than the time spent circling — you still have to drive somewhere that has one, and pay for it.
+The alternative is derived from the roster being ranked rather than tuned, so failing in a dense
+district costs less than failing in a sparse one, and the drive is charged at NT$12 per
+straight-line kilometre from the car park that turned you away.
 
 Getting this wrong is instructive, so it is worth recording that it *was* wrong. The original score
 charged the fare unconditionally and priced a failure at a flat twelve minutes, which made the
@@ -140,6 +141,14 @@ lot is ever the top recommendation.
 The count of such orderings only fell from 25 to 19, and deliberately was not tuned to zero — a lot
 at 12% that is half the distance for the same price is a bet a driver can reasonably take. It is
 the *position* that had to change.
+
+It was wrong a second time, more quietly. Until 2026-09-14 the failure branch left out the drive
+from the car park that turned you away to the alternative, as if every failure happened at the
+destination. The top of every list stayed right, which is all the probe checked; the tail did not.
+With nothing tying a hopeless car park's cost to where it is, lots the model gave a 2% chance six
+kilometres away filled the bottom of the list for **797 of 1,090** destinations. The probe now also
+reports how far each list reaches. Charging the drive cut those destinations to 366, brought the
+farthest row of a typical list from 5.5 km to 1.7 km, and changed one top recommendation in 1,090.
 
 ---
 

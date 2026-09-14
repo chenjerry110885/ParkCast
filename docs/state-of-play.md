@@ -9,7 +9,7 @@ Written for a session starting cold. `CLAUDE.md` has the standing facts; this ha
 
 Plans 1 through 3e are complete: collector, forecast grid, ranked list, map, time-scrubber, search,
 an installable offline-capable PWA, and — Plan 3e — no forecast for a car park whose feed has stopped
-updating. **306 Python tests, 191 TypeScript.** The app works end to end and has never been deployed.
+updating. **306 Python tests, 194 TypeScript.** The app works end to end and has never been deployed.
 
 The two newest things in this document: the collector's first unbroken days on the desktop turned up
 **car parks whose readings never move**, which the app was publishing as certainties; and a second
@@ -93,6 +93,23 @@ Two things it deliberately did not do, both measured and written up in `CLAUDE.m
   quiet night is a 6-hour run. Its daily "frozen" count is noise.
 - **It did not remove frozen lots from climatology.** They hold the citywide prior at 0.8852 instead
   of 0.9238; fixing that means rebuilding the per-Parquet counter cache. Deferred.
+
+---
+
+## The ranked list's tail — fixed 2026-09-14
+
+For a Shilin destination the list put a car park at **2%, 5.9 km away** at #13. The 09-09 cost
+model charged a failed attempt the circling penalty and the fallback's cost, but not the drive from
+the failed lot to the fallback, so a hopeless lot's score stopped depending on where it was. On the
+09:43 grid, **797 of 1,090** destinations had a lot under 50% more than 1.5 km away in their top 20.
+The probe gated only first place, which stayed right throughout.
+
+`rank.ts` now charges that drive: `DRIVE_MIN_PER_KM` = 2.4, NT$12 per straight-line km. Those
+destinations fell to 366; a lot under 10% more than 3 km away in a top three, 13 → 1; the farthest
+top-20 row, 5.49 → 1.66 km median; first place changed for 1 destination. `scripts/probe-ranker.py`
+now reports list reach for every model on one grid — see "Ranker calibration" in `CLAUDE.md`. The
+app is not deployed and the ranking runs in the browser, so no user saw either version and the
+collector was not touched.
 
 ---
 
