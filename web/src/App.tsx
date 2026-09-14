@@ -625,7 +625,7 @@ export default function App() {
             <h2 className="list-head">
               {forecastExpired ? s.nearbyCarParks : s.rankedForArrival}
             </h2>
-            <LotList rows={listed} lang={lang} />
+            <LotList rows={listed} lang={lang} baseDataTs={artifacts.grid.baseDataTs} />
           </>
         )}
       </main>

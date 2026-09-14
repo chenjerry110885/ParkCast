@@ -48,6 +48,15 @@ export interface Strings {
   priceUnknown: string;
   /** Shown instead of a probability when the grid has no forecast for a lot. */
   noData: string;
+  /**
+   * Shown instead of a probability for a car park whose feed is not updating:
+   * the same reading, or none at all, for at least a day. Deliberately not
+   * "offline" or "lost connection" -- for most of these lots the feed still
+   * sends a number, and all we can see is that it stopped changing.
+   */
+  notUpdating: string;
+  /** Under `notUpdating`, e.g. "No change in 30 h". Carries `{n}`, whole hours. */
+  unchangedForTemplate: string;
   /** Shown while geolocation is being requested. */
   locating: string;
   /** Shown when geolocation was denied or failed. */
@@ -145,6 +154,8 @@ const en: Strings = {
   perEntry: "per entry",
   priceUnknown: "Price unknown",
   noData: "No data",
+  notUpdating: "Not updating",
+  unchangedForTemplate: "No change in {n} h",
   locating: "Locating…",
   locationUnavailable: "Location unavailable",
   minutesUnit: "min",
@@ -183,6 +194,8 @@ const zh: Strings = {
   perEntry: "每次",
   priceUnknown: "價格未知",
   noData: "無資料",
+  notUpdating: "資料未更新",
+  unchangedForTemplate: "已 {n} 小時未變動",
   locating: "定位中…",
   locationUnavailable: "無法取得目前位置",
   minutesUnit: "分鐘",

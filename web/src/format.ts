@@ -17,6 +17,9 @@
  *   - A per-entry (計次) fare is shown per entry. Branching on `hourly` alone
  *     would print "price unknown" over the 21 lots that charge per visit, whose
  *     price is perfectly well known and merely is not hourly.
+ *   - A lot whose feed is not updating says so, with how long, rather than "no
+ *     data": the car park is real, and "its numbers stopped moving a day ago"
+ *     is something a driver can act on.
  */
 import type { Strings } from "./i18n";
 import type { Ranked } from "./rank";
@@ -71,4 +74,30 @@ export function formatPrice(row: Ranked, s: Strings): string {
   const text = amount(price.lo, price.hi);
   if (text === null) return s.priceUnknown;
   return `${text} ${price.k === "entry" ? s.perEntry : s.perHour}`;
+}
+
+/** Seconds in an hour. */
+const HOUR_S = 3600;
+
+/**
+ * Whole hours a lot's feed has gone without an update, or `null` when the row
+ * should show a probability, or plain "no data", instead.
+ *
+ * Both conditions are load-bearing:
+ *
+ *   - **The grid must have no forecast either.** The two files are fetched
+ *     separately and `lots.json` may come from an earlier tick, so a stale `u`
+ *     can sit beside a fresh grid in which the lot has started moving again.
+ *     The grid is the fresher file; when it has a number, the number wins.
+ *   - **Measured to the reading, not to now.** `u` and `baseDataTs` both
+ *     describe the feed; how long ago the reading was is the staleness line's
+ *     business. Counting to now would claim the lot stayed unchanged through
+ *     time nobody observed.
+ *
+ * Floored, so the number shown never exceeds what was observed.
+ */
+export function notUpdatingHours(row: Ranked, baseDataTs: number): number | null {
+  const u = row.lot.u;
+  if (row.probability !== null || typeof u !== "number" || !Number.isFinite(u)) return null;
+  return Math.max(0, Math.floor((baseDataTs - u) / HOUR_S));
 }

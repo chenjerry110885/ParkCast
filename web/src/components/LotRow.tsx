@@ -12,17 +12,23 @@
  *
  * The formatting rules that keep this row honest live in `../format`.
  */
-import { formatDistance, formatPrice, formatProbability } from "../format";
-import { districtName, lotTypeName, t, type Lang } from "../i18n";
+import { formatDistance, formatPrice, formatProbability, notUpdatingHours } from "../format";
+import { districtName, fillTemplate, lotTypeName, t, type Lang } from "../i18n";
 import type { Ranked } from "../rank";
 
 interface LotRowProps {
   row: Ranked;
   lang: Lang;
+  /** `grid.baseDataTs`: the reading a lot's time without an update is measured to. */
+  baseDataTs: number;
 }
 
-export function LotRow({ row, lang }: LotRowProps) {
+export function LotRow({ row, lang, baseDataTs }: LotRowProps) {
   const s = t(lang);
+  // A lot whose feed is not updating says so in the probability's place, set
+  // like "no data" -- small and grey -- because it is the same absence of a
+  // forecast, with its reason attached.
+  const stalledHours = notUpdatingHours(row, baseDataTs);
   return (
     <li className="lot" data-testid="lot-row" data-lot-id={row.id}>
       <div className="lot-head">
@@ -40,9 +46,13 @@ export function LotRow({ row, lang }: LotRowProps) {
               row.probability === null ? "lot-chance-value is-unknown" : "lot-chance-value"
             }
           >
-            {formatProbability(row.probability, s)}
+            {stalledHours === null ? formatProbability(row.probability, s) : s.notUpdating}
           </span>
-          <span className="lot-chance-label">{s.chanceOfSpace}</span>
+          <span className="lot-chance-label">
+            {stalledHours === null
+              ? s.chanceOfSpace
+              : fillTemplate(s.unchangedForTemplate, { n: stalledHours })}
+          </span>
         </p>
       </div>
       <p className="lot-facts">

@@ -44,6 +44,18 @@ export interface Lot {
   /** Operator category, e.g. `民營停車場`. */
   t: string;
   p: Price;
+  /**
+   * Unix seconds of the lot's last update. Present only when its feed is not
+   * updating (`src/parkcast/liveness.py`) -- the same reading, or no reading, for
+   * at least 24 hours -- in which case its grid row is UNKNOWN in every column.
+   * Absent for a live lot, so there is no value to misread.
+   *
+   * The latest the update could have been as far as the collector saw, so an age
+   * derived from it is a lower bound on what was observed: "no change in 30 h"
+   * may mean 30 or more. It assumes nothing changed while the collector itself
+   * was not collecting.
+   */
+  u?: number;
 }
 
 export interface LotsDoc {

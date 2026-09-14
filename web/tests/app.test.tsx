@@ -306,6 +306,66 @@ describe("probability", () => {
   });
 });
 
+describe("a car park whose feed is not updating", () => {
+  /** 30 hours and 7 minutes before the reading. */
+  const LAST_UPDATE = BASE_DATA_TS - 30 * 3600 - 7 * 60;
+  const NAME = "中山區行政中心停車場";
+
+  /** The standard fixture, with the unpriced lot marked not updating. */
+  function stubNotUpdating(cell: number = UNKNOWN) {
+    const lots = LOTS.map((lot) => (lot.id === "TPE_UNPRICED" ? { ...lot, u: LAST_UPDATE } : lot));
+    const perLot = [88, 61, 45, cell];
+    const body: number[] = [];
+    for (const lot of lots) for (let h = 0; h < N_HORIZONS; h += 1) body.push(perLot[lot.i] ?? UNKNOWN);
+    stubFetch(encodeGrid(body, lots.length), { ...makeLotsDoc(), lots });
+  }
+
+  it("says so, and for how long, instead of a probability", async () => {
+    stubNotUpdating();
+    await renderLocated();
+    const chance = within(rowFor(NAME)).getByTestId("lot-probability");
+    expect(chance.textContent).toContain(t("en").notUpdating);
+    expect(chance.textContent).toContain(fillTemplate(t("en").unchangedForTemplate, { n: 30 }));
+    expect(chance.textContent).not.toMatch(/\d+%/);
+    expect(chance.textContent).not.toContain(t("en").noData);
+  });
+
+  it("counts the hours to the reading, not to now", async () => {
+    stubNotUpdating();
+    ageArtifact(90); // to now it would be 31 h
+    await renderLocated();
+    const chance = within(rowFor(NAME)).getByTestId("lot-probability");
+    expect(chance.textContent).toContain(fillTemplate(t("en").unchangedForTemplate, { n: 30 }));
+  });
+
+  it("lets a fresher grid's forecast win over a stale lots.json", async () => {
+    stubNotUpdating(72);
+    await renderLocated();
+    const chance = within(rowFor(NAME)).getByTestId("lot-probability");
+    expect(chance.textContent).toContain("72%");
+    expect(chance.textContent).not.toContain(t("en").notUpdating);
+  });
+
+  it("still says 'no data' for a lot with no forecast and no last update", async () => {
+    await renderLocated();
+    const chance = within(rowFor(NAME)).getByTestId("lot-probability");
+    expect(chance.textContent).toContain(t("en").noData);
+    expect(chance.textContent).not.toContain(t("en").notUpdating);
+  });
+
+  it("says it in Chinese too", async () => {
+    Object.defineProperty(navigator, "language", { value: "zh-TW", configurable: true });
+    stubNotUpdating();
+    stubGeolocation("granted");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: t("zh").useMyLocation }));
+    await screen.findByTestId("lot-list");
+    const chance = within(rowFor(NAME)).getByTestId("lot-probability");
+    expect(chance.textContent).toContain("資料未更新");
+    expect(chance.textContent).toContain("已 30 小時未變動");
+  });
+});
+
 describe("language", () => {
   it("switches the chrome but leaves lot names in Chinese", async () => {
     await renderLocated();

@@ -12,13 +12,15 @@ import { LotRow } from "./LotRow";
 interface LotListProps {
   rows: readonly Ranked[];
   lang: Lang;
+  /** `grid.baseDataTs`, which each row measures a stalled feed to. */
+  baseDataTs: number;
 }
 
-export function LotList({ rows, lang }: LotListProps) {
+export function LotList({ rows, lang, baseDataTs }: LotListProps) {
   return (
     <ol className="lots" data-testid="lot-list">
       {rows.map((row) => (
-        <LotRow key={row.id} row={row} lang={lang} />
+        <LotRow key={row.id} row={row} lang={lang} baseDataTs={baseDataTs} />
       ))}
     </ol>
   );
