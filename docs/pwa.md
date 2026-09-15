@@ -43,13 +43,16 @@ blue), because it is invisible until it is on someone's home screen.
 ## Manifest
 
 `web/public/manifest.webmanifest`. `start_url`, `scope` and every icon `src` are **relative**
-(`./`), and that is load-bearing: the app deploys to GitHub Pages under `/ParkCast/`, Vite does not
-process a `.webmanifest`, and so nothing rewrites an absolute path in it with the deployment base.
-`"/"` would scope the installed app to the whole `github.io` origin and start it on somebody else's
-project.
+(`./`), and that is load-bearing: Vite does not process a `.webmanifest`, so nothing rewrites a path
+in it with the deployment base. A relative `./` resolves correctly wherever the app is actually served
+from without needing to know that base at all — the property this relied on when the app deployed to
+GitHub Pages under `/ParkCast/`, and keeps relying on now that production is served from `/` at its
+`workers.dev` address (`docs/deploy.md`). An absolute `"/"` would instead scope the installed app to
+the whole origin it is served from, which matters again the day anything else ever shares that origin.
 
 `index.html` is the opposite case: Vite *does* rewrite a leading-slash `href` that resolves into
-`public/`, so the links there are written absolute and come out as `/ParkCast/...` in a build.
+`public/`, so the links there are written absolute and come out prefixed with the deployment base
+(`/...` today) in a build.
 
 ## Service worker
 
@@ -66,7 +69,7 @@ as haunted code rather than as a caching problem.
 | navigations (`index.html`) | **network-first**, cache as fallback, and **never written back** | `index.html` is the one file Vite does *not* hash, so it is the one file for which "a cached URL cannot be stale" is false. Cache-first would pin the app to whichever hashed bundle names the first visit saw. The fallback copy is the one `install` stored and the runtime never replaces it -- see [one writer for the shell](#the-cached-shell-has-exactly-one-writer). |
 | hashed assets (`assets/*`) | **cache-first** | Vite hashes these filenames, so a changed file has a different name and is simply a cache miss. |
 | unhashed files under scope (`manifest.webmanifest`, `favicon.svg`, `icon-*.png`) | **cache-first, and nothing revalidates them** | A real if minor caveat, and the reason this is its own row: their names are fixed, so unlike `assets/*` a cached copy genuinely *can* be stale, and it stays until `VERSION` is bumped and `activate` drops the old cache. Traded on purpose -- an icon is not worth a conditional request on every load -- but it does mean re-running `build-icons.py` is not enough to ship a new icon. |
-| non-GET, other origins, outside scope | **never intercepted** | The origin check is not redundant with the scope check. Under `PARKCAST_BASE=/` the scope prefix is `/`, which every path starts with, so origin is the only thing left. |
+| non-GET, other origins, outside scope | **never intercepted** | The origin check is not redundant with the scope check. Under the default base `/` the scope prefix is `/`, which every path starts with, so origin is the only thing left. |
 
 ### The cached shell has exactly one writer
 
@@ -76,7 +79,8 @@ as haunted code rather than as a caching problem.
 navigation response were also written back, an online visit would refresh the shell while the
 bundles it points at were still being fetched. Lose signal in that window -- driving into a basement,
 which is this app's entire premise -- and the cached shell references bundles that are not on disk.
-Measured, with the server genuinely stopped:
+Measured, with the server genuinely stopped (paths below are from when the app still deployed under
+`/ParkCast/`; the mechanism is unchanged now that it serves from `/`):
 
 ```
 RESP 200 fromSW=true  /ParkCast/
@@ -137,10 +141,12 @@ survives offline, the scenery may not.
 Vite does not process `public/`, so `sw.js` cannot see the hashed asset names. Generating a manifest
 would mean a build plugin, i.e. a new dependency. Responses are cached **as they are fetched**
 instead. The `PRECACHE` list in the worker is not a manifest -- it is the short, hand-written list of
-files whose names are fixed forever because they are not hashed (`./`, the manifest, the icons).
+files whose names are fixed forever because they are not hashed (`./`, the manifest, the icons, and
+`fallback.css`, added for the site-hardening pass that moved the boot fallback's inline `style=` out
+of `index.html` so the Content-Security-Policy needs no `'unsafe-inline'` -- see `docs/deploy.md`).
 
-**What that means in practice.** The document, the manifest and the icons are cached when the worker
-installs, on the first load. The hashed bundles and the artifacts are cached the first time the
+**What that means in practice.** The document, the manifest, the icons and `fallback.css` are cached
+when the worker installs, on the first load. The hashed bundles and the artifacts are cached the first time the
 worker *sees them fetched* -- and on a first load the worker does not yet control the page, so that
 is the second load. So: **load one installs the worker, load two is the first one it can cache, and
 from there the app opens with no network.** That is one load later than a precache manifest would
@@ -166,9 +172,12 @@ reloaded page ran `index-DFwMeP80.js` while the v1 worker was still in control.
 
 ### `PARKCAST_BASE` takes a path, not a URL
 
-`vite.config.ts` lets `PARKCAST_BASE` override the deployment base, and describes it as being for "a
-root domain or a CDN prefix". A **path** works either way: `/ParkCast/` (the default) and `/` both
-deploy correctly, and `sw.js` derives its scope from its own location rather than hardcoding either.
+`vite.config.ts` lets `PARKCAST_BASE` override the deployment base (default `/`, production's own
+`workers.dev` root), and describes it as being for "a root domain or a CDN prefix". A **path** works
+either way: `/` (the default, and production's) and `/ParkCast/` (the app's old GitHub Pages base)
+both deploy correctly, and `sw.js` derives its scope from its own location rather than hardcoding
+either. Set it from PowerShell, not Git Bash -- Git Bash rewrites a path-like value such as
+`PARKCAST_BASE=/` into a Windows path (measured 2026-09-14, `docs/deploy.md`).
 
 An **absolute URL** -- `PARKCAST_BASE=https://cdn.example.com/parkcast/` -- builds, serves, looks
 fine, and silently turns the entire PWA off:
@@ -191,22 +200,29 @@ A browser updates a worker when its **bytes** change, so editing `sw.js` at all 
 Bump `VERSION` when you additionally want the accumulated cache dropped: `activate` deletes every
 cache that is not the current one, and old hashed assets are never evicted otherwise.
 
+`web/public/_headers` serves `/sw.js` with `Cache-Control: no-cache` -- the browser always revalidates
+it, so a visitor's next load sees a bumped `VERSION` immediately rather than an HTTP-cached copy of
+yesterday's worker. This is also the deploy runbook's tool against a bad release: rolling back the site
+without bumping `VERSION` would leave any visitor who already loaded the bad version running its cache
+until they close and reopen the app; the runbook (`docs/deploy.md`) redeploys with `VERSION` bumped for
+exactly this reason.
+
 ## Verifying by hand
 
 ```bash
 npm run build --prefix web
-npm run preview --prefix web   # http://localhost:4173/ParkCast/
+npm run preview --prefix web   # http://localhost:4173/
 ```
 
-`vite.config.ts` gives `preview` the same `/ParkCast/` base as a build, because it serves that
-build's HTML and that HTML already points at `/ParkCast/assets/...`. Restart the preview server after
+`vite.config.ts` gives `preview` the same base as a build -- `/` today -- because it serves that
+build's HTML and that HTML already points at `/assets/...`. Restart the preview server after
 any rebuild that *adds* a file -- it snapshots the directory once at boot, so a file created later
 404s into the SPA fallback and comes back as `index.html` with a 200.
 
 Then, in DevTools:
 
 - **Application → Manifest** parses with no errors and shows all three icons.
-- **Application → Service Workers** shows one activated worker scoped to `/ParkCast/`.
+- **Application → Service Workers** shows one activated worker scoped to `/` (today's deployment base).
 - Reload once, then **Network → Offline** and reload again: the list still renders, with the
   staleness line reporting an honest age, on a blank basemap.
 - **Network** shows `taipei.pmtiles` requests served by the browser, *not* by the worker (no

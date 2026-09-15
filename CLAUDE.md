@@ -363,6 +363,58 @@ the name of the directory the compose file lives in. See "A pause is not a stop"
 **Non-negotiable:** the collector runs from day one. Every day it is not running is a
 training day that cannot be recovered.
 
+### Deployment (2026-09-14)
+
+Design approved and largely built (`docs/superpowers/specs/2026-09-14-deployment-design.md`, Tasks 1–11,
+staged on `feat/cloudflare-deploy`, not yet deployed — see `docs/deploy.md`). Facts below are
+load-bearing for anyone touching the deploy path, the collector's upload code, or the web build.
+
+- **Free, non-negotiably.** No payment method on the Cloudflare account, ever; the app deploys to
+  Cloudflare Workers + Workers KV on the Free plan, which Cloudflare documents as unable to bill past a
+  limit. **Workers KV, not R2**, holds the forecast: enabling R2 requires a payment method even to use
+  its free tier, which would make "free" rest on usage staying low rather than being structurally true.
+- **Two-phase deploy, and why the check phase has no key.** `npm run deploy:check --prefix worker` runs
+  every test, typecheck, lint, the production build and a bundle-content scan with no Cloudflare
+  credential in the environment — it runs third-party tooling (test runners, linters, `npm audit`), and
+  none of that code should ever see the deploy key. Only `npm run deploy:release --prefix worker`, run
+  afterward in a fresh PowerShell with the key entered by `Read-Host -AsSecureString`, ever has the key;
+  it runs only the pinned `wrangler` and Node built-ins.
+- **Secrets never logged, committed, or in the image.** The collector's upload secret lives at
+  `/run/secrets/parkcast_upload_secret`, a compose file secret — never an environment variable, never
+  baked into the image. `src/parkcast/upload.py` logs an exception's type name only, never its message
+  or a traceback, since either could embed the secret; `docker/secrets/`, `.dev.vars*`, `.wrangler/` and
+  `.env*` (except `.env.example`) are git-ignored, and `scripts/hooks/pre-commit` (enabled with
+  `git config core.hooksPath scripts/hooks`) refuses any staged line shaped like the secret or
+  containing its bytes, because GitHub push protection cannot recognise a random per-project secret.
+- **`web/.dev-artifacts/`, and why nothing goes under `web/public/`.** `scripts/sync-artifacts.mjs` and
+  `scripts/refresh-demo-artifacts.py` now write dev copies of the forecast to the git-ignored
+  `web/.dev-artifacts/`, not `web/public/artifacts/` — anything under `public/` is copied into every
+  build and would have shipped as part of the deployed bundle.
+- **Base `/`, not `/ParkCast/`.** `web/vite.config.ts` serves the production build from the root of the
+  `workers.dev` address; `PARKCAST_BASE` remains an override for anything else. **Set it from
+  PowerShell, not Git Bash** — Git Bash rewrites a path-like environment value (`PARKCAST_BASE=/` came
+  back as `/Program Files/Git/`, measured 2026-09-14).
+- **The upload guard's bounds** (`src/parkcast/upload.py`, `UploadGuard`): 300 attempts/day (288 slots
+  exist); a 401 is retried at most once an hour; the Worker's daily-limit response pauses the collector
+  until at most the next 00:00 UTC (08:00 Taipei), probed at most once an hour; any other failure backs off
+  1, 2, 4, 8… ticks, capped at 12 (one hour), resetting on the next success. Nothing in the guard or the
+  upload thread can raise into `run_forever` or block collection.
+- **The hardened container has no memory limit, on purpose.** `docker/docker-compose.yml` sets
+  `read_only: true`, `cap_drop: [ALL]`, `no-new-privileges`, a `cpus` throttle and `pids_limit: 256` (4×
+  the measured peak of 6 processes, never below the 256 floor) — but deliberately no hard memory limit:
+  an OOM kill of the one irreplaceable collector process would cost ticks that can never be re-fetched,
+  and Docker Desktop's VM already bounds memory. Rehearsed 2026-09-14 against a snapshot copy under
+  `docker/docker-compose.dryrun.yml`: exit 0 as uid 10001 on a read-only root, `memory.peak` 265,166,848
+  bytes, `pids.peak` 6.
+- **The prune fix.** `run_forever` used to call `store.prune(conn, now − HOT_RETENTION_SEC)`
+  unconditionally after archiving, so a day whose compaction kept failing could be deleted before it was
+  ever written to Parquet. The cutoff is now `min(now − HOT_RETENTION_SEC, start of the earliest
+  unarchived day)` (`src/parkcast/scheduler.py`; `store.prune` itself is unchanged), so a day that keeps failing to
+  compact is never pruned.
+- **Collector pauses are the user's own choice, not incidents.** The 2026-09-13 Docker Desktop pause was
+  deliberate (see "A pause is not a stop" in `docker/README.md`); the deploy design and its smoke test
+  treat a stale or missing forecast as a warning, never a failure, for exactly this reason.
+
 ---
 
 # Workflow Orchestration

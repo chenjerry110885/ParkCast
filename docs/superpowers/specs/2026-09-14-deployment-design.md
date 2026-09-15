@@ -169,6 +169,10 @@ defaults to `workers_dev`); `observability: { enabled: false }`;
 "404-page" }` with a static `404.html`; `kv_namespaces: [{ binding: "ARTIFACTS", id: "<prod id>",
 preview_id: "<separate namespace id>" }]`; `vars: { PRODUCTION_HOST: "parkcast.<sub>.workers.dev" }`;
 `secrets: { required: ["UPLOAD_SECRET"] }`. The secret's value is set only with `wrangler secret put`.
+`workers_dev` and `preview_urls` take effect only through `wrangler deploy` or `wrangler triggers
+deploy` — `versions upload` and `versions deploy` never apply them (wrangler 4.131.1), and the Worker
+itself is first created as a draft by `wrangler secret put` during setup — so every release runs
+`wrangler triggers deploy` after promotion (§8.3).
 
 ## 5. The collector
 
@@ -259,7 +263,7 @@ uses `allow_redirects=False` and a streamed read capped at 10× the largest obse
 | T11 | Deploy key | leaks from the PC | entered with `Read-Host -AsSecureString` in a fresh PowerShell (not saved to PSReadLine history), used by the release command only, never in the collector or any file | revoke and reissue (§6.4) |
 | T12 | Visitors | a malicious deploy leaves poisoned service-worker caches after rollback | `/sw.js` served `Cache-Control: no-cache`; runbook redeploys with `sw.js` `VERSION` bumped, which deletes every old cache | visitors who loaded the bad version are exposed until their next visit |
 | T13 | Secrets | committed by accident | `.gitignore` gains `.dev.vars*`, `.env*` (except `.env.example`), `.wrangler/`, `docker/secrets/`, `*.pem`; `.dockerignore` gains `docker/secrets`; tests use a fixed dummy secret; a versioned pre-commit hook (`core.hooksPath`) rejects staged content containing `pcu_` or the secret file's bytes | GitHub push protection does not recognise a random secret; the hook is the control |
-| T14 | Limits, PC | the dev server | dev middleware serves two exact paths, GET/HEAD only, one shared copy refreshed ≤ once a minute, ≤ 120 upstream requests an hour, forwards no request headers except `If-None-Match`; `server.host: '127.0.0.1'`, `strictPort`, never `--host` | none known |
+| T14 | Limits, PC | the dev server | dev middleware serves two exact paths, GET/HEAD only, one shared copy refreshed ≤ once a minute, ≤ 120 upstream requests an hour, forwards no browser request headers; `server.host: '127.0.0.1'`, `strictPort`, never `--host` | none known |
 
 ### 6.2 Site hardening
 
@@ -302,7 +306,7 @@ a domain — outside the free requirement. If abuse happens, adding a domain is 
 
 | Situation | Action |
 |---|---|
-| Upload secret may have leaked | new secret (script); `wrangler secret put UPLOAD_SECRET` only when no undeployed version is pending (§10.11); replace the file; recreate the collector after a tick; if a false forecast is live, `wrangler kv key delete latest` |
+| Upload secret may have leaked | new secret (script); `wrangler secret put UPLOAD_SECRET` — it refuses when the latest uploaded version is not deployed (§10.11), and then `wrangler versions secret put UPLOAD_SECRET` followed by `wrangler versions deploy` of the version it creates (a copy of the latest *uploaded* code, so after a rollback release a good build first instead); replace the file; recreate the collector after a tick; if a false forecast is live, `wrangler kv key delete latest` |
 | Deploy key may have leaked | revoke in the dashboard; audit recent deployments; if any is unknown, treat as a malicious deploy |
 | Malicious or broken deploy | `wrangler rollback`; then deploy with `sw.js` `VERSION` bumped; rotate the deploy key and the upload secret |
 | Flooding | nothing until 08:00 Taipei; if it recurs, decide on a domain with firewall rules |
@@ -314,15 +318,16 @@ a domain — outside the free requirement. If abuse happens, adding a domain is 
 - `npm run dev` (bound to `127.0.0.1`). With `PARKCAST_LIVE_ORIGIN` set, a small Vite middleware (not a
   generic proxy) serves `/artifacts/grid.bin` and `/artifacts/lots.json` from one shared copy fetched from
   the live site at most once a minute, within 120 upstream requests an hour (then a local `429`), forwarding
-  no request headers except `If-None-Match`, GET/HEAD only. Unset, it serves `web/.dev-artifacts/`
+  no browser request headers, GET/HEAD only. Unset, it serves `web/.dev-artifacts/`
   (git-ignored), where `scripts/sync-artifacts.mjs` and `scripts/refresh-demo-artifacts.py` now write —
   so no data sits under `public/`, and nothing there reaches a build.
 - Worker logic is plain functions tested with vitest; `wrangler dev` runs locally against Wrangler's
   simulated KV (never `--remote`), seeded from the live copy through the middleware.
 - Collector upload, guard and prune fix: pytest in the usual throwaway container, with a fake sender.
 
-**A test address (optional):** `npm run deploy:preview` = the check phase, then the release phase's
-`wrangler versions upload`. Preview URLs are enabled only for this step. Preview versions cannot write
+**A test address (optional):** `npm run deploy:preview` = the check phase, then `wrangler triggers
+deploy` with a temporary `preview_urls: true` config and the release phase's `wrangler versions upload`.
+Preview URLs stay enabled until the next normal release's `triggers deploy` turns them off (§8.3). Preview versions cannot write
 production data (§4.3 step 1) and use the preview KV namespace for development.
 
 **Going live — only after the user's explicit yes, in two phases (§8.3):**
@@ -384,11 +389,17 @@ rebuild just after a tick, then confirm the tick, publish and `uploaded` log lin
 7. Smoke-test the new version before promotion, via Cloudflare's version-override mechanism if it works
    for a not-yet-deployed version (§10.17); otherwise immediately after promotion, with automatic
    `wrangler rollback` on failure.
-8. `wrangler versions deploy`.
+8. `wrangler versions deploy`, then `wrangler triggers deploy --config wrangler.jsonc`, the only release
+   step that applies `workers_dev` and `preview_urls: false` (§4.4). If it fails, stop and say the new
+   version is already live; no smoke test runs.
 9. Smoke test (`smoke-live.mjs`): `/` loads with the §6.2 headers; `/sw.js` is `no-cache`; `grid.bin` and
    `lots.json` parse and pair by `rosterId`; `/src/main.tsx`, `/assets/x.map`, `/.env`, `/_headers`,
    `/wp-login.php` return `404`; `PUT` without the secret → `401`; `PUT` to a non-production host path →
    `404`. **Freshness is a warning, not a failure** — the collector may be paused.
+10. After a passing smoke test, request the new version's preview host,
+    `https://<first 8 hex of the version id>-<PRODUCTION_HOST>` (15 s timeout): a `2xx` stops the release
+    with an error that preview URLs are still enabled, without rolling back (the site is fine); any
+    other status or a network error is the expected outcome.
 
 ## 9. Testing and acceptance
 
@@ -440,7 +451,8 @@ rebuild just after a tick, then confirm the tick, publish and `uploaded` log lin
 15. Whether Cloudflare weakens the Worker's ETag on compressed JSON.
 16. The two feed URLs do not redirect; their largest body sizes (sets the §5.3 cap).
 17. The version-override smoke test works before promotion (§8.3 step 7).
-18. The least permissions `wrangler` needs to deploy assets, bindings and secrets.
+18. The least permissions `wrangler` needs to deploy assets, bindings and secrets, and to set the
+    Worker's workers.dev subdomain and preview-URL settings (`wrangler triggers deploy`).
 
 ## 11. Out of scope, and rejected ideas
 

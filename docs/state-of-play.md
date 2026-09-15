@@ -9,7 +9,10 @@ Written for a session starting cold. `CLAUDE.md` has the standing facts; this ha
 
 Plans 1 through 3e are complete: collector, forecast grid, ranked list, map, time-scrubber, search,
 an installable offline-capable PWA, and — Plan 3e — no forecast for a car park whose feed has stopped
-updating. **306 Python tests, 194 TypeScript.** The app works end to end and has never been deployed.
+updating. **343 Python tests · 219 web TypeScript · 60 Worker TypeScript · 29 script tests** (real runs,
+2026-09-14; `node --test scripts/tests/*.test.mjs` needs the explicit glob — a bare directory runs
+nothing on this Node). The app works end to end and has never been deployed live — a free Cloudflare
+deploy is designed and mostly built; see "What to do next" and [`docs/deploy.md`](deploy.md).
 
 The two newest things in this document: the collector's first unbroken days on the desktop turned up
 **car parks whose readings never move**, which the app was publishing as certainties; and a second
@@ -44,7 +47,7 @@ collector shows the "forecast too old" state. Fix it with:
 
     python scripts/refresh-demo-artifacts.py
 
-One live feed reading, scored against the local corpus, written to `web/public/artifacts/`. It
+One live feed reading, scored against the local corpus, written to `web/.dev-artifacts/`. It
 operates on a throwaway copy of `hot.sqlite` and **cannot fork the corpus** — verified after the
 first run by re-checking all 16 files against the manifest.
 
@@ -160,14 +163,20 @@ happens 0.105.
 ## What to do next
 
 1. ~~Deploy Plan 3e to the collector~~ — **done 2026-09-14 09:06**; see "Which machine is which".
-2. **Guard the collector against people.** Proposed, not done: rename the compose project from
-   `docker` to `parkcast` (one container recreate); and a small watchdog *outside* the container that
-   warns when the newest reading is more than 15 minutes old, since the collector cannot notice its
-   own pause.
-3. **Deploy the app.** GitHub Pages is confirmed viable: it answers range requests with
-   `206 Partial Content` and `Access-Control-Allow-Origin: *`, so the self-hosted 24 MB PMTiles
-   basemap works with no API key and no third-party origin. Open: how artifacts reach the CDN — the
-   desktop pushing on a timer means an automated credential on a home machine — and at what cadence.
+2. ~~Fix the prune bug~~ — **done 2026-09-14.** `run_forever` pruned by a fixed cutoff regardless of
+   which days had actually archived, so a day whose compaction kept failing could be deleted before it
+   ever reached Parquet. The cutoff is now `min(now − HOT_RETENTION_SEC, start of the earliest
+   unarchived day)` (`src/parkcast/scheduler.py`; `store.prune` itself is unchanged) — see CLAUDE.md's
+   "Deployment (2026-09-14)".
+3. **Deploy the app to Cloudflare Workers.** Design approved 2026-09-14
+   ([`docs/superpowers/specs/2026-09-14-deployment-design.md`](superpowers/specs/2026-09-14-deployment-design.md));
+   the Worker, the collector's upload path, the hardened container and the deploy scripts are built and
+   staged on `feat/cloudflare-deploy`, not yet committed or deployed. Free tier only — Workers + KV, no
+   R2, no custom domain, no payment method on the account. Not GitHub Pages: it was viable (range
+   requests answer `206` with `Access-Control-Allow-Origin: *`), but pushing a 5-minute forecast would
+   mean a site deploy every tick and a repository-rewriting credential on the desktop. See
+   [`docs/deploy.md`](deploy.md) for the one-time setup (Task 13, not yet done — the Cloudflare account,
+   KV namespaces and upload secret don't exist yet) and the everyday workflow.
 4. **Accumulate, then re-run the evaluation around 2026-10-01**, when every half-hour-of-week bucket
    has three days behind it (at 09-13: 134 of 336 had none, 120 one, 82 two; Tuesday none at all).
 5. **Then** consider a trained model — against a persistence baseline that is strong on an
@@ -184,8 +193,9 @@ a number is the opposite of how this project has handled every other inconvenien
 ## Open decisions belonging to the user
 
 - **Licence.** The repo is public with none, so the code is readable but not reusable.
-- **Deployment cadence and the credential** (see 3 above).
-- **The compose rename and the watchdog** (see 2 above).
+- **The Cloudflare deploy's one-time setup** (see 3 above) — creating the account, turning on
+  two-factor sign-in, and entering the credentials `docs/deploy.md` calls for are all steps only the
+  account owner can do; nothing goes live until they happen.
 
 ## Gotchas that cost real time
 
@@ -198,7 +208,9 @@ a number is the opposite of how this project has handled every other inconvenien
   [`docker/README.md`](../docker/README.md). Under Git Bash, `MSYS_NO_PATHCONV=1` or container paths
   get rewritten.
 - **Host Python on the desktop is 3.14 without pytest.** Run the suite in a throwaway
-  `docker-collector:latest` container with `src/`, `tests/` and `pyproject.toml` mounted read-only.
+  `docker-collector:latest` container with `src/`, `tests/` and `pyproject.toml` mounted read-only,
+  started with `--user 0:0` — the image now runs as uid 10001, which cannot `pip install pytest` or
+  create `/work`. Only ever for throwaway containers, never the `collector` service.
 - **Docker Desktop's dashboard can show an error dialog while the engine is fine** — on 2026-09-10,
   started after a boot, it sat on a theme-snapshot 404 while `wslengine` was already answering
   `_ping`. Probe the engine (`docker version`), not the window.

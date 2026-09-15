@@ -23,10 +23,12 @@ The ranker todo is archived at `docs/superpowers/plans/2026-09-14-ranker-drive-t
 - **Git Bash rewrites path-like values.** `PARKCAST_BASE=/ npx vite build` became base `/Program Files/Git/` (measured 2026-09-14). Never pass a path-like env var through Git Bash; prefix `MSYS_NO_PATHCONV=1` or use PowerShell.
 - **Python tests run in a container** (host Python 3.14 has no pytest). From Git Bash:
   ```bash
-  MSYS_NO_PATHCONV=1 docker run --rm -v "D:/Projects/ParkCast/src:/repo/src:ro" -v "D:/Projects/ParkCast/tests:/repo/tests:ro" -v "D:/Projects/ParkCast/pyproject.toml:/repo/pyproject.toml:ro" -w /repo -e PYTHONDONTWRITEBYTECODE=1 docker-collector:latest sh -c "pip install -q pytest 2>/dev/null; python -m pytest -q -p no:cacheprovider tests/"
+  MSYS_NO_PATHCONV=1 docker run --rm --user 0:0 -v "D:/Projects/ParkCast/src:/repo/src:ro" -v "D:/Projects/ParkCast/tests:/repo/tests:ro" -v "D:/Projects/ParkCast/pyproject.toml:/repo/pyproject.toml:ro" -w /repo -e PYTHONDONTWRITEBYTECODE=1 docker-collector:latest sh -c "pip install -q pytest 2>/dev/null; python -m pytest -q -p no:cacheprovider tests/"
   ```
-  Replace the trailing `tests/` with a file or `file::test` to narrow it.
-- **Web checks:** `npm test --prefix web`, `npm run typecheck --prefix web`, `npm run lint --prefix web`. **Worker checks:** `npm test --prefix worker`, `npm run typecheck --prefix worker`. **Script tests:** `node --test scripts/tests/`.
+  Replace the trailing `tests/` with a file or `file::test` to narrow it. `--user 0:0` because the image
+  runs as uid 10001 (Task 6), which cannot install pytest or create `/work`; every mount is read-only.
+  Add it to throwaway test and analysis containers only — never to the live `collector` service.
+- **Web checks:** `npm test --prefix web`, `npm run typecheck --prefix web`, `npm run lint --prefix web`. **Worker checks:** `npm test --prefix worker`, `npm run typecheck --prefix worker`. **Script tests:** `node --test scripts/tests/*.test.mjs`.
 - **Bilingual:** any new user-visible text is English and 繁體中文 (Traditional only).
 
 ## Facts measured while planning (2026-09-14)
@@ -1034,7 +1036,7 @@ test("allows code that only builds the shape", () => {
 });
 ```
 
-- [ ] **Step 2: Run** `node --test scripts/tests/`. Expected: FAIL (module not found).
+- [ ] **Step 2: Run** `node --test scripts/tests/*.test.mjs`. Expected: FAIL (module not found).
 
 - [ ] **Step 3: Implement** `scripts/check-staged-secrets.mjs`:
 
@@ -1158,7 +1160,7 @@ web/.dev-artifacts/
 
 Append to `.dockerignore`, one per line: `docker/secrets`, `web`, `worker`, `scripts`.
 
-- [ ] **Step 4: Run** `node --test scripts/tests/`. Expected: 4 pass.
+- [ ] **Step 4: Run** `node --test scripts/tests/*.test.mjs`. Expected: 4 pass.
 
 - [ ] **Step 5: Prove the hook end to end, outside the repository.** In the scratchpad: `git init` a new
   repository, copy `scripts/check-staged-secrets.mjs` into its `scripts/`, create `leak.txt` with
@@ -1469,7 +1471,7 @@ export default defineConfig({
 }
 ```
 
-Install from the repository root: `npm install --prefix worker --ignore-scripts`. Confirm
+Install from inside `worker/`: `cd worker && npm install --ignore-scripts` (npm 10 ignores `--prefix` when resolving package.json for install/ci/audit). Confirm
 `worker/package-lock.json` exists and `worker/node_modules` is ignored (`git check-ignore worker/node_modules`).
 
 - [ ] **Step 2: Test support.** `worker/tests/setup.ts`:
@@ -3037,7 +3039,7 @@ test("only warns when nothing is stored yet, so the first release is not rolled 
 });
 ```
 
-- [ ] **Step 2: Run** `node --test scripts/tests/`. Expected: the two new files FAIL (modules missing).
+- [ ] **Step 2: Run** `node --test scripts/tests/*.test.mjs`. Expected: the two new files FAIL (modules missing).
 
 - [ ] **Step 3: Implement `scripts/check-deploy-bundle.mjs`:**
 
@@ -3220,7 +3222,7 @@ const invoked = process.argv[1] ? resolve(process.argv[1]).toLowerCase() : "";
 if (invoked === fileURLToPath(import.meta.url).toLowerCase()) await main();
 ```
 
-- [ ] **Step 5: Run** `node --test scripts/tests/`. Expected: all pass.
+- [ ] **Step 5: Run** `node --test scripts/tests/*.test.mjs`. Expected: all pass.
 
 - [ ] **Step 6: Checkpoint** — `git add scripts/check-deploy-bundle.mjs scripts/smoke-live.mjs scripts/tests/check-deploy-bundle.test.mjs scripts/tests/smoke-live.test.mjs`
 
@@ -3246,8 +3248,8 @@ if (invoked === fileURLToPath(import.meta.url).toLowerCase()) await main();
   section. Do not run any command that needs a login.
 
 - [ ] **Step 2: Verify installs without lifecycle scripts (§10.7).** Run
-  `npm ci --prefix worker --ignore-scripts` then `npx --no-install wrangler --version` in `worker/`, and
-  `npm ci --prefix web --ignore-scripts` then `npm test --prefix web` and `npm run build --prefix web`.
+  `npm ci --ignore-scripts` inside `worker/` then `npx --no-install wrangler --version` there, and
+  `npm ci --ignore-scripts` inside `web/` then `npm test --prefix web` and `npm run build --prefix web`.
   If a package fails without its install script, note which package and why in the Review section,
   and document the exception in Task 12's `docs/deploy.md`; do not silently drop `--ignore-scripts`.
 
@@ -3275,7 +3277,7 @@ test("reads the version id and preview URL from wrangler output", () => {
 });
 ```
 
-- [ ] **Step 4: Run** `node --test scripts/tests/`. Expected: `release.test.mjs` FAILS (module missing).
+- [ ] **Step 4: Run** `node --test scripts/tests/*.test.mjs`. Expected: `release.test.mjs` FAILS (module missing).
 
 - [ ] **Step 5: Implement `scripts/deploy-check.mjs`:**
 
@@ -3321,7 +3323,7 @@ run("web typecheck", "npm run typecheck --prefix web");
 run("web lint", "npm run lint --prefix web");
 run("worker tests", "npm test --prefix worker");
 run("worker typecheck", "npm run typecheck --prefix worker");
-run("script tests", "node --test scripts/tests/");
+run("script tests", "node --test scripts/tests/*.test.mjs");
 run("production build", "npm run build --prefix web");
 run("worker bundle (dry run)", "npx --no-install wrangler deploy --dry-run --outdir .wrangler/dry", join(ROOT, "worker"));
 
@@ -3339,8 +3341,8 @@ if (problems.length > 0) {
 console.log(`\nbundle check passed: ${listFiles(join(ROOT, "web", "dist")).length} files`);
 
 console.log("\n=== npm audit (review the output; not a pass/fail gate)");
-spawnSync("npm audit --prefix web", { cwd: ROOT, shell: true, stdio: "inherit" });
-spawnSync("npm audit --prefix worker", { cwd: ROOT, shell: true, stdio: "inherit" });
+spawnSync("npm audit", { cwd: join(ROOT, "web"), shell: true, stdio: "inherit" });
+spawnSync("npm audit", { cwd: join(ROOT, "worker"), shell: true, stdio: "inherit" });
 console.log("\nCheck phase complete. Release from a fresh PowerShell: see docs/deploy.md.");
 ```
 
@@ -3464,7 +3466,7 @@ if (invoked === fileURLToPath(import.meta.url).toLowerCase()) await main();
     "deploy:preview": "node ../scripts/release.mjs --preview"
 ```
 
-- [ ] **Step 8: Run** `node --test scripts/tests/`. Expected: all pass.
+- [ ] **Step 8: Run** `node --test scripts/tests/*.test.mjs`. Expected: all pass.
   Then run the check phase for real, **without** any key set: `npm run deploy:check --prefix worker`.
   Expected: every step passes **except** the bundle check reporting `missing required file: basemap/taipei.pmtiles`
   (the basemap is rebuilt in Task 13). Any other failure is a defect to fix now.
@@ -3514,8 +3516,10 @@ document shows must be one a task actually built or verified.
   5. **Deploying** — `npm run deploy:check --prefix worker` in a normal shell (add `-- --with-python`
      when `src/` changed); then a fresh PowerShell, enter the deploy key as above,
      `npm run deploy:release --prefix worker`, then `Remove-Item Env:CLOUDFLARE_API_TOKEN`. What the release
-     does (re-scan, upload, promote, smoke test three times, automatic rollback). `deploy:preview` for a
-     phone test, and that the next normal deploy switches preview URLs off.
+     does (re-scan, upload, promote, `wrangler triggers deploy`, smoke test three times, automatic rollback,
+     the preview-host check). `deploy:preview` for a phone test (it runs `triggers deploy` with
+     `preview_urls: true` first), and that preview URLs stay on until the next normal release's
+     `triggers deploy` switches them off.
   6. **The collector's upload** — the log lines and what each means: `uploaded N bytes in S s`,
      `upload not needed: stale|too-soon|...`, `upload skipped: paused|backing off|daily cap reached`,
      `upload unauthorized; retrying in an hour`, `upload refused by the daily limit; pausing`,
@@ -3596,11 +3600,15 @@ the `go-pmtiles` download, the first release, and recreating the collector.
   `docker compose -f docker/docker-compose.yml up -d --build --force-recreate`. Confirm the next two
   ticks log `tick`, `published … not updating` and `uploaded … bytes`; `docker inspect -f
   '{{.State.OOMKilled}} {{.RestartCount}} {{.Config.User}}'` shows `false 0 10001:10001`; the row count
-  keeps growing. Then `node scripts/smoke-live.mjs https://parkcast.<name>.workers.dev` passes with a
-  fresh forecast.
+  keeps growing. Confirm the `/scratch` bind mount is writable by uid 10001 (untested until now):
+  `MSYS_NO_PATHCONV=1 docker exec docker-collector-1 python -c "import pathlib; p = pathlib.Path('/scratch/.probe'); p.write_bytes(b'ok'); p.unlink(); print('scratch writable')"`.
+  Then `node scripts/smoke-live.mjs https://parkcast.<name>.workers.dev` passes with a fresh forecast.
 - [ ] **Step 8: Confirm the open questions (§10)**, recording each answer in the Review section:
-  1. `npm run deploy:preview`; the preview URL's `/artifacts/grid.bin` equals the live one (the preview
-     reads production KV); after the next normal release, that preview URL no longer answers (§10.13).
+  1. `npm run deploy:preview` (its `wrangler triggers deploy` with `preview_urls: true` switches preview
+     URLs on before the upload); the preview URL's `/artifacts/grid.bin` equals the live one (the preview
+     reads production KV); after the next normal release — whose `wrangler triggers deploy` applies
+     `preview_urls: false`, and whose final check confirms its own version's preview host does not
+     answer `2xx` — that older preview URL no longer answers (§10.13).
   2. Dashboard Workers metrics: request count before and after 50 requests to random non-artifact paths
      — does `404-page` handling keep them off the Worker? Update spec §6.3 with the answer.
   3. `/_headers` is 404 and the §6.2 headers are on `/` (the smoke test covers both).
@@ -3624,7 +3632,8 @@ the `go-pmtiles` download, the first release, and recreating the collector.
       revalidation with it returns `304`.
   16. (Done while planning.)
   17. Not used: the release smoke-tests after promotion and rolls back automatically.
-  18. The permissions the working deploy key has, recorded in `docs/deploy.md`.
+  18. The permissions the working deploy key has, recorded in `docs/deploy.md` — including setting the
+      Worker's workers.dev subdomain and preview-URL settings, which every release's `triggers deploy` needs.
 - [ ] **Step 9: Record the live state** in `README.md` and `docs/state-of-play.md` (address, date,
   first upload), check `OOMKilled` after the first live midnight, and ask about committing and merging.
 
@@ -3638,4 +3647,14 @@ licence.
 
 ## Review
 
-_Written in Task 13._
+Tasks 1–12 executed 2026-09-14 on `feat/cloudflare-deploy`, subagent-driven, in place. **Nothing committed and nothing deployed.** Every task had a fresh implementer and a task review; seven needed one fix round (Tasks 3, 5, 9, 11, 12, plus rulings in 1 and 8); a final whole-branch review (opus) found one Critical and three Important issues, fixed in one wave and re-reviewed clean. The full ledger of rulings, deferred minors and parked items is in `.superpowers/sdd/todo/progress.md` (git-ignored).
+
+**Final verification** (the staged tree, 72 files, +6,449/−133 against `6ebeefe`): Python 350 passed / 3 skipped; web 219, typecheck and lint clean; Worker 62, typecheck clean; scripts 32. The credential-free check phase passes every step except `missing required file: basemap/taipei.pmtiles` (rebuilt in Task 13). `deploy:release` refuses without a key. The live collector was never touched (StartedAt 2026-09-14T01:06:58Z, RestartCount 0). `core.hooksPath` is still unset.
+
+**Measured during execution:** feed bodies 421,825 B and 2,883,343 B, no redirects; hardened rehearsal exit 0 as uid 10001 on a read-only root, memory.peak 265,166,848 B, pids.peak 6; Worker upload validation + hashing ~1.5 ms per upload in Node on the real 1,090-lot pair; wrangler 4.131.1's `deploy --dry-run`, `versions upload/deploy`, `rollback` and `triggers deploy` (experimental) exist as used.
+
+**Found and fixed beyond the plan:** prune could delete an unarchived day (Task 1, existing bug); a bad secret file or URL would crash-loop the collector (Task 3); the pre-commit hook could be bypassed by a `+++`-shaped line (Task 5); a smoke-test exception skipped rollback, and pruning dry-run maps was unguarded (Task 11); the release never applied `workers_dev`/`preview_urls` — only `wrangler triggers deploy` does (final review); the non-root image broke the documented throwaway test containers (final review); `authorized()` let `Bearer ` through when the secret was missing (final review).
+
+**Execution-time rulings that changed commands:** `node --test scripts/tests/*.test.mjs` (a bare directory runs nothing on Node 22/Windows); npm 10 ignores `--prefix` for install/ci/audit; throwaway `docker run` test containers need `--user 0:0` once the image is non-root.
+
+**Open for Task 13** (in addition to §10): `triggers deploy` on the draft Worker `secret put` creates; what a disabled preview host returns; the deploy key's workers.dev subdomain/preview permission; `/scratch` writable by uid 10001; merge the compose snippet into the existing `environment:` block (the docs say "add"); do not rotate the secret right after a `deploy:preview` — release first.

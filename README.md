@@ -61,7 +61,7 @@ Figures at the time of writing (2026-09-14):
 | Lots withheld as *not updating* | **112** at the first live publish (2026-09-14 09:11); 133 on a snapshot at 01:13 — the count moves as feeds freeze and recover (see the limitations) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **34.5 KB gzipped**, both files |
-| Tests | **306** Python · **191** TypeScript |
+| Tests | **350** Python (3 skipped) · **219** web · **62** Worker · **32** scripts |
 
 Plans 1 through 3e are complete: the collector, the forecast grid, the ranked list, the map and
 time-scrubber, search, an installable offline-capable app, and — 3e — no forecast at all for a car
@@ -252,9 +252,22 @@ npm run dev --prefix web
 **Tests:**
 
 ```bash
-python -m pytest          # 306 (or in a docker-collector container; see docker/README.md)
-npm test --prefix web     # 191
+python -m pytest                       # 350, 3 skipped (or in a docker-collector container; see docker/README.md)
+npm test --prefix web                  # 219
+npm test --prefix worker               # 62
+node --test scripts/tests/*.test.mjs   # 32
 ```
+
+---
+
+## Deployment
+
+Not deployed yet — the app has always run locally. A design for a **free** deploy to Cloudflare Workers
+is approved and mostly built: static assets for the app and basemap, the forecast in one Workers KV key,
+tested on the desktop against the live forecast before every release, a two-phase deploy that never puts
+the release credential in the same shell as a test runner, and the collector running in a hardened,
+non-root, read-only container. See [`docs/deploy.md`](docs/deploy.md) for the setup, the everyday
+workflow, and the runbook.
 
 ---
 

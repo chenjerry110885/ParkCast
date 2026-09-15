@@ -28,6 +28,14 @@ Zoom 15 is not an arbitrary cutoff: it is the planet build's own ceiling for thi
 requesting `--maxzoom=16` against the same source came back byte-identical to the zoom-15 one --
 there is no zoom-16 data to have.
 
+**The deploy gate requires this file, sized 15–25 MiB.** `scripts/check-deploy-bundle.mjs` (run by
+`npm run deploy:check --prefix worker`, `docs/deploy.md`) fails the build if
+`web/dist/basemap/taipei.pmtiles` is missing, or is outside that range -- 15 MiB as a floor against a
+truncated or empty extract, 25 MiB because that is Cloudflare Workers' own per-file size limit for a
+static asset (this file, at ~23 MB, is the only asset anywhere near it). Rebuild it before deploying if
+`web/dist/` doesn't have it yet -- the build does not generate it, only copies whatever
+`web/public/basemap/taipei.pmtiles` already holds.
+
 ## Rebuilding it
 
 ```bash
