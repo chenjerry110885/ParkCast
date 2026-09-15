@@ -16,7 +16,7 @@
  * a component that throws a promise with no boundary above it takes the render
  * down instead of showing a fallback.
  */
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { HEADER_SIZE } from "../src/artifacts";
@@ -195,8 +195,10 @@ describe("while the map's chunk is still downloading", () => {
     // has anything to do with the map, so neither may wait for it.
     await renderLocatedWithoutMap();
 
-    expect(screen.getByTestId("staleness").textContent).toBe("data from 4 min ago");
-    expect(screen.getByLabelText(t("en").arrivingIn)).not.toBeDisabled();
+    expect(screen.getByTestId("staleness").textContent).toContain("data from 4 min ago");
+    const strip = screen.getByRole("radiogroup", { name: t("en").arrivalGroupLabel });
+    expect(within(strip).getAllByRole("radio").length).toBeGreaterThan(0);
+    expect(screen.getByRole("radio", { checked: true })).toBeInTheDocument();
   });
 
   it("says the map is loading, and does not say anything has failed", async () => {

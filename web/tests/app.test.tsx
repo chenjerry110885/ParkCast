@@ -25,10 +25,12 @@ import App, {
   MIN_REFETCH_MS,
   REFRESH_MS,
 } from "../src/App";
-import { HEADER_SIZE, UNKNOWN } from "../src/artifacts";
+import { arrivalOptions, defaultArrival, formatClock, horizonFromReading } from "../src/arrival";
+import { HEADER_SIZE, UNKNOWN, horizonColumn } from "../src/artifacts";
 import { haversineMeters } from "../src/geo";
 import { fillTemplate, t } from "../src/i18n";
-import type { Lot, LotsDoc } from "../src/types";
+import { resetPlaceIndexCache } from "../src/places";
+import type { Grid, Lot, LotsDoc } from "../src/types";
 
 const ROSTER_ID = 4242;
 const N_HORIZONS = 24;
@@ -37,6 +39,29 @@ const STEP_MIN = 5;
 const BASE_DATA_TS = 1788677280;
 /** The frozen wall clock every test runs at: four minutes after the reading. */
 const NOW_MS = (BASE_DATA_TS + 4 * 60) * 1000;
+/** ...as the app sees it. The arrival strip is built from unix seconds, not milliseconds. */
+const NOW_SEC = NOW_MS / 1000;
+
+/**
+ * Just enough of the grid for `arrival.ts` to answer with, so every expectation
+ * about the strip is computed by the same helpers the app uses rather than
+ * spelled out as a literal clock time that would quietly rot when the fixture's
+ * `base_data_ts` moved.
+ */
+const GRID_SPAN = { baseDataTs: BASE_DATA_TS, stepMin: STEP_MIN, nHorizons: N_HORIZONS };
+
+/** The grid's shape, for `horizonColumn` -- the rest of a `Grid` is never read. */
+const GRID = GRID_SPAN as unknown as Grid;
+
+/** The wall clock the app is reading right now, in seconds -- after any `ageArtifact`. */
+function nowSec(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+/** The column the app reads for an arrival time, age and all. See `horizonFromReading`. */
+function columnFor(arrivalTs: number): number {
+  return horizonColumn(GRID, horizonFromReading(arrivalTs, BASE_DATA_TS));
+}
 
 const HERE = { lat: 25.0375, lon: 121.5637 };
 
@@ -145,6 +170,17 @@ function stubFetch(grid: ArrayBuffer = makeGrid(), lots: LotsDoc = makeLotsDoc()
     if (url.endsWith("lots.json")) {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(lots) });
     }
+    // The offline place index, which `PlaceSearch` asks for once on its first
+    // focus. Empty on purpose: these tests are about the wiring around the box,
+    // and an empty index leaves the live roster as the only source of results --
+    // which is the fallback the shipped code has to keep working anyway.
+    if (url.endsWith("places/taipei.json")) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ v: 1, built: 1, source: "t", rows: [] }),
+      });
+    }
     return Promise.reject(new Error(`unexpected url ${url}`));
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -231,8 +267,30 @@ function rowFor(name: string): HTMLElement {
   return row;
 }
 
+/**
+ * A fact tile's sentence: the big value and the label under it, joined by the
+ * space the layout puts between them and the DOM does not. The card splits
+ * "NT$50 per entry" into two elements so the number can be set in the tabular
+ * figures the label is not, which leaves `textContent` reading "NT$50per entry".
+ */
+function factText(tile: HTMLElement): string {
+  const value = tile.querySelector(".fact__value")?.textContent ?? "";
+  const label = tile.querySelector(".fact__label")?.textContent ?? "";
+  return label === "" ? value : `${value} ${label}`;
+}
+
+/** The arrival strip's chips, as the clock times they read. */
+function chipTimes(): string[] {
+  return screen.queryAllByRole("radio").map((chip) => chip.textContent ?? "");
+}
+
 beforeEach(() => {
   stubFetch();
+  // The place index is cached per URL for the life of the module, and recent
+  // picks live in `localStorage`; both would otherwise leak from one test into
+  // the next and decide what the search box offers.
+  resetPlaceIndexCache();
+  window.localStorage.clear();
   // The screen now mounts the map, and MapLibre asks the canvas for a WebGL
   // context on its way up. jsdom has none and says so -- loudly, once per
   // render. Answering `null` ourselves is the same answer without twenty lines
@@ -243,6 +301,18 @@ beforeEach(() => {
   // on `Date.now` rather than faking timers: the component's clock interval is
   // not under test, and fake timers would put it in the way of every `findBy`.
   vi.spyOn(Date, "now").mockReturnValue(NOW_MS);
+  // jsdom answers `false` to every media query, which leaves the probability
+  // ring counting to each new value over 400 ms of real animation frames --
+  // updates React cannot see inside `act`, and a number that is briefly the
+  // *old* answer. Reduced motion is a shipped code path, not a special case,
+  // and it settles synchronously; the breakpoint query still answers "phone",
+  // so the layout under test is the same one it always was.
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query.includes("prefers-reduced-motion"),
+    media: query,
+    addEventListener() {},
+    removeEventListener() {},
+  }));
   // The default language must be a decision of the test, not of jsdom.
   Object.defineProperty(navigator, "language", { value: "en-US", configurable: true });
 });
@@ -270,7 +340,7 @@ describe("price", () => {
   it("shows a per-entry fare as a per-visit price, not as unknown", async () => {
     await renderLocated();
     const price = within(rowFor("至善公園平面停車場")).getByTestId("lot-price");
-    expect(price.textContent).toBe(`NT$50 ${t("en").perEntry}`);
+    expect(factText(price)).toBe(`NT$50 ${t("en").perEntry}`);
     expect(price.textContent).not.toContain(t("en").priceUnknown);
     expect(price.textContent).not.toContain(t("en").perHour);
   });
@@ -278,7 +348,7 @@ describe("price", () => {
   it("renders a range as the range, not as one of its bounds", async () => {
     await renderLocated();
     const price = within(rowFor("世貿一館站停車場")).getByTestId("lot-price");
-    expect(price.textContent).toBe(`NT$20–40 ${t("en").perHour}`);
+    expect(factText(price)).toBe(`NT$20–40 ${t("en").perHour}`);
     // The ranker scores this lot at its NT$30 midpoint; the screen must not.
     expect(price.textContent).not.toContain("NT$30");
   });
@@ -286,7 +356,7 @@ describe("price", () => {
   it("renders an exact hourly fare with its own number", async () => {
     await renderLocated();
     const price = within(rowFor("市府路一號停車場")).getByTestId("lot-price");
-    expect(price.textContent).toBe(`NT$60 ${t("en").perHour}`);
+    expect(factText(price)).toBe(`NT$60 ${t("en").perHour}`);
   });
 });
 
@@ -323,9 +393,12 @@ describe("a car park whose feed is not updating", () => {
   it("says so, and for how long, instead of a probability", async () => {
     stubNotUpdating();
     await renderLocated();
-    const chance = within(rowFor(NAME)).getByTestId("lot-probability");
+    const row = rowFor(NAME);
+    const chance = within(row).getByTestId("lot-probability");
     expect(chance.textContent).toContain(t("en").notUpdating);
-    expect(chance.textContent).toContain(fillTemplate(t("en").unchangedForTemplate, { n: 30 }));
+    // How long, on the card's sub-line under the name: the ring has room for
+    // the words or the duration, not both, and the words are the claim.
+    expect(row.textContent).toContain(fillTemplate(t("en").unchangedForTemplate, { n: 30 }));
     expect(chance.textContent).not.toMatch(/\d+%/);
     expect(chance.textContent).not.toContain(t("en").noData);
   });
@@ -334,8 +407,9 @@ describe("a car park whose feed is not updating", () => {
     stubNotUpdating();
     ageArtifact(90); // to now it would be 31 h
     await renderLocated();
-    const chance = within(rowFor(NAME)).getByTestId("lot-probability");
-    expect(chance.textContent).toContain(fillTemplate(t("en").unchangedForTemplate, { n: 30 }));
+    expect(rowFor(NAME).textContent).toContain(
+      fillTemplate(t("en").unchangedForTemplate, { n: 30 }),
+    );
   });
 
   it("lets a fresher grid's forecast win over a stale lots.json", async () => {
@@ -360,9 +434,9 @@ describe("a car park whose feed is not updating", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: t("zh").useMyLocation }));
     await screen.findByTestId("lot-list");
-    const chance = within(rowFor(NAME)).getByTestId("lot-probability");
-    expect(chance.textContent).toContain("資料未更新");
-    expect(chance.textContent).toContain("已 30 小時未變動");
+    const row = rowFor(NAME);
+    expect(within(row).getByTestId("lot-probability").textContent).toContain("資料未更新");
+    expect(row.textContent).toContain("已 30 小時未變動");
   });
 });
 
@@ -392,10 +466,15 @@ describe("geolocation", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: t("en").useMyLocation }));
 
-    await screen.findByText(t("en").locationUnavailable);
-    // No spinner left behind, and the user can try again.
-    expect(screen.queryByText(t("en").locating)).toBeNull();
-    const retry = screen.getByRole("button", { name: t("en").useMyLocation });
+    // Said in the notice the user reads, and again in the live region that
+    // announces it -- hence the testid rather than a text lookup.
+    expect((await screen.findByTestId("geo-unavailable")).textContent).toBe(
+      t("en").locationUnavailable,
+    );
+    // No spinner left behind, and the user can try again. The button is an icon
+    // now, so its state is in its accessible name.
+    expect(screen.queryByRole("button", { name: t("en").locating })).toBeNull();
+    const retry = screen.getByRole("button", { name: t("en").locationUnavailable });
     expect(retry.hasAttribute("disabled")).toBe(false);
     expect(screen.getByRole("heading", { name: t("en").appName })).toBeDefined();
   });
@@ -403,7 +482,7 @@ describe("geolocation", () => {
   it("shows the unavailable string when the browser has no geolocation at all", async () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: t("en").useMyLocation }));
-    await screen.findByText(t("en").locationUnavailable);
+    await screen.findByTestId("geo-unavailable");
   });
 
   it("gives up on a permission prompt that is closed without an answer", async () => {
@@ -425,8 +504,8 @@ describe("geolocation", () => {
       await vi.advanceTimersByTimeAsync(GEO_WATCHDOG_MS + 1_000);
     });
 
-    await screen.findByText(t("en").locationUnavailable);
-    const retry = screen.getByRole("button", { name: t("en").useMyLocation });
+    await screen.findByTestId("geo-unavailable");
+    const retry = screen.getByRole("button", { name: t("en").locationUnavailable });
     expect(retry.hasAttribute("disabled")).toBe(false);
     expect(retry.getAttribute("aria-busy")).toBe("false");
   });
@@ -439,7 +518,7 @@ describe("geolocation", () => {
       await vi.advanceTimersByTimeAsync(GEO_WATCHDOG_MS * 2);
     });
 
-    expect(screen.queryByText(t("en").locationUnavailable)).toBeNull();
+    expect(screen.queryByTestId("geo-unavailable")).toBeNull();
     expect(screen.getByTestId("lot-list")).toBeDefined();
   });
 });
@@ -448,20 +527,26 @@ describe("staleness", () => {
   it("reports the age of the reading, from baseDataTs", async () => {
     render(<App />);
     const line = await screen.findByTestId("staleness");
-    expect(line.textContent).toBe("data from 4 min ago");
+    expect(line.textContent).toContain("data from 4 min ago");
+    // Four minutes is not an expiry, and the badge must not say it is.
+    expect(line.textContent).not.toContain(t("en").expired);
   });
 });
 
 describe("arrival time", () => {
-  it("offers every horizon the grid actually holds", async () => {
+  it("offers every clock time the grid actually holds, and opens on the default", async () => {
     render(<App />);
-    // The scrubber's range is read off the grid's own header, so a grid built
-    // at a different resolution moves the control instead of leaving its far
-    // end pointing at a column that does not exist.
-    const scrubber = await screen.findByLabelText(t("en").arrivingIn);
-    expect(scrubber.getAttribute("min")).toBe(String(STEP_MIN));
-    expect(scrubber.getAttribute("max")).toBe(String(N_HORIZONS * STEP_MIN));
-    expect(scrubber.getAttribute("step")).toBe(String(STEP_MIN));
+    // The strip's times are read off the grid's own header -- five minutes out
+    // through the last column it forecasts -- so a grid built at a different
+    // resolution, or an older reading, moves the strip instead of leaving its
+    // far end pointing at a column that does not exist.
+    const strip = await screen.findByRole("radiogroup", { name: t("en").arrivalGroupLabel });
+    expect(within(strip).getAllByRole("radio").length).toBeGreaterThan(0);
+    expect(chipTimes()).toEqual(arrivalOptions(NOW_SEC, GRID_SPAN).map(formatClock));
+
+    // ...and the one it opens on is a real arrival time, not a horizon index.
+    const checked = screen.getByRole("radio", { checked: true });
+    expect(checked.textContent).toBe(formatClock(defaultArrival(NOW_SEC)));
   });
 });
 
@@ -477,61 +562,74 @@ describe("arrival time", () => {
 describe("staleness correction", () => {
   it("reads the column for the arrival time plus the artifact's age", async () => {
     const AGE_MIN = 10;
-    const REQUESTED_MIN = 15; // the control's default
     stubColumnMarkedArtifacts();
     ageArtifact(AGE_MIN);
 
     await renderLocated();
 
+    // The strip offers a clock time; the column behind it is measured from the
+    // *reading*, so the artifact's age is already inside the number.
+    const column = columnFor(defaultArrival(nowSec()));
     const chance = within(rowFor(MARKED.n)).getByTestId("lot-probability");
-    // 15 minutes from now is 25 minutes from a reading 10 minutes old.
-    const corrected = (REQUESTED_MIN + AGE_MIN) / STEP_MIN - 1;
-    expect(chance.textContent).toContain(`${columnMark(corrected)}%`);
-    // Not the uncorrected column, which forecasts five minutes before arrival.
-    const uncorrected = REQUESTED_MIN / STEP_MIN - 1;
-    expect(chance.textContent).not.toContain(`${columnMark(uncorrected)}%`);
+    expect(chance.textContent).toContain(`${columnMark(column)}%`);
+    // Not the column that same clock time would name if the age were ignored:
+    // that one forecasts ten minutes before the driver arrives.
+    expect(chance.textContent).not.toContain(`${columnMark(column - AGE_MIN / STEP_MIN)}%`);
   });
 
   it("moves the column it reads as the artifact ages, for one unchanged request", async () => {
     stubColumnMarkedArtifacts();
     ageArtifact(0);
     await renderLocated();
+    const freshColumn = columnFor(defaultArrival(nowSec()));
     const fresh = within(rowFor(MARKED.n)).getByTestId("lot-probability").textContent;
 
     cleanup();
     stubColumnMarkedArtifacts();
     ageArtifact(20);
     await renderLocated();
+    const staleColumn = columnFor(defaultArrival(nowSec()));
     const stale = within(rowFor(MARKED.n)).getByTestId("lot-probability").textContent;
 
-    expect(fresh).toContain(`${columnMark(15 / STEP_MIN - 1)}%`);
-    expect(stale).toContain(`${columnMark((15 + 20) / STEP_MIN - 1)}%`);
+    expect(fresh).toContain(`${columnMark(freshColumn)}%`);
+    expect(stale).toContain(`${columnMark(staleColumn)}%`);
+    // Twenty minutes of age is four columns of correction, for a driver asking
+    // for the same lead time both times.
+    expect(staleColumn - freshColumn).toBe(20 / STEP_MIN);
   });
 
-  it("leaves the horizon control offering the arrival times the user picks", async () => {
+  it("leaves the control offering the arrival times the user picks", async () => {
     // The correction is applied to the grid read, never to the label: the user
-    // still chooses a real number of minutes from now.
+    // still chooses a real clock time, and a 23-minute-old reading does not
+    // quietly move the chip they picked 23 minutes later.
     ageArtifact(23);
     render(<App />);
-    const scrubber = (await screen.findByLabelText(t("en").arrivingIn)) as HTMLInputElement;
-    expect(scrubber.getAttribute("min")).toBe(String(STEP_MIN));
-    expect(scrubber.getAttribute("max")).toBe(String(N_HORIZONS * STEP_MIN));
-    // 15 minutes from now, not 38 -- the age belongs to the grid read alone.
-    expect(scrubber.value).toBe("15");
+    await screen.findByRole("radiogroup", { name: t("en").arrivalGroupLabel });
+
+    const at = nowSec();
+    expect(chipTimes()).toEqual(arrivalOptions(at, GRID_SPAN).map(formatClock));
+    expect(screen.getByRole("radio", { checked: true }).textContent).toBe(
+      formatClock(defaultArrival(at)),
+    );
   });
 
-  it("keeps offering the far horizons even when the offset runs off the grid", async () => {
-    // `probabilityAt` clamps to the last column. Being a few minutes short at
-    // +120 is a far smaller lie than being wrong at +5, and dropping the option
-    // would take a real arrival time off the control to flatter the model.
+  it("keeps the far end of the strip a real answer rather than a clamp", async () => {
+    // `arrivalOptions` stops at the last clock time the grid still forecasts,
+    // instead of offering one `probabilityAt` would have to clamp. So the
+    // furthest chip a driver can pick reads its own column -- not the last
+    // column standing in for a time nobody asked for, and not "no data".
     stubColumnMarkedArtifacts();
     ageArtifact(30);
     await renderLocated();
-    fireEvent.change(screen.getByLabelText(t("en").arrivingIn), {
-      target: { value: String(N_HORIZONS * STEP_MIN) },
-    });
+
+    const chips = screen.getAllByRole("radio");
+    const furthest = arrivalOptions(nowSec(), GRID_SPAN).at(-1)!;
+    expect(chips.at(-1)?.textContent).toBe(formatClock(furthest));
+
+    fireEvent.click(chips.at(-1)!);
+
     const chance = within(rowFor(MARKED.n)).getByTestId("lot-probability");
-    expect(chance.textContent).toContain(`${columnMark(N_HORIZONS - 1)}%`);
+    expect(chance.textContent).toContain(`${columnMark(columnFor(furthest))}%`);
     expect(chance.textContent).not.toContain(t("en").noData);
   });
 });
@@ -701,18 +799,18 @@ describe("artifacts", () => {
  *
  * The staleness correction pushes every arrival time the user can pick towards
  * the end of the grid as the reading ages. Once even the *nearest* one clamps to
- * the last column, they all do: the scrubber becomes a control that changes
+ * the last column, they all do: the strip becomes a control that changes
  * nothing while the screen shows one answer for a time nobody asked for. Found
  * with a 383-minute-old artifact, and guaranteed to recur: the collector stops
  * whenever its machine sleeps while the published copy stays up and goes on
  * ageing.
  *
  * The boundary is the point of the two tests at the bottom. It is *not* the
- * grid's span: at the shipped geometry the scrubber goes inert at an age of 113
+ * grid's span: at the shipped geometry the strip goes inert at an age of 113
  * minutes, eight before the span runs out at 121.
  */
 describe("an artifact older than the grid it came from", () => {
-  /** The 383 minutes actually observed while verifying the scrubber. */
+  /** The 383 minutes actually observed while verifying the arrival control. */
   const OBSERVED_AGE_MIN = 383;
   /** `round((5 + 112) / 5) - 1` is column 22; one minute later it is 23. */
   const LAST_LIVE_AGE_MIN = 112;
@@ -737,11 +835,14 @@ describe("an artifact older than the grid it came from", () => {
 
     // Names, districts, walking distances and prices never came from the grid.
     const row = rowFor("至善公園平面停車場");
-    expect(within(row).getByTestId("lot-price").textContent).toBe(`NT$50 ${t("en").perEntry}`);
-    expect(within(row).getByTestId("lot-walk").textContent).toContain(t("en").walk);
+    expect(factText(within(row).getByTestId("lot-price"))).toBe(`NT$50 ${t("en").perEntry}`);
+    expect(within(row).getByTestId("lot-walk").textContent).toContain(t("en").walkTile);
     expect(screen.getByTestId("lot-list")).toBeInTheDocument();
-    // ...and the age is still reported, which is how the user can tell why.
-    expect(screen.getByTestId("staleness")).toBeInTheDocument();
+    // ...and the age is still reported, which is how the user can tell why --
+    // now with the word for what has happened to it, not just a big number.
+    const badge = screen.getByTestId("staleness");
+    expect(badge).toBeInTheDocument();
+    expect(badge.textContent).toContain(t("en").expired);
   });
 
   it("stops the heading claiming an order the forecast no longer supports", async () => {
@@ -751,10 +852,13 @@ describe("an artifact older than the grid it came from", () => {
     expect(screen.queryByText(t("en").rankedForArrival)).toBeNull();
   });
 
-  it("disables the scrubber rather than leave a control that does nothing", async () => {
+  it("renders no arrival chips rather than leave a control that does nothing", async () => {
     ageArtifact(OBSERVED_AGE_MIN);
     await renderLocated();
-    expect(screen.getByLabelText(t("en").arrivingIn)).toBeDisabled();
+    // Not a disabled strip and not a strip of identical answers: there is no
+    // arrival time left that this grid forecasts, so there is none to offer.
+    expect(screen.queryAllByRole("radio")).toEqual([]);
+    expect(screen.getByTestId("arrival-time").textContent).not.toMatch(/\d/);
   });
 
   it("says all of it in Chinese too", async () => {
@@ -769,40 +873,39 @@ describe("an artifact older than the grid it came from", () => {
 
   it("expires as soon as the nearest arrival time clamps, not a window later", async () => {
     // 113 minutes: inside the grid's 120-minute span, and already inert. The
-    // span test called this live, so the slider was enabled and the heading
-    // claimed an order over 24 identical clamped columns.
+    // span test called this live, so the strip was offering chips and the
+    // heading claimed an order over 24 identical clamped columns.
     ageArtifact(LAST_LIVE_AGE_MIN + 1);
     await renderLocated();
 
     expect(screen.getByTestId("forecast-expired").textContent).toBe(t("en").forecastTooOld);
-    expect(screen.getByLabelText(t("en").arrivingIn)).toBeDisabled();
+    expect(screen.queryAllByRole("radio")).toEqual([]);
     expect(screen.getByText(t("en").nearbyCarParks)).toBeInTheDocument();
     for (const cell of screen.getAllByTestId("lot-probability")) {
       expect(cell.textContent).not.toMatch(/\d+%/);
     }
   });
 
-  it("leaves a grid alone while the scrubber can still change the answer", async () => {
-    // One minute earlier, and the control is not a decoration: the nearest
-    // arrival reads column 22 and the furthest reads 23, so the far horizons
-    // clamp exactly as they always have -- the documented trade, not an expiry.
+  it("leaves a grid alone while an arrival time still has a column of its own", async () => {
+    // One minute earlier, and the forecast is not a decoration: the last
+    // arrival time the grid reaches is still offered, and it reads its own
+    // column rather than the clamped last one -- the documented trade, not an
+    // expiry.
     stubColumnMarkedArtifacts();
     ageArtifact(LAST_LIVE_AGE_MIN);
     await renderLocated();
 
     expect(screen.queryByTestId("forecast-expired")).toBeNull();
     expect(screen.getByText(t("en").rankedForArrival)).toBeInTheDocument();
-    const scrubber = screen.getByLabelText(t("en").arrivingIn);
-    expect(scrubber).not.toBeDisabled();
 
-    fireEvent.change(scrubber, { target: { value: String(STEP_MIN) } });
-    const nearest = within(rowFor(MARKED.n)).getByTestId("lot-probability").textContent;
-    fireEvent.change(scrubber, { target: { value: String(N_HORIZONS * STEP_MIN) } });
-    const furthest = within(rowFor(MARKED.n)).getByTestId("lot-probability").textContent;
+    const offered = arrivalOptions(nowSec(), GRID_SPAN);
+    expect(chipTimes()).toEqual(offered.map(formatClock));
+    expect(offered.length).toBeGreaterThan(0);
 
-    expect(nearest).toContain(`${columnMark(N_HORIZONS - 2)}%`);
-    expect(furthest).toContain(`${columnMark(N_HORIZONS - 1)}%`);
-    expect(nearest).not.toBe(furthest);
+    const chance = within(rowFor(MARKED.n)).getByTestId("lot-probability").textContent;
+    expect(chance).toContain(`${columnMark(columnFor(offered.at(-1)!))}%`);
+    // ...and not the grid's last column, which is what a clamp would have said.
+    expect(chance).not.toContain(`${columnMark(N_HORIZONS - 1)}%`);
   });
 });
 
@@ -1007,10 +1110,12 @@ describe("a destination outside the covered area", () => {
  *
  * The GPS button answers "where am I" and the map answers "that spot there";
  * neither answers "I am going to 台北車站 tomorrow morning", which is the
- * question a driver actually has. This searches the roster already in memory --
- * no geocoder, no key, no third-party origin, and the destination never leaves
- * the phone. `search.test.ts` covers the matching; these cover the wiring, and
- * the wiring is where the interesting failure is: a second destination path.
+ * question a driver actually has. This searches the roster already in memory,
+ * plus a place index fetched once from this app's own origin -- no geocoder, no
+ * key, no third-party origin, and the destination never leaves the phone.
+ * `places.test.ts` and `placeSearch.test.tsx` cover the matching and the
+ * combobox; these cover the wiring, and the wiring is where the interesting
+ * failure is: a second destination path.
  */
 describe("searching for a destination", () => {
   /**
@@ -1052,13 +1157,13 @@ describe("searching for a destination", () => {
 
   /** The search box, once the roster it searches has arrived. */
   function box(): HTMLInputElement {
-    return screen.getByLabelText(t("en").searchLabel) as HTMLInputElement;
+    return screen.getByRole("combobox", { name: t("en").searchLabel }) as HTMLInputElement;
   }
 
   async function renderSearchable(): Promise<HTMLInputElement> {
     stubSearchable();
     render(<App />);
-    await screen.findByLabelText(t("en").searchLabel);
+    await screen.findByRole("combobox", { name: t("en").searchLabel });
     return box();
   }
 
@@ -1079,7 +1184,7 @@ describe("searching for a destination", () => {
   it("sets the destination from a car park chosen by name", async () => {
     await renderSearchable();
     // Nothing is ranked until a destination exists -- the prompt, not a list.
-    expect(screen.getByText(t("en").startPrompt)).toBeInTheDocument();
+    expect(screen.getByText(t("en").startPromptMap)).toBeInTheDocument();
     expect(screen.queryByTestId("lot-list")).toBeNull();
 
     type("北投");
@@ -1089,7 +1194,7 @@ describe("searching for a destination", () => {
     expect(await screen.findByTestId("lot-list")).toBeInTheDocument();
     // The chosen car park is where the driver is going, so it is 0 m away.
     expect(firstRankedId()).toBe("TPE_BEITOU");
-    expect(screen.queryByText(t("en").startPrompt)).toBeNull();
+    expect(screen.queryByText(t("en").startPromptMap)).toBeNull();
   });
 
   it("re-ranks around whichever car park was chosen", async () => {
@@ -1166,7 +1271,16 @@ describe("searching for a destination", () => {
 
     fireEvent.keyDown(box(), { key: "Enter" });
     await screen.findByTestId("lot-list");
-    expect(firstRankedId()).toBe(offered[1]);
+    // The option Enter took is the destination, and -- because a car park is a
+    // lot as well as a place -- the card the map is showing. Asserted on the
+    // selection rather than on first place: three of these five car parks are
+    // within fifty metres of each other, so which one the *ranking* puts first
+    // is a question about the cost model, not about the keyboard.
+    const chosen = screen
+      .getAllByTestId("lot-row")
+      .find((el) => el.getAttribute("data-lot-id") === offered[1]);
+    expect(chosen).toBeDefined();
+    expect(chosen).toHaveClass("lot-card--selected");
   });
 
   it("dismisses the results on escape without losing the query", async () => {
@@ -1198,17 +1312,27 @@ describe("searching for a destination", () => {
     expect(screen.getByText(t("en").searchHint)).toBeInTheDocument();
   });
 
-  it("makes no network request at all while searching", async () => {
-    // The whole reason there is no geocoder here. If this ever fails, the
-    // driver's destination started leaving the phone.
+  it("makes no request beyond the one place-index fetch", async () => {
+    // The whole reason there is no geocoder here. The index is one static file
+    // from this app's own origin, fetched once when the box is first focused;
+    // after that, typing a destination asks the network for nothing at all. If
+    // this ever fails, the driver's destination started leaving the phone.
     await renderSearchable();
-    const before = fetchMock.mock.calls.length;
+    const seen = new Set(fetchMock.mock.calls.map(([url]) => String(url)));
 
+    fireEvent.focus(box());
     for (const query of ["1", "10", "101", "USPACE", "市政府", "台北北投", "北投"]) type(query);
     fireEvent.keyDown(box(), { key: "Enter" });
     await screen.findByTestId("lot-list");
 
-    expect(fetchMock.mock.calls.length).toBe(before);
+    const urls = fetchMock.mock.calls.map(([url]) => String(url));
+    const places = urls.filter((url) => url.endsWith("places/taipei.json"));
+    // Once, on the first focus -- not per keystroke, and not never either: the
+    // index is what lets the box find anything that is not a car park.
+    expect(places.length).toBe(1);
+    // ...and nothing else: every other request is one the artifacts had already
+    // made before a key was pressed.
+    expect(urls.filter((url) => !places.includes(url)).every((url) => seen.has(url))).toBe(true);
   });
 
   it("names the car parks in Chinese and the districts in the reader's language", async () => {
@@ -1217,17 +1341,20 @@ describe("searching for a destination", () => {
     const option = screen.getByTestId("search-option");
     // The name matches the signage, in either UI language...
     expect(option.textContent).toContain("臺北北投溫泉停車場");
-    expect(option.textContent).toContain("Beitou District");
+    // ...while the district beside it -- one of the feed's twelve, a closed set
+    // this app translates everywhere else it shows one -- is read in the
+    // reader's own language.
+    expect(option.querySelector(".search__option-where")?.textContent).toContain("Beitou District");
 
     fireEvent.click(screen.getByRole("button", { name: "切換為中文" }));
     await screen.findByRole("button", { name: t("zh").useMyLocation });
 
-    const zhBox = screen.getByLabelText(t("zh").searchLabel);
     expect(screen.getByText(t("zh").searchHint)).toBeInTheDocument();
+    const zhBox = screen.getByRole("combobox", { name: t("zh").searchLabel });
     fireEvent.change(zhBox, { target: { value: "北投" } });
     const zhOption = screen.getByTestId("search-option");
     expect(zhOption.textContent).toContain("臺北北投溫泉停車場");
-    expect(zhOption.textContent).toContain("北投區");
+    expect(zhOption.querySelector(".search__option-where")?.textContent).toContain("北投區");
   });
 });
 
@@ -1243,6 +1370,39 @@ describe("searching for a destination", () => {
  * while the chunk is still in flight, which a real import resolves too fast to
  * catch.
  */
+/**
+ * Both layouts are binding (spec §2), and every other test in this file renders
+ * the phone -- jsdom answers `false` to `(min-width: 768px)` unless a test says
+ * otherwise, which is exactly how the desktop arrangement could rot unnoticed.
+ * One render of the other branch, asserting the swap `Shell` actually makes:
+ * the side panel instead of the sheet, with the search inside it rather than in
+ * a top bar that does not exist up there.
+ */
+describe("the desktop layout", () => {
+  /** Reduced motion as everywhere else in this file, plus a desktop-width viewport. */
+  function stubDesktop() {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query.includes("prefers-reduced-motion") || query.includes("min-width: 768px"),
+      media: query,
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+  }
+
+  it("puts the search in a side panel and mounts no bottom sheet", async () => {
+    stubDesktop();
+    render(<App />);
+    await screen.findByTestId("staleness");
+
+    const panel = screen.getByTestId("panel");
+    expect(within(panel).getByRole("combobox", { name: t("en").searchLabel })).toBeInTheDocument();
+    // The sheet and its grip are the phone's; up here there is nothing to drag.
+    expect(screen.queryByTestId("sheet")).toBeNull();
+    expect(screen.queryByRole("button", { name: t("en").expandList })).toBeNull();
+    expect(screen.queryByRole("button", { name: t("en").collapseList })).toBeNull();
+  });
+});
+
 describe("the map is a separate chunk", () => {
   it("still ranks, lists and draws once the chunk has landed", async () => {
     await renderLocated();

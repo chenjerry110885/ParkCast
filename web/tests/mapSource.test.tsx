@@ -18,6 +18,12 @@
  * concession to the split: what is asserted afterwards is unchanged, because
  * the guarantee is unchanged -- the whole roster is on the map before anything
  * is tapped, and each dot reads its own declared grid row.
+ *
+ * The second half of the file renders `MapView` **directly**. Selection, the
+ * centre request and the padding under the sheet are a conversation between the
+ * app shell and the map, and the only honest way to test the map's half of it is
+ * to hand it the props and watch what it does to MapLibre. Those tests keep the
+ * same fake map, so what they assert is still "what MapLibre was actually told".
  */
 import { cleanup, render, screen } from "@testing-library/react";
 import type { FeatureCollection, Point } from "geojson";
@@ -26,8 +32,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { HEADER_SIZE } from "../src/artifacts";
 import { t } from "../src/i18n";
-import { LOTS_SOURCE } from "../src/map/MapView";
-import type { LotProperties } from "../src/map/lotSource";
+import MapView, { LOTS_SOURCE } from "../src/map/MapView";
+import { toMapLot, type LotProperties, type MapLot } from "../src/map/lotSource";
 import type { Lot, LotsDoc } from "../src/types";
 
 const ROSTER_ID = 4242;
@@ -43,29 +49,112 @@ const BASE_DATA_TS = 1788677280;
  */
 const shared = vi.hoisted(() => ({ map: null as null | FakeMap }));
 
+/**
+ * Every popup MapLibre was asked to open, in order.
+ *
+ * `MapView` imports `Popup` as a *value* -- the one thing in that module it
+ * cannot express as a type -- and a real one would reach into the map instance
+ * it is added to, which here is a plain object. So the class is replaced and
+ * nothing else about `maplibre-gl` is needed: `useMapLibre` is mocked too, so
+ * this file never touches the real library.
+ */
+const popups = vi.hoisted(() => ({ opened: [] as { lngLat: unknown; content: Node | null; removed: number }[] }));
+
+vi.mock("maplibre-gl", () => {
+  class FakePopup {
+    lngLat: unknown = null;
+    content: Node | null = null;
+    /** How many times it was closed -- the real one is idempotent, so counting is enough. */
+    removed = 0;
+    setLngLat(at: unknown) {
+      this.lngLat = at;
+      return this;
+    }
+    setDOMContent(node: Node) {
+      this.content = node;
+      return this;
+    }
+    addTo() {
+      popups.opened.push(this);
+      return this;
+    }
+    remove() {
+      this.removed += 1;
+      return this;
+    }
+  }
+  return { Popup: FakePopup };
+});
+
 interface FakeSource {
   data: unknown;
   setData(data: unknown): void;
 }
 
+/** A layer as `addLayer` received it, plus the layer it was inserted under. */
+interface FakeLayer {
+  id: string;
+  filter?: unknown;
+  paint?: Record<string, unknown>;
+  /** The `beforeId` argument: what "under the dots" means, checkably. */
+  before?: string;
+}
+
+type FakeHandler = (event: never) => void;
+
 /** Just enough MapLibre for `MapView`'s effects: sources, layers, and taps. */
 interface FakeMap {
+  /** Layer specs by id, so a test can read the filter and paint, not just the name. */
+  layerSpecs: Map<string, FakeLayer>;
+  /** Handlers by `event|layer` -- `layer` empty for a map-wide one. */
+  handlers: Map<string, Set<FakeHandler>>;
   addSource(id: string, spec: { data: unknown }): void;
-  addLayer(spec: { id: string }): void;
+  addLayer(spec: FakeLayer, before?: string): void;
   getSource(id: string): FakeSource | undefined;
   getLayer(id: string): object | undefined;
   removeLayer(id: string): void;
   removeSource(id: string): void;
   getBounds(): { contains(): boolean };
-  easeTo(): void;
-  on(): void;
-  off(): void;
+  easeTo: ReturnType<typeof vi.fn>;
+  setPadding: ReturnType<typeof vi.fn>;
+  setPaintProperty: ReturnType<typeof vi.fn>;
+  setFilter: ReturnType<typeof vi.fn>;
+  getCanvas(): { style: Record<string, string> };
+  queryRenderedFeatures(): unknown[];
+  getContainer(): HTMLElement;
+  on(type: string, layerOrHandler: string | FakeHandler, handler?: FakeHandler): void;
+  off(type: string, layerOrHandler: string | FakeHandler, handler?: FakeHandler): void;
+}
+
+/** The key a handler is filed under: MapLibre's own (event, layer) pair. */
+function handlerKey(type: string, layer: string | null): string {
+  return `${type}|${layer ?? ""}`;
 }
 
 function makeFakeMap(): FakeMap {
   const sources = new Map<string, FakeSource>();
-  const layers = new Set<string>();
+  const layerSpecs = new Map<string, FakeLayer>();
+  const handlers = new Map<string, Set<FakeHandler>>();
+  const canvas = { style: {} as Record<string, string> };
+  const container = document.createElement("div");
+  const register = (
+    add: boolean,
+    type: string,
+    layerOrHandler: string | FakeHandler,
+    handler?: FakeHandler,
+  ) => {
+    const layer = typeof layerOrHandler === "string" ? layerOrHandler : null;
+    const fn = typeof layerOrHandler === "string" ? handler : layerOrHandler;
+    if (fn === undefined) return;
+    const key = handlerKey(type, layer);
+    const set = handlers.get(key) ?? new Set<FakeHandler>();
+    handlers.set(key, set);
+    if (add) set.add(fn);
+    else set.delete(fn);
+  };
   return {
+    layerSpecs,
+    handlers,
     addSource(id, spec) {
       sources.set(id, {
         data: spec.data,
@@ -74,15 +163,26 @@ function makeFakeMap(): FakeMap {
         },
       });
     },
-    addLayer: (spec) => void layers.add(spec.id),
+    addLayer: (spec, before) => void layerSpecs.set(spec.id, { ...spec, before }),
     getSource: (id) => sources.get(id),
-    getLayer: (id) => (layers.has(id) ? {} : undefined),
-    removeLayer: (id) => void layers.delete(id),
+    getLayer: (id) => (layerSpecs.has(id) ? {} : undefined),
+    removeLayer: (id) => void layerSpecs.delete(id),
     removeSource: (id) => void sources.delete(id),
     getBounds: () => ({ contains: () => true }),
-    easeTo: () => {},
-    on: () => {},
-    off: () => {},
+    easeTo: vi.fn(),
+    setPadding: vi.fn(),
+    setPaintProperty: vi.fn(),
+    setFilter: vi.fn(),
+    getCanvas: () => canvas,
+    // Nothing is rendered in jsdom, so by default every tap is a tap on empty
+    // map -- the branch `onPick` lives on. Replaceable per test, because "was
+    // there a dot under the finger?" is the whole of the click model.
+    queryRenderedFeatures: () => [],
+    getContainer: () => container,
+    // `project` is deliberately absent: jsdom has no projection, and the map's
+    // ripple has to notice that rather than throw.
+    on: (type, layerOrHandler, handler) => register(true, type, layerOrHandler, handler),
+    off: (type, layerOrHandler, handler) => register(false, type, layerOrHandler, handler),
   };
 }
 
@@ -194,6 +294,7 @@ async function renderMapped(): Promise<void> {
 
 beforeEach(() => {
   shared.map = makeFakeMap();
+  popups.opened.length = 0;
   vi.stubGlobal(
     "fetch",
     vi.fn((url: string) => {
@@ -249,5 +350,254 @@ describe("the map before a destination", () => {
     for (const feature of drawnLots().features) {
       expect(feature.properties.known).toBe(feature.properties.probability !== null);
     }
+  });
+});
+
+/** The layer ids `MapView` keeps private; spelled out here so a rename is caught. */
+const LOTS_LAYER = "lots-circles";
+const LOTS_HALO_LAYER = "lots-halo";
+const LOTS_BEST_HALO_LAYER = "lots-best-halo";
+const LOTS_HOVER_HALO_LAYER = "lots-hover-halo";
+
+/** The two placeable lots, as the app would project them. */
+const MAP_LOTS: MapLot[] = [toMapLot(LOTS[0]!, 0.1), toMapLot(LOTS[2]!, 0.9)];
+
+const NO_PADDING = { top: 0, right: 0, bottom: 0, left: 0 };
+
+/** Fire a handler the map registered, the way MapLibre would. */
+function fire(type: string, layer: string | null, event: unknown): void {
+  const registered = shared.map?.handlers.get(handlerKey(type, layer));
+  if (registered === undefined || registered.size === 0) {
+    throw new Error(`nothing is listening for "${type}" on ${layer ?? "the map"}`);
+  }
+  for (const handler of registered) (handler as (e: unknown) => void)(event);
+}
+
+describe("the map's selection, padding and taps", () => {
+  it("haloes the selection and the best pick separately, and applies the padding it is given", () => {
+    render(
+      <MapView
+        lots={MAP_LOTS}
+        destination={null}
+        lang="en"
+        selectedId="TPE_A"
+        bestId="TPE_C"
+        centerRequest={null}
+        padding={{ top: 0, right: 0, bottom: 300, left: 0 }}
+      />,
+    );
+
+    // Two halo layers, each under the dots -- a ring around the dot, never a
+    // substitute for it. Two and not one because only the best pick breathes,
+    // and a paint property is set per layer.
+    const halo = shared.map?.layerSpecs.get(LOTS_HALO_LAYER);
+    const bestHalo = shared.map?.layerSpecs.get(LOTS_BEST_HALO_LAYER);
+    expect(halo).toBeDefined();
+    expect(bestHalo).toBeDefined();
+    expect(halo?.before).toBe(LOTS_LAYER);
+    expect(bestHalo?.before).toBe(LOTS_LAYER);
+    expect(JSON.stringify(halo?.filter)).toContain("selected");
+    expect(JSON.stringify(halo?.filter)).not.toContain("best");
+    expect(JSON.stringify(bestHalo?.filter)).toContain("best");
+    expect(JSON.stringify(bestHalo?.filter)).not.toContain("selected");
+
+    // The sheet sits over the bottom of the map, so the map's idea of "centre"
+    // has to move up by exactly as much.
+    expect(shared.map?.setPadding).toHaveBeenCalledWith({ top: 0, right: 0, bottom: 300, left: 0 });
+
+    // ...and the marks the halos filter on are on the features themselves.
+    const drawn = shared.map?.getSource(LOTS_SOURCE)?.data as FeatureCollection<Point, LotProperties>;
+    const selected = drawn.features.find((f) => f.id === "TPE_A");
+    expect(selected?.properties.selected).toBe(true);
+    expect(selected?.properties.best).toBe(false);
+    expect(drawn.features.find((f) => f.id === "TPE_C")?.properties.best).toBe(true);
+  });
+
+  it("haloes the hovered card's dot through a filter, under the selection's ring", () => {
+    const view = (hoverId: string | null) => (
+      <MapView
+        lots={MAP_LOTS}
+        destination={null}
+        lang="en"
+        selectedId={null}
+        bestId={null}
+        hoverId={hoverId}
+        centerRequest={null}
+        padding={NO_PADDING}
+      />
+    );
+    const { rerender } = render(view(null));
+
+    // Its own layer, below the selection's: pointing at a card must never look
+    // like having chosen it.
+    const hover = shared.map?.layerSpecs.get(LOTS_HOVER_HALO_LAYER);
+    expect(hover).toBeDefined();
+    expect(hover?.before).toBe(LOTS_HALO_LAYER);
+
+    // ...and hover moves that ring with `setFilter`, never by rebuilding the
+    // source: a pointer crossing a list changes this many times a second.
+    rerender(view("TPE_C"));
+    expect(shared.map?.setFilter).toHaveBeenCalledWith(LOTS_HOVER_HALO_LAYER, ["==", ["get", "id"], "TPE_C"]);
+    rerender(view(null));
+    expect(shared.map?.setFilter).toHaveBeenLastCalledWith(LOTS_HOVER_HALO_LAYER, ["==", ["get", "id"], ""]);
+  });
+
+  it("eases to a centre request and selects the tapped lot", () => {
+    const onSelectLot = vi.fn();
+    const view = (centerRequest: { lat: number; lon: number; nonce: number } | null) => (
+      <MapView
+        lots={MAP_LOTS}
+        destination={null}
+        lang="en"
+        selectedId={null}
+        bestId={null}
+        onSelectLot={onSelectLot}
+        centerRequest={centerRequest}
+        padding={NO_PADDING}
+      />
+    );
+    const { rerender } = render(view(null));
+    expect(shared.map?.easeTo).not.toHaveBeenCalled();
+
+    // Tapping a card asks the map to go there. The nonce is what makes a second
+    // tap on the *same* card move the map again.
+    rerender(view({ lat: 25.03, lon: 121.56, nonce: 1 }));
+    expect(shared.map?.easeTo).toHaveBeenCalledWith(
+      expect.objectContaining({ center: [121.56, 25.03] }),
+    );
+
+    // Tapping a dot is the same act from the other end: it selects the lot...
+    fire("click", LOTS_LAYER, {
+      features: [{ properties: { id: "TPE_C", name: "至善公園平面停車場", probability: 0.9 } }],
+      lngLat: { lat: 25.0382, lng: 121.5643 },
+      point: { x: 10, y: 20 },
+    });
+    expect(onSelectLot).toHaveBeenCalledWith("TPE_C");
+
+    // ...and says which lot it is and what its chance is, and nothing else. The
+    // expected-cost score ranks the list; it is not a thing to show a driver.
+    const popup = popups.opened.at(-1);
+    expect(popup?.content?.textContent).toContain("至善公園平面停車場");
+    expect(popup?.content?.textContent).toContain("90%");
+
+    // ...and it belongs to that dot alone. A selection made elsewhere -- a card
+    // in the list -- is about a different lot, so the popup goes with it rather
+    // than naming one car park over a halo sitting on another.
+    expect(popup?.removed).toBe(0);
+    rerender(
+      <MapView
+        lots={MAP_LOTS}
+        destination={null}
+        lang="en"
+        selectedId="TPE_A"
+        bestId={null}
+        onSelectLot={onSelectLot}
+        centerRequest={{ lat: 25.03, lon: 121.56, nonce: 1 }}
+        padding={NO_PADDING}
+      />,
+    );
+    expect(popup?.removed).toBeGreaterThan(0);
+  });
+
+  it("says no data on a lot with no forecast, never 0%", () => {
+    render(
+      <MapView
+        lots={MAP_LOTS}
+        destination={null}
+        lang="en"
+        selectedId={null}
+        bestId={null}
+        centerRequest={null}
+        padding={NO_PADDING}
+      />,
+    );
+
+    fire("click", LOTS_LAYER, {
+      features: [{ properties: { id: "TPE_A", name: "市府路一號停車場", probability: null } }],
+      lngLat: { lat: 25.0377, lng: 121.5639 },
+      point: { x: 10, y: 20 },
+    });
+
+    const popup = popups.opened.at(-1);
+    expect(popup?.content?.textContent).toContain(t("en").noData);
+    expect(popup?.content?.textContent).not.toContain("0%");
+  });
+
+  it("breathes the best pick's halo and leaves the selection's alone", () => {
+    vi.useFakeTimers();
+    try {
+      render(
+        <MapView
+          lots={MAP_LOTS}
+          destination={null}
+          lang="en"
+          selectedId="TPE_A"
+          bestId="TPE_C"
+          centerRequest={null}
+          padding={NO_PADDING}
+        />,
+      );
+
+      // Two beats, so the toggle is seen going both ways.
+      vi.advanceTimersByTime(2000);
+
+      const opacity = (shared.map?.setPaintProperty.mock.calls ?? []).filter(
+        (call) => call[1] === "circle-stroke-opacity",
+      );
+      expect(opacity.length).toBeGreaterThan(0);
+      // The driver's own selection does not pulse: the app is not asking them to
+      // reconsider the thing they just chose.
+      for (const call of opacity) expect(call[0]).toBe(LOTS_BEST_HALO_LAYER);
+      expect(new Set(opacity.map((call) => call[2])).size).toBeGreaterThan(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not take a tap on a dot as a tap on the city", () => {
+    const onPick = vi.fn();
+    render(
+      <MapView
+        lots={MAP_LOTS}
+        destination={null}
+        onPick={onPick}
+        lang="en"
+        selectedId={null}
+        bestId={null}
+        centerRequest={null}
+        padding={NO_PADDING}
+      />,
+    );
+
+    // MapLibre hands the same mouse event to both the dot handler and the
+    // map-wide one; the dot's cannot cancel the map's. What keeps a tap on a car
+    // park from also moving the destination is the map handler asking what is
+    // under the point -- so here, something is.
+    shared.map!.queryRenderedFeatures = () => [{ properties: { id: "TPE_C" } }];
+    fire("click", null, { lngLat: { lat: 25.0382, lng: 121.5643 }, point: { x: 10, y: 20 } });
+
+    expect(onPick).not.toHaveBeenCalled();
+  });
+
+  it("still takes a tap on empty map as the destination", () => {
+    const onPick = vi.fn();
+    render(
+      <MapView
+        lots={MAP_LOTS}
+        destination={null}
+        onPick={onPick}
+        lang="en"
+        selectedId={null}
+        bestId={null}
+        centerRequest={null}
+        padding={NO_PADDING}
+      />,
+    );
+
+    // Nothing under the point: the map is still the destination input it was
+    // before any of this, and in this codebase's `{lat, lon}` order.
+    fire("click", null, { lngLat: { lat: 25.03, lng: 121.56 }, point: { x: 10, y: 20 } });
+
+    expect(onPick).toHaveBeenCalledWith({ lat: 25.03, lon: 121.56 });
   });
 });

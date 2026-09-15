@@ -35,9 +35,17 @@ const KM_THRESHOLD = 1000;
  *
  * The null branch is the reason this is a function and not a template in the
  * JSX: `${p * 100}%` on a null renders "0%", the one thing this screen must
- * never say when what it means is "unknown".
+ * never say when what it means is "unknown". `ProbabilityRing` -- the only
+ * place a probability is drawn now -- goes through here rather than formatting
+ * its own, so that rule has exactly one owner.
+ *
+ * `Pick<Strings, "noData">` and not the whole bag: the ring is handed the
+ * unknown *text* rather than a language, because a lot whose feed has stopped
+ * moving says "not updating" in that slot instead of "no data" (see
+ * `notUpdatingHours`). Either way the caller names the string; this decides
+ * when it is used.
  */
-export function formatProbability(probability: number | null, s: Strings): string {
+export function formatProbability(probability: number | null, s: Pick<Strings, "noData">): string {
   if (probability === null) return s.noData;
   return `${Math.round(probability * 100)}%`;
 }

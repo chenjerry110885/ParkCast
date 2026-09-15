@@ -55,7 +55,20 @@ export type LotProperties = {
   colour: string;
   /** False when `probability` is null, so the paint can also dim the unknowns. */
   known: boolean;
+  /** The lot the driver has tapped, in the list or on the map. */
+  selected: boolean;
+  /** The lot the ranking put first. Independent of `selected`: usually a different dot. */
+  best: boolean;
 };
+
+/**
+ * Which lots to flag. Both optional and both nullable, because "nothing is
+ * selected" and "there is no ranking yet" are the state the map opens in.
+ */
+export interface LotMarks {
+  selectedId?: string | null;
+  bestId?: string | null;
+}
 
 /**
  * The `Lot` -> `MapLot` projection. The one place `y`/`x` become `lat`/`lon`.
@@ -76,8 +89,19 @@ export function toMapLot(lot: Lot, probability: number | null): MapLot {
   };
 }
 
-/** Every lot given, as one `FeatureCollection` ready for `setData`. */
-export function toFeatureCollection(rows: readonly MapLot[]): FeatureCollection<Point, LotProperties> {
+/**
+ * Every lot given, as one `FeatureCollection` ready for `setData`.
+ *
+ * The selection and the best pick ride along as feature *properties* rather
+ * than being expressed in the layer's paint as a comparison against an id.
+ * That way the halo layer is a plain filter on a boolean, one `setData` moves
+ * the ring when the driver taps a different card, and there is no second copy
+ * of "which lot is which" living inside a MapLibre expression.
+ */
+export function toFeatureCollection(
+  rows: readonly MapLot[],
+  marks: LotMarks = {},
+): FeatureCollection<Point, LotProperties> {
   const features: Feature<Point, LotProperties>[] = rows.map((row) => ({
     type: "Feature",
     id: row.id,
@@ -89,6 +113,9 @@ export function toFeatureCollection(rows: readonly MapLot[]): FeatureCollection<
       probability: row.probability,
       colour: colourFor(row.probability),
       known: row.probability !== null,
+      // `?? null` so an absent mark can never match an absent id.
+      selected: row.id === (marks.selectedId ?? null),
+      best: row.id === (marks.bestId ?? null),
     },
   }));
   return { type: "FeatureCollection", features };

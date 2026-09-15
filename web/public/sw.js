@@ -41,7 +41,8 @@
  * and `activate` deletes every cache that is not the current one.
  */
 
-const VERSION = "v1";
+// v2: the redesign renamed every hashed asset and added `places/`, so the v1 cache is all dead weight -- `activate` drops it.
+const VERSION = "v2";
 const CACHE_NAME = `parkcast-${VERSION}`;
 
 /**
