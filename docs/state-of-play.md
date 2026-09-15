@@ -7,17 +7,19 @@ Written for a session starting cold. `CLAUDE.md` has the standing facts; this ha
 
 ## Where the project is
 
-Plans 1 through 3e are complete: collector, forecast grid, ranked list, map, time-scrubber, search,
-an installable offline-capable PWA, and — Plan 3e — no forecast for a car park whose feed has stopped
-updating. **351 Python tests (3 skipped) · 225 web TypeScript · 62 Worker TypeScript · 43 script tests**
-(real runs, 2026-09-15; `node --test scripts/tests/*.test.mjs` needs the explicit glob — a bare
-directory runs nothing on this Node). **The app is live at <https://parkcast.tpe-dev.workers.dev>**
-(Cloudflare Workers Free, since 2026-09-15): the desktop collector uploads each forecast to one KV key,
-and the app, the basemap tiles and the label fonts are static assets. See [`docs/deploy.md`](deploy.md).
+Plans 1 through 3e are complete: collector, forecast grid, ranked list, a map-first installable
+offline-capable app with place search, and — Plan 3e — no forecast for a car park whose feed has stopped
+updating. **355 Python tests (3 skipped) · 288 web TypeScript across 29 files · 66 Worker TypeScript · 50
+script tests** (real runs on the `feat/ui-redesign` branch, 2026-09-15; `node --test scripts/tests/*.test.mjs`
+needs the explicit glob — a bare directory runs nothing on this Node). **The app is live at
+<https://parkcast.tpe-dev.workers.dev>** (Cloudflare Workers Free, since 2026-09-15): the desktop collector
+uploads each forecast to one KV key, and the app, the basemap tiles and the label fonts are static assets.
+See [`docs/deploy.md`](deploy.md).
 
-The two newest things in this document: the collector's first unbroken days on the desktop turned up
-**car parks whose readings never move**, which the app was publishing as certainties; and a second
-and third evaluation **reversed the first one's verdict** on long horizons.
+The three newest things in this document: the collector's first unbroken days on the desktop turned up
+**car parks whose readings never move**, which the app was publishing as certainties; a second and
+third evaluation **reversed the first one's verdict** on long horizons; and the app is now **map-first**
+after a UI/UX redesign shipped the same day as deployment — see "UI redesign — 2026-09-15" below.
 
 ## Which machine is which
 
@@ -161,6 +163,74 @@ happens 0.105.
 
 ---
 
+## UI redesign — 2026-09-15
+
+The working but plain page became **map-first**: a full-screen MapLibre map under a frosted bottom
+sheet on phone (`peek` / `half` / `full` snap points, drag or the grip button) or a 420 px side panel
+plus floating locate/language buttons on desktop (≥ 768 px) — one `Shell.tsx`, one media query
+(`layout/useMediaQuery.ts`), the sheet and panel sharing the same content component. Three product
+changes rode along: **place search** (an offline index built from the basemap tiles — car parks, MRT
+stations, landmarks, streets and lanes, neighbourhoods — no geocoder, no key, nothing leaves the
+phone); **arrival as a clock time** ("18:35", not "in 15 min") within the forecast's existing window,
+with the horizon read from the grid now written as `arrival − reading` — the same "+ age" correction
+the app always needed, expressed as a subtraction instead of an addition; and **two new card facts**,
+the observed free count at the reading (`lots.json`'s new `f` field — live on the collector since
+2026-09-15 13:16 Taipei, 1,080 of 1,090 rows carrying it) and a confidence label (High ≤ 30 min from
+the reading, Medium ≤ 75, Low beyond, derived from the blend's own 30-minute persistence half-life —
+a statement about the model's structure, not a per-lot statistic). Design spec:
+[`docs/superpowers/specs/2026-09-15-ui-redesign-design.md`](superpowers/specs/2026-09-15-ui-redesign-design.md).
+
+**Measured on the branch:** 355 Python tests (3 skipped) · 288 web across 29 files · 66 Worker · 50
+scripts; typecheck, lint and build all green. The place index
+(`scripts/build-place-index.mjs` → `web/public/places/taipei.json`) is **29,291 rows, 461 KB
+gzipped** from the 20260914 planet build, against a gate of ≥ 15,000 rows / ≤ 600 KB gz — see "Place
+index" in [`docs/basemap.md`](basemap.md). The probability ramp moved to red → amber → teal (never
+green, so it stays readable under red-green colour blindness); the service worker's `VERSION` bumped
+`v1` → `v2` so every visitor's shell and cache refresh together (`docs/pwa.md`). Removed:
+`index.css`, `DestinationSearch.tsx`, `LotRow.tsx`, `Scrubber.tsx`, `search.ts`.
+
+**Not built from §9 / §5.** Five of the spec's animations and two of its behaviours are not in the
+shipped build. Each line is what is missing and why:
+
+- **§9 #5, smooth dot recolour** — a `circle-color-transition` so a change of arrival time fades a dot
+  between colours. MapLibre does not interpolate data-driven paint properties, so the dots recolour
+  instantly regardless. The card's probability ring carries that animation instead: the arc tweens and
+  the number counts up.
+- **§9 #7, one-shot expand of the selection halo** — the selection halo is static. Only the best pick's
+  halo animates (it breathes); a paint tween on selection is a follow-up.
+- **§9 #8, pin drop** — the destination pin is a circle layer, not a DOM marker, so there is nothing to
+  drop; only the two ripples around it animate.
+- **§9 #10, sliding chip highlight and odometer digits** — the arrival chips highlight by a class
+  change, and the readout swaps its digits. There is no odometer.
+- **§9 #11, confidence pill expand-on-focus** — the pill toggles its explanation line open and shut;
+  nothing expands.
+- **§5.2, a station's qualifier is not "捷運"** — the group heading and the station icon already say
+  what kind of place it is, and the archive's `station` kind covers TRA and HSR stations as well as
+  the MRT, which "捷運" would mislabel.
+- **§5.3, sweep-to-select on the arrival strip is desktop-only** — `touch-action: pan-x` hands a
+  horizontal touch drag to the scroller, so the strip can be scrolled at all; on the phone a tap
+  selects.
+
+**§5.6 is built** (added in the review round on the same day): hovering a card haloes that lot's dot on
+the map, through a dedicated `lots-hover-halo` layer whose filter is swapped to the hovered id — a
+`setFilter` on one layer, never a rebuilt source, because a pointer crossing the list changes it many
+times a second.
+
+**Deferred, per the spec's own out-of-scope list (§12):** forecasts beyond the grid's window; a
+forecast free-space count; per-lot statistical confidence (today's label is model-structure, not
+per-lot); dot clustering; house-number geocoding. Also deferred: re-branding the app icon —
+`theme-color` and the manifest icons stay `#1d5fd0` because the generated icons still carry that
+accent, and recolouring one without the other would be a worse mismatch than the current colour.
+
+**Closed in the review round.** `PlaceSearch`'s `loading` flag no longer sticks when the box blurs
+mid-fetch — the effect's cleanup resets it, so the next focus retries the place index instead of
+searching the in-memory roster alone for the rest of the session. The spec's 44 px tap floor (§2) is
+met everywhere as well: the sheet's grip, the arrival chips, the search box's clear button and the
+notice buttons are 44 px in the box, and the confidence pill keeps its small visual size with a
+transparent pseudo-element carrying the target.
+
+---
+
 ## What to do next
 
 1. ~~Deploy Plan 3e to the collector~~ — **done 2026-09-14 09:06**; see "Which machine is which".
@@ -176,9 +246,13 @@ happens 0.105.
    only the live release showed are under "Gotchas" below. **Every future release needs a fresh
    short-lived API token from the account owner** — the setup token was to be revoked or left to expire
    ([`docs/deploy.md`](deploy.md) §5).
-4. **Accumulate, then re-run the evaluation around 2026-10-01**, when every half-hour-of-week bucket
+4. ~~Ship the map-first UI redesign~~ — **done 2026-09-15**; see "UI redesign — 2026-09-15" above
+   (design: [`docs/superpowers/specs/2026-09-15-ui-redesign-design.md`](superpowers/specs/2026-09-15-ui-redesign-design.md)).
+   The one follow-up it left open — `PlaceSearch`'s `loading` flag sticking when the box blurs
+   mid-fetch — was closed in the review round the same day; see above.
+5. **Accumulate, then re-run the evaluation around 2026-10-01**, when every half-hour-of-week bucket
    has three days behind it (at 09-13: 134 of 336 had none, 120 one, 82 two; Tuesday none at all).
-5. **Then** consider a trained model — against a persistence baseline that is strong on an
+6. **Then** consider a trained model — against a persistence baseline that is strong on an
    autocorrelated series, and a blend that now beats it.
 
 Also deferred: removing frozen lots from the climatology counts; retiring or recalibrating

@@ -61,13 +61,28 @@ Figures at the time of writing (2026-09-14):
 | Lots withheld as *not updating* | **112** at the first live publish (2026-09-14 09:11); 133 on a snapshot at 01:13 — the count moves as feeds freeze and recover (see the limitations) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **34.5 KB gzipped**, both files |
-| Tests | **351** Python (3 skipped) · **225** web · **62** Worker · **43** scripts |
+| Tests | **355** Python (3 skipped) · **288** web · **66** Worker · **50** scripts |
 
-Plans 1 through 3e are complete: the collector, the forecast grid, the ranked list, the map and
-time-scrubber, search, an installable offline-capable app, and — 3e — no forecast at all for a car
-park whose feed has stopped updating. **The forecast has been evaluated three times**; see the
+Plans 1 through 3e are complete: the collector, the forecast grid, the ranked list, a map-first
+installable offline-capable app with place search, and — 3e — no forecast at all for a car park
+whose feed has stopped updating. **The forecast has been evaluated three times**; see the
 limitations below for what that found. A *trained* model is still to come, and deliberately so: the
 corpus needs weeks more before beating the baselines would mean anything.
+
+## The app
+
+ParkCast is map-first: a full-screen MapLibre map with every car park drawn as a dot on the red →
+amber → teal probability ramp — never green, so the map stays readable under red-green colour
+blindness. On a phone the ranked list lives in a frosted bottom sheet that peeks, half-opens or
+fills the screen on a drag (or the grip button, for keyboard and screen-reader users); at 768 px and
+wider it becomes a 420 px side panel, with locate and language buttons floating over the map instead
+of docked in a top bar. Arrival is a clock time — "18:35", not "in 15 min" — picked from a chip strip
+that only offers times inside the forecast's own window; each card shows a probability ring, a
+confidence label (High / Medium / Low, built from the blend's own 30-minute half-life, not a
+per-lot statistic), walking time, price, and — when the reading carried one — the observed free
+count at its age. Search finds car parks, MRT stations, landmarks, and streets and lanes down to the
+lane, from an offline place index built out of the basemap tiles: no geocoder, no key, nothing that
+leaves the phone. Every animation is gated by `prefers-reduced-motion`.
 
 ---
 
@@ -252,10 +267,10 @@ npm run dev --prefix web
 **Tests:**
 
 ```bash
-python -m pytest                       # 350, 3 skipped (or in a docker-collector container; see docker/README.md)
-npm test --prefix web                  # 219
-npm test --prefix worker               # 62
-node --test scripts/tests/*.test.mjs   # 32
+python -m pytest                       # 355, 3 skipped (or in a docker-collector container; see docker/README.md)
+npm test --prefix web                  # 288
+npm test --prefix worker               # 66
+node --test scripts/tests/*.test.mjs   # 50
 ```
 
 ---
@@ -263,12 +278,14 @@ node --test scripts/tests/*.test.mjs   # 32
 ## Deployment
 
 **Live at <https://parkcast.tpe-dev.workers.dev>** since 2026-09-15, on Cloudflare Workers' **free**
-plan with no payment method on the account. The app, the basemap tiles and the label fonts are static
-assets; the forecast lives in one Workers KV key, which the collector on the desktop updates after every
-five-minute reading. Changes are tested on the desktop against the live forecast before every release,
-the two-phase deploy never puts the release credential in the same shell as a test runner, and the
-collector runs in a hardened, non-root, read-only container. See [`docs/deploy.md`](docs/deploy.md) for
-the setup, the everyday workflow, and the runbook.
+plan with no payment method on the account. The app, the basemap tiles, the label fonts and the place
+search index are static assets; the forecast lives in one Workers KV key, which the collector on the
+desktop updates after every five-minute reading. Changes are tested on the desktop against the live
+forecast before every release, the two-phase deploy never puts the release credential in the same
+shell as a test runner, and the collector runs in a hardened, non-root, read-only container. The
+map-first redesign shipped in the same way — `deploy:check`, then `deploy:release` with the service
+worker's `VERSION` bumped to `v2` so every visitor's cache and shell refresh together. See
+[`docs/deploy.md`](docs/deploy.md) for the setup, the everyday workflow, and the runbook.
 
 ---
 
@@ -282,14 +299,19 @@ extract covering Taipei is unpacked into 633 static tile files, which the browse
 self-hosted label fonts, committed under `web/public/basemap/fonts/`.
 
 The extract and its tiles are not committed (regenerable, so they do not belong in git) -- one
-command rebuilds both:
+command rebuilds both, and also rebuilds the place search index below:
 
 ```bash
 node scripts/build-basemap.mjs
 ```
 
-See [`docs/basemap.md`](docs/basemap.md) for what it needs, why it won't download anything for you,
-and how to verify the extractor binary before running it.
+The same tiles also answer place search: `scripts/build-place-index.mjs` reads every named feature
+out of them and writes `web/public/places/taipei.json` -- **29,291 rows, 461 KB gzipped** from the
+20260914 planet build -- so a query like `忠孝東路四段216巷` resolves with no geocoder, no key, and no
+request that leaves the phone. It is git-ignored like the tiles, required by the deploy gate, and
+cached cache-first by the service worker once fetched. See [`docs/basemap.md`](docs/basemap.md) for
+what the rebuild needs, why it won't download anything for you, how to verify the extractor binary
+before running it, and the place index's own section.
 
 ---
 

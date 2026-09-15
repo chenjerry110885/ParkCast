@@ -27,7 +27,7 @@ and the pmtiles client aborts on that, so the live map drew no roads. Serving th
 instead would cost a Worker request per map move against the free daily limit. Plain tile files need
 no ranges, stay free and unlimited static assets, and are well under the 20,000-file limit.
 
-| | |
+| Tile extract | Value |
 |---|---|
 | Source | `https://build.protomaps.com/20260914.pmtiles` (128 GB planet build, public, no auth) |
 | Bounding box | `121.4433,24.9576,121.6405,25.1999` -- all 1,088 tracked lots plus ~2 km margin |
@@ -60,7 +60,7 @@ Street, place and water names are drawn from **glyph files** in `web/public/base
 from the app's own origin like the archive. Unlike the archive they **are committed**: they are small,
 and regenerating them needs a separate download.
 
-| | |
+| Glyph files | Value |
 |---|---|
 | Source | `fonts/` of [protomaps/basemaps-assets][assets] at commit `83bc11ea49e5c024df51979d5953ee841fd06584`, under the SIL Open Font License (`OFL.txt`, shipped alongside) |
 | Fonts | Noto Sans Regular, Medium and Italic -- the three the Protomaps label layers name |
@@ -95,6 +95,48 @@ Re-run this after rebuilding the archive -- new place names can need new ranges:
    the label layers could need, and replaces `web/public/basemap/fonts/` with them. Like
    `build-basemap.mjs`, it downloads nothing itself.
 3. Commit the result.
+
+## Place index
+
+The search box needs to answer a query like `忠孝東路四段216巷` with no geocoder, no API key and no
+request that leaves the phone, so `scripts/build-place-index.mjs` reads every named feature out of the
+zoom-15 tiles of the local `.pmtiles` archive and writes `web/public/places/taipei.json`. The live
+roster is searched first and outranks it: the app already holds every named car park from `lots.json`
+in memory, and a roster hit always beats an index hit for the same query. The archive's own `parking`
+POIs *are* in the index -- 930 rows, the last and lowest-prominence landmark kind -- so a car park the
+feed does not publish can still be found by name; it just sorts behind everything else.
+
+Every named feature from the archive's `pois`, `places` and `roads` tile layers falls into one of four
+groups -- **station** (`station`, `subway_entrance`), **landmark** (a fixed 37-kind list, most prominent
+first: hospitals, malls, parks, schools, temples and the rest -- the design spec's 36 plus `terminal`,
+which is what the tiles call a bus or ferry terminal building), **street** (`highway`, `major_road`,
+`minor_road`), and **area** (the archive's `places` layer, filtered to `macrohood`, `neighbourhood` and
+`locality` -- the same three `web/src/places.ts` maps to an area). Anything else in the tiles is
+dropped.
+
+Same-name, same-group features within 1,000 m of each other merge into a single row by single-linkage
+clustering -- a road's separate segments, a park's several label points -- taking the centroid as the
+row's coordinate and the cluster's most prominent kind as its label. Every non-area row is qualified
+with the name of the nearest locality within 3,000 m, so two same-named streets read as, say, `中山路
+(北投)` and `中山路 (信義)`; past that distance, no qualifier.
+
+`buildPlaceIndex()` refuses to write a thin or bloated index:
+
+| Gate | Value |
+|---|---|
+| Row floor | 15,000 rows (`MIN_ROWS`) |
+| Gzip ceiling | 600 KB (`MAX_GZIP_BYTES`) |
+| Measured, 2026-09-15 | **29,291 rows, 461 KB gzipped** |
+
+**`build-basemap.mjs` regenerates it** after every tile unpack, so a fresh extract never leaves the two
+out of sync. **The deploy gate requires it** -- `scripts/check-deploy-bundle.mjs` fails the build if
+`places/taipei.json` is missing or not on the allowlist -- and **`scripts/smoke-live.mjs` HEADs it** on
+the live site after every release, alongside the tile and glyph checks above. Like `/assets/*`, it falls
+under the service worker's cache-first rule (`web/public/sw.js` `routeFor`), so bump `sw.js` `VERSION`
+whenever the index's content changes -- otherwise a visitor's already-cached copy survives until they
+clear site data. It first shipped alongside the map-first redesign, which bumped `VERSION` from `v1` to
+`v2` for exactly this reason; see the routing table and "Layout" in [`docs/pwa.md`](pwa.md) for how the
+service worker treats it and the rest of the app shell.
 
 ## Rebuilding it
 
