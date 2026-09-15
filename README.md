@@ -61,7 +61,7 @@ Figures at the time of writing (2026-09-14):
 | Lots withheld as *not updating* | **112** at the first live publish (2026-09-14 09:11); 133 on a snapshot at 01:13 — the count moves as feeds freeze and recover (see the limitations) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **34.5 KB gzipped**, both files |
-| Tests | **350** Python (3 skipped) · **219** web · **62** Worker · **32** scripts |
+| Tests | **351** Python (3 skipped) · **225** web · **62** Worker · **43** scripts |
 
 Plans 1 through 3e are complete: the collector, the forecast grid, the ranked list, the map and
 time-scrubber, search, an installable offline-capable app, and — 3e — no forecast at all for a car
@@ -262,12 +262,13 @@ node --test scripts/tests/*.test.mjs   # 32
 
 ## Deployment
 
-Not deployed yet — the app has always run locally. A design for a **free** deploy to Cloudflare Workers
-is approved and mostly built: static assets for the app and basemap, the forecast in one Workers KV key,
-tested on the desktop against the live forecast before every release, a two-phase deploy that never puts
-the release credential in the same shell as a test runner, and the collector running in a hardened,
-non-root, read-only container. See [`docs/deploy.md`](docs/deploy.md) for the setup, the everyday
-workflow, and the runbook.
+**Live at <https://parkcast.tpe-dev.workers.dev>** since 2026-09-15, on Cloudflare Workers' **free**
+plan with no payment method on the account. The app, the basemap tiles and the label fonts are static
+assets; the forecast lives in one Workers KV key, which the collector on the desktop updates after every
+five-minute reading. Changes are tested on the desktop against the live forecast before every release,
+the two-phase deploy never puts the release credential in the same shell as a test runner, and the
+collector runs in a hardened, non-root, read-only container. See [`docs/deploy.md`](docs/deploy.md) for
+the setup, the everyday workflow, and the runbook.
 
 ---
 

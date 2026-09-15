@@ -363,11 +363,22 @@ the name of the directory the compose file lives in. See "A pause is not a stop"
 **Non-negotiable:** the collector runs from day one. Every day it is not running is a
 training day that cannot be recovered.
 
-### Deployment (2026-09-14)
+### Deployment (live since 2026-09-15)
 
-Design approved and largely built (`docs/superpowers/specs/2026-09-14-deployment-design.md`, Tasks 1–11,
-staged on `feat/cloudflare-deploy`, not yet deployed — see `docs/deploy.md`). Facts below are
-load-bearing for anyone touching the deploy path, the collector's upload code, or the web build.
+**Live at <https://parkcast.tpe-dev.workers.dev>** (`docs/superpowers/specs/2026-09-14-deployment-design.md`,
+`docs/deploy.md`). Production and preview KV namespace ids are committed in `worker/wrangler.jsonc`;
+the host is pinned in `wrangler.jsonc` (`PRODUCTION_HOST`), `src/parkcast/config.py` (`UPLOAD_HOST`) and
+`docker/docker-compose.yml` (`PARKCAST_UPLOAD_URL`). Every release needs a fresh short-lived API token
+entered by the account owner — never by an agent. Facts below are load-bearing for anyone touching the
+deploy path, the collector's upload code, or the web build.
+
+- **Cloudflare's edge refuses urllib's default user agent.** `Python-urllib/3.x` gets `403` with a body of
+  `error code: 1010` before the Worker sees the request (the first live upload, 2026-09-15).
+  `send_pair` sends `User-Agent: parkcast-collector/1` (`config.UPLOAD_USER_AGENT`); keep it.
+- **Workers static assets ignore `Range`.** A range request for a static file gets `200` and the whole
+  body, so a `.pmtiles` archive cannot be read live (the pmtiles client aborts). The basemap therefore
+  ships as 633 static tile files unpacked by `scripts/unpack-tiles.mjs`; the archive stays local in
+  `web/basemap-src/` and the deploy gate refuses any `.pmtiles` file (`docs/basemap.md`).
 
 - **Free, non-negotiably.** No payment method on the Cloudflare account, ever; the app deploys to
   Cloudflare Workers + Workers KV on the Free plan, which Cloudflare documents as unable to bill past a

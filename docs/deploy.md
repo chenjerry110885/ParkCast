@@ -1,11 +1,11 @@
 # Deploying ParkCast
 
-**Nothing described here has been deployed yet.** The design was approved 2026-09-14
-(`docs/superpowers/specs/2026-09-14-deployment-design.md`); the Worker, the collector's upload path,
-the hardened container and the deploy scripts are built and merged to `main`, but the Cloudflare
-account, its KV namespaces and its secret do not exist yet — that is the one-time setup below, done
-once by a human. Until it happens, the live address stays a placeholder:
-`https://parkcast.<name>.workers.dev`.
+**Live since 2026-09-15 at <https://parkcast.tpe-dev.workers.dev>.** The design was approved
+2026-09-14 (`docs/superpowers/specs/2026-09-14-deployment-design.md`). The one-time setup in §3 was done
+on 2026-09-15: account and `tpe-dev` subdomain, both KV namespaces, the upload secret, and two releases
+(the second moved the basemap to static tile files — `docs/basemap.md`). The collector has uploaded
+every forecast since 10:56 Taipei time that day. Where this guide still writes
+`https://parkcast.<name>.workers.dev`, read the live address above.
 
 ---
 

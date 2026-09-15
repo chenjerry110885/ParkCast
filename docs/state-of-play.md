@@ -1,4 +1,4 @@
-# State of play — 2026-09-14
+# State of play — 2026-09-15
 
 Written for a session starting cold. `CLAUDE.md` has the standing facts; this has
 **where things are right now, what was just learned, and what to do next**.
@@ -9,10 +9,11 @@ Written for a session starting cold. `CLAUDE.md` has the standing facts; this ha
 
 Plans 1 through 3e are complete: collector, forecast grid, ranked list, map, time-scrubber, search,
 an installable offline-capable PWA, and — Plan 3e — no forecast for a car park whose feed has stopped
-updating. **343 Python tests · 219 web TypeScript · 60 Worker TypeScript · 29 script tests** (real runs,
-2026-09-14; `node --test scripts/tests/*.test.mjs` needs the explicit glob — a bare directory runs
-nothing on this Node). The app works end to end and has never been deployed live — a free Cloudflare
-deploy is designed and mostly built; see "What to do next" and [`docs/deploy.md`](deploy.md).
+updating. **351 Python tests (3 skipped) · 225 web TypeScript · 62 Worker TypeScript · 43 script tests**
+(real runs, 2026-09-15; `node --test scripts/tests/*.test.mjs` needs the explicit glob — a bare
+directory runs nothing on this Node). **The app is live at <https://parkcast.tpe-dev.workers.dev>**
+(Cloudflare Workers Free, since 2026-09-15): the desktop collector uploads each forecast to one KV key,
+and the app, the basemap tiles and the label fonts are static assets. See [`docs/deploy.md`](deploy.md).
 
 The two newest things in this document: the collector's first unbroken days on the desktop turned up
 **car parks whose readings never move**, which the app was publishing as certainties; and a second
@@ -168,15 +169,13 @@ happens 0.105.
    ever reached Parquet. The cutoff is now `min(now − HOT_RETENTION_SEC, start of the earliest
    unarchived day)` (`src/parkcast/scheduler.py`; `store.prune` itself is unchanged) — see CLAUDE.md's
    "Deployment (2026-09-14)".
-3. **Deploy the app to Cloudflare Workers.** Design approved 2026-09-14
-   ([`docs/superpowers/specs/2026-09-14-deployment-design.md`](superpowers/specs/2026-09-14-deployment-design.md));
-   the Worker, the collector's upload path, the hardened container and the deploy scripts are built and
-   staged on `feat/cloudflare-deploy`, not yet committed or deployed. Free tier only — Workers + KV, no
-   R2, no custom domain, no payment method on the account. Not GitHub Pages: it was viable (range
-   requests answer `206` with `Access-Control-Allow-Origin: *`), but pushing a 5-minute forecast would
-   mean a site deploy every tick and a repository-rewriting credential on the desktop. See
-   [`docs/deploy.md`](deploy.md) for the one-time setup (Task 13, not yet done — the Cloudflare account,
-   KV namespaces and upload secret don't exist yet) and the everyday workflow.
+3. ~~Deploy the app to Cloudflare Workers~~ — **live 2026-09-15** at
+   <https://parkcast.tpe-dev.workers.dev> (design:
+   [`docs/superpowers/specs/2026-09-14-deployment-design.md`](superpowers/specs/2026-09-14-deployment-design.md)).
+   Free tier only — Workers + KV, no R2, no custom domain, no payment method on the account. Two things
+   only the live release showed are under "Gotchas" below. **Every future release needs a fresh
+   short-lived API token from the account owner** — the setup token was to be revoked or left to expire
+   ([`docs/deploy.md`](deploy.md) §5).
 4. **Accumulate, then re-run the evaluation around 2026-10-01**, when every half-hour-of-week bucket
    has three days behind it (at 09-13: 134 of 336 had none, 120 one, 82 two; Tuesday none at all).
 5. **Then** consider a trained model — against a persistence baseline that is strong on an
@@ -193,9 +192,6 @@ a number is the opposite of how this project has handled every other inconvenien
 ## Open decisions belonging to the user
 
 - **Licence.** The repo is public with none, so the code is readable but not reusable.
-- **The Cloudflare deploy's one-time setup** (see 3 above) — creating the account, turning on
-  two-factor sign-in, and entering the credentials `docs/deploy.md` calls for are all steps only the
-  account owner can do; nothing goes live until they happen.
 
 ## Gotchas that cost real time
 
@@ -222,3 +218,15 @@ a number is the opposite of how this project has handled every other inconvenien
 - **Cold Parquet is slot-snapped** — it stores 288 slots a day and discards the true `data_ts`.
   Reconstruct with `slot_start + 180` (the feed's fixed phase); verified exact against the hot store.
 - `restart: unless-stopped` covers exits only — not a sleeping host, and not a pause.
+- **Cloudflare refuses Python's default user agent.** The first live upload failed `403` in 0.1 s: the
+  edge answers `Python-urllib/3.x` with `error code: 1010` before the Worker runs, so the Worker's own
+  code never explains it. Reproduce with an unauthenticated `PUT`: the default agent gets `403`, any
+  named agent `401`. The collector now sends `User-Agent: parkcast-collector/1`.
+- **Cloudflare's static hosting ignores `Range`.** `curl -H "Range: bytes=0-126"` on a static asset
+  returns `200` and the full body, with no `Accept-Ranges`, on every retry. The live map drew no roads
+  until the basemap moved from one `.pmtiles` archive to plain tile files (`docs/basemap.md`). The dev
+  server answers `206`, so nothing local catches this — check a live range request after changing how
+  anything large is served.
+- **A minimised Claude app window pauses the live map.** With the window hidden the page reports
+  `visibilityState: "hidden"`, MapLibre neither draws nor fetches tiles, and screenshots come back
+  blank or grey — which looks exactly like a broken basemap. Bring the window forward before judging.
