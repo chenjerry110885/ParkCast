@@ -56,6 +56,13 @@ export interface Lot {
    * was not collecting.
    */
   u?: number;
+  /**
+   * Observed free car spaces at `base_data_ts`, the reading the forecast was
+   * made from. Present only when the lot was observed at that reading; `null`
+   * when it was observed but reported nothing. An *observation*, never a
+   * forecast: the UI shows it with the reading's age for that reason.
+   */
+  f?: number | null;
 }
 
 export interface LotsDoc {

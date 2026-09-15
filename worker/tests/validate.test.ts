@@ -32,9 +32,17 @@ describe("validatePair", () => {
     ["unknown fare kind", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].p = { k: "free" }; })]],
     ["fractional u", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].u = 1.5; })]],
     ["negative capacity", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].c = -1; })]],
+    ["fractional f", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].f = 1.5; })]],
+    ["negative f", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].f = -1; })]],
+    ["string f", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].f = "12"; })]],
   ])("rejects %s", (_label, build) => {
     const [grid, lots] = build();
     expect(validatePair(grid, lots).ok).toBe(false);
+  });
+
+  it("accepts the observed free count as an integer or null", () => {
+    const withCounts = mutateLots(pair.lots, (d) => { d.lots[0].f = 12; d.lots[1].f = null; });
+    expect(validatePair(pair.grid, withCounts).ok).toBe(true);
   });
 });
 

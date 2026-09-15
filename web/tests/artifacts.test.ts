@@ -129,6 +129,39 @@ describe("loadArtifacts", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("passes the observed free count through untouched, null included", async () => {
+    const row = (i: number, over: Partial<Lot> = {}): Lot =>
+      ({
+        i,
+        id: `TPE${i}`,
+        n: `停車場${i}`,
+        a: "中正區",
+        y: 25.04,
+        x: 121.52,
+        c: 40,
+        t: "民營停車場",
+        p: { k: "exact", lo: 30, hi: 30 },
+        ...over,
+      }) as Lot;
+    const gridBuf = makeGrid(3, 1, [10, 20, 30], 42);
+    const lotsDoc = makeLotsDoc(42, {
+      n_lots: 3,
+      lots: [row(0, { f: 12 }), row(1, { f: null }), row(2)],
+    });
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("grid.bin")) return Promise.resolve(bufferResponse(gridBuf));
+      if (url.endsWith("lots.json")) return Promise.resolve(jsonResponse(lotsDoc));
+      return Promise.reject(new Error(`unexpected url ${url}`));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const loaded = await loadArtifacts("https://example.test/artifacts");
+
+    expect(loaded.lots.lots[0]?.f).toBe(12);
+    expect(loaded.lots.lots[1]?.f).toBeNull();
+    expect("f" in loaded.lots.lots[2]!).toBe(false);
+  });
+
   it("on a rosterId mismatch, re-fetches only lots.json (bypassing cache), not grid.bin", async () => {
     const gridBuf = makeGrid(1, 1, [50], 7);
     const staleLots = makeLotsDoc(999);

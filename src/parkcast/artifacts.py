@@ -102,6 +102,7 @@ def _price_field(price: Price) -> dict:
 def build_lots_json(
     lots: Sequence[Lot], *, generated_at: int, base_data_ts: int,
     not_updating: Mapping[str, int] | None = None,
+    free: Mapping[str, int | None] | None = None,
 ) -> bytes:
     """Compact metadata, index-aligned with the grid's rows.
 
@@ -133,6 +134,12 @@ def build_lots_json(
     Absent on a live lot, so there is no value to misread. Additive rather than
     a schema change: a client that ignores it shows "no data" for that row,
     which is still true, so `v` stays where it is.
+
+    `f` is the lot's observed free_car at `base_data_ts` -- the reading the
+    forecast was made from -- and is present only for a lot that was observed at
+    that reading; None means observed but reporting nothing. It is the one
+    *observed* number on the card, and the client labels it with the reading's
+    age so it is never mistaken for a forecast. Additive: `v` stays where it is.
     """
     lot_ids = [lot.id for lot in lots]
     withheld = not_updating or {}
@@ -146,6 +153,8 @@ def build_lots_json(
         }
         if lot.id in withheld:
             row["u"] = withheld[lot.id]
+        if free is not None and lot.id in free:
+            row["f"] = free[lot.id]
         rows.append(row)
     payload = {
         "v": VERSION,
