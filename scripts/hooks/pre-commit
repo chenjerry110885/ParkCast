@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuses commits containing the upload secret. Enable once per clone:
+#   git config core.hooksPath scripts/hooks
+exec node "$(git rev-parse --show-toplevel)/scripts/check-staged-secrets.mjs"

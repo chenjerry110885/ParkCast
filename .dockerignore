@@ -5,3 +5,7 @@ docs
 tasks
 .git
 __pycache__
+docker/secrets
+web
+worker
+scripts

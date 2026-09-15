@@ -7,7 +7,16 @@ data/
 *.db
 dist/
 *.egg-info/
-.env
+
+# Secrets and local tool state (docs/deploy.md). Never commit these.
+.env*
+!.env.example
+.dev.vars*
+.wrangler/
+docker/secrets/
+*.pem
+worker/node_modules/
+web/.dev-artifacts/
 
 # Web app
 web/node_modules/
