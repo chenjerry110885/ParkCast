@@ -132,6 +132,7 @@ def send_pair(url: str, secret: str, grid: bytes, lots: bytes, *,
     request = urllib.request.Request(url, data=grid + lots, method="PUT")
     request.add_header("Content-Type", "application/octet-stream")
     request.add_header("X-Grid-Length", str(len(grid)))
+    request.add_header("User-Agent", config.UPLOAD_USER_AGENT)
     request.add_unredirected_header("Authorization", f"Bearer {secret}")
     try:
         with opener.open(request, timeout=timeout) as response:

@@ -204,6 +204,15 @@ def test_send_pair_puts_the_pair_with_headers(server):
     assert headers["Authorization"] == f"Bearer {SECRET}"
 
 
+def test_send_pair_names_itself_instead_of_python_urllib(server):
+    # Cloudflare's edge answers urllib's default user agent with 403 "error code: 1010".
+    upload.send_pair(server + "/artifacts/latest", SECRET, b"G", b"L",
+                     opener=upload.build_opener(), timeout=5)
+    _, headers, _ = _Handler.seen[0]
+    assert headers["User-Agent"] == config.UPLOAD_USER_AGENT
+    assert "Python-urllib" not in headers["User-Agent"]
+
+
 def test_send_pair_reports_rejections(server):
     _Handler.status = 409
     _Handler.extra_headers = {"X-Reject": "stale"}

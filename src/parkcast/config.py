@@ -105,6 +105,10 @@ NOT_UPDATING_MIN_COVERAGE = 0.5
 # any URL whose host is not exactly this.
 UPLOAD_HOST = "parkcast.tpe-dev.workers.dev"
 UPLOAD_URL_ENV = "PARKCAST_UPLOAD_URL"
+# Cloudflare refuses urllib's default "Python-urllib/3.x" user agent at its edge
+# (403, "error code: 1010") before the Worker ever sees the request -- measured
+# on the first live upload, 2026-09-15. Any honest name of our own gets through.
+UPLOAD_USER_AGENT = "parkcast-collector/1"
 UPLOAD_SECRET_PATH = Path("/run/secrets/parkcast_upload_secret")
 UPLOAD_TIMEOUT_SEC = 10          # per socket operation
 UPLOAD_DEADLINE_SEC = 30         # whole attempt, DNS included

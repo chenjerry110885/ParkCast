@@ -260,6 +260,12 @@ is unconfirmed until Task 13's first live release (design spec §10.13).
 | `container clock differs from the server by <N>s` | Logged once: the Worker's `Date` header disagreed with the container's own clock by more than 60 seconds. |
 | `uploads disabled (no valid upload URL)` / `(no valid secret file)` / `(<ExceptionType>)` | Logged once at startup. Uploads are off: `PARKCAST_UPLOAD_URL` isn't set to the exact pinned host, `/run/secrets/parkcast_upload_secret` is missing or the wrong shape, or building the uploader raised (type name only, never the message). |
 
+A `upload failed: status=403` that appears on every attempt, with the Worker's own logs silent, is
+Cloudflare's edge rather than the Worker: it refuses urllib's default `Python-urllib/3.x` user agent
+with `403` and a body of `error code: 1010` before the request reaches the Worker (measured on the
+first live upload, 2026-09-15). `send_pair` therefore sends `User-Agent: parkcast-collector/1`
+(`config.UPLOAD_USER_AGENT`); keep that header if the upload code is ever rewritten.
+
 None of this can block collection or raise into `run_forever` — an upload failure only ever costs an
 upload.
 
