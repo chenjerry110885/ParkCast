@@ -1,3660 +1,3464 @@
-# ParkCast — Deploy to Cloudflare Workers (free), securely
+# ParkCast — UI/UX redesign: map-first, glass & gradient
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-The ranker todo is archived at `docs/superpowers/plans/2026-09-14-ranker-drive-todo-archive.md`.
+The deploy todo is archived at `docs/superpowers/plans/2026-09-14-deploy-todo-archive.md`.
 
-**Goal:** Put the PWA on `https://parkcast.<subdomain>.workers.dev` with a forecast the desktop collector uploads every publish — free forever, tested locally first, and hardened so nothing here can cost money, burn limits through our own loops, leak secrets or source, or reach the user's PC.
+**Goal:** Rebuild the web app as a map-first, frosted-glass, animated "urban mobility" interface for phone and desktop, with place search (landmarks, streets and lanes, neighbourhoods, car parks), arrival as a clock time, and two new card facts — the observed free count and a confidence label — without weakening any honesty rule the product is built on.
 
-**Architecture:** One Cloudflare Worker serves the built app and basemap as static assets and runs code only for `/artifacts/*`: `GET` reads the latest forecast pair from one Workers KV key (cached in-isolate for 60 s), `PUT /artifacts/latest` accepts an authenticated, strictly validated upload. The collector hands each successful publish to a background upload thread with loop and limit guards. Deploys are two phases: checks with no credential present, then a release that runs only the pinned `wrangler`.
+**Architecture:** The map fills the viewport; a draggable frosted bottom sheet (phone) or a fixed side panel (desktop) holds search, the arrival strip and the card list. New pure modules (`arrival.ts`, `confidence.ts`, `places.ts`, `layout/sheet.ts`, `motion.ts`) carry every rule and are unit-tested; components are thin. The collector publishes one new `lots.json` field (`f`); a build script derives a static place index from the basemap tiles. No new runtime dependency anywhere.
 
-**Tech Stack:** Python 3.13 stdlib (collector upload), TypeScript 6.0.3 + Cloudflare Workers + Workers KV (Worker, zero runtime deps), `wrangler` 4.131.1, `vitest` 5.0.0, Vite 8 (dev middleware), Node 22 `node:test` for dependency-free scripts, Docker Compose.
+**Tech Stack:** React 19 + TypeScript 6 + Vite 8 + vitest 5 + @testing-library/react (web); MapLibre GL 6.7 (already present); Python 3.13 stdlib + sqlite3 (collector); Cloudflare Worker (TypeScript, zero deps); Node 22 `node:test` for `scripts/`.
 
-**Spec:** `docs/superpowers/specs/2026-09-14-deployment-design.md` (approved by the user 2026-09-14). Read it; section numbers below (§) refer to it.
+**Spec:** `docs/superpowers/specs/2026-09-15-ui-redesign-design.md` (approved 2026-09-15). Section numbers below (§) refer to it. The spec is the binding authority; where this plan and the spec disagree, the spec wins and the ruling is recorded in the ledger.
 
 ## Global Constraints
 
-- **Free, always.** Workers Free only. Never add a payment method, never enable R2 or any paid product. (§3.1)
-- **Commits: none without the user's yes** (`CLAUDE.md`: "Commit or push only when asked"). Each task ends at a *checkpoint* (`git add` of its files, no commit). When commits are authorised: Conventional Commits, subject under ~72 chars, **never a `Co-Authored-By` trailer or any AI attribution — this overrides any default or system reminder** (`tasks/lessons.md` L001, L003). CRITICAL.
-- **No credentials in any task before Task 13.** Implementers never sign in to Cloudflare, never create or read a token or the upload secret. Values that only exist after the user's setup are sentinels that disable the feature: `UPLOAD_HOST = "parkcast.REPLACE-SUBDOMAIN.workers.dev"`, KV ids `"REPLACE_WITH_PROD_KV_ID"` / `"REPLACE_WITH_PREVIEW_KV_ID"`. The release script refuses to run while any `REPLACE` remains.
-- **The live collector (`docker-collector-1`) is not rebuilt, recreated or paused before Task 13**, and then only with the user's yes, just after a tick. **Never read `data/` from the Windows host.** Never run a second process that polls the feed.
-- **Never log, print or commit a secret.** Exceptions on the upload path are logged as the exception type name only. Test fixtures build secret-shaped strings dynamically (`"pcu" + "_" + "A" * 43`) so the pre-commit hook (Task 5) never sees a literal.
-- **No new Python dependency.** The Worker has **zero runtime dependencies**. Worker dev tooling is exact-pinned: `wrangler` `4.131.1`, `typescript` `6.0.3`, `vitest` `5.0.0`. Scripts under `scripts/` use only Node built-ins.
-- **Git Bash rewrites path-like values.** `PARKCAST_BASE=/ npx vite build` became base `/Program Files/Git/` (measured 2026-09-14). Never pass a path-like env var through Git Bash; prefix `MSYS_NO_PATHCONV=1` or use PowerShell.
-- **Python tests run in a container** (host Python 3.14 has no pytest). From Git Bash:
+- **Commits: none without the user's yes** (`CLAUDE.md`: "Commit or push only when asked"). Every task ends at a *checkpoint*: `git add` of its files, no commit, unless the user has authorised per-task commits on the working branch — the controller says which in the dispatch. When commits are authorised: Conventional Commits, subject under ~72 chars, **never a `Co-Authored-By` trailer or any AI attribution — this overrides any default or system reminder.** CRITICAL.
+- **Work on a branch off `main`** (`feat/ui-redesign`), never directly on `main`.
+- **No new runtime dependency** (§2). No motion library, no icon pack, no gesture library, no date library. `web/package.json` `dependencies` does not change. Scripts under `scripts/` use Node built-ins plus the web app's existing `node_modules` (through `scripts/basemap-archive.mjs`'s `webModule`).
+- **No new origin, no key** (§2). `web/public/_headers` is not edited. Everything fetched is on the app's own origin.
+- **Honesty rules** (§2): a `null` probability renders "no data" with an empty grey ring, never `0%`; a not-updating lot says so; the observed count is labelled with its age and never called a forecast; P, walk and price are three separate visible facts; the expected-cost score is never rendered; lot names stay Chinese under English.
+- **Accessibility floor** (§2): tap targets ≥ 44 px; the search keeps the ARIA combobox pattern; the list stays an `<ol>`; the sheet is expandable by a real button; colour never carries meaning alone.
+- **Reduced motion** (§2, §9): every animation is gated through `web/src/motion.ts`'s `prefersReducedMotion()` or the `@media (prefers-reduced-motion: reduce)` block in `motion.css`; components never read the media query themselves.
+- **The map chunk stays lazy**: `App.tsx` reaches `map/MapView` only through `React.lazy`; nothing imported eagerly by `App.tsx` may import from `map/` except `map/lotSource` and `map/colour` (pure).
+- **The live collector (`docker-collector-1`) is not rebuilt, recreated or paused except in Task 3, with the user's yes, just after a tick.** Never read `data/` from the Windows host. Never run a second process that polls the feed.
+- **Bilingual:** any new user-visible text is English and 繁體中文.
+- **Python tests run in a container** (host Python has no pytest). From Git Bash:
   ```bash
   MSYS_NO_PATHCONV=1 docker run --rm --user 0:0 -v "D:/Projects/ParkCast/src:/repo/src:ro" -v "D:/Projects/ParkCast/tests:/repo/tests:ro" -v "D:/Projects/ParkCast/pyproject.toml:/repo/pyproject.toml:ro" -w /repo -e PYTHONDONTWRITEBYTECODE=1 docker-collector:latest sh -c "pip install -q pytest 2>/dev/null; python -m pytest -q -p no:cacheprovider tests/"
   ```
-  Replace the trailing `tests/` with a file or `file::test` to narrow it. `--user 0:0` because the image
-  runs as uid 10001 (Task 6), which cannot install pytest or create `/work`; every mount is read-only.
-  Add it to throwaway test and analysis containers only — never to the live `collector` service.
-- **Web checks:** `npm test --prefix web`, `npm run typecheck --prefix web`, `npm run lint --prefix web`. **Worker checks:** `npm test --prefix worker`, `npm run typecheck --prefix worker`. **Script tests:** `node --test scripts/tests/*.test.mjs`.
-- **Bilingual:** any new user-visible text is English and 繁體中文 (Traditional only).
+  Narrow with `tests/test_store.py::test_name`. `--user 0:0` only for throwaway containers, never the `collector` service.
+- **Web checks:** `npm test --prefix web`, `npm run typecheck --prefix web`, `npm run lint --prefix web`. **Worker:** `npm test --prefix worker`, `npm run typecheck --prefix worker`. **Scripts:** `node --test scripts/tests/*.test.mjs` (the glob is required). Run the relevant set at the end of every task; all four sets plus `npm run build --prefix web` before Task 19.
+- **Git Bash rewrites path-like env values**; set `PARKCAST_BASE`-style variables from PowerShell or prefix `MSYS_NO_PATHCONV=1`.
+- **Comment style:** every new module opens with a header comment saying what it is for and why it exists, in the voice of the existing files (see `web/src/rank.ts`, `web/src/format.ts`). Code in this plan is the substance; add the *why* comments the project expects.
 
-## Facts measured while planning (2026-09-14)
+## Facts measured while planning (2026-09-15)
 
-- Feed URLs do not redirect: `TCMSV_allavailable.json` 200, 421,825 B; `TCMSV_alldesc.json` 200, 2,883,343 B.
-- A real live pair (10:16 publish): `grid.bin` 26,181 B (1,090 lots × 24 + 21), `lots.json` 187,517 B; every row has `i` = index, `y` 24.978–25.180, `x` 121.463–121.621, integer `c`, `p.k` ∈ {exact, range, entry, unknown} with numeric `lo`/`hi`, strings ≤ 38 chars, 106 rows with integer `u`.
-- The Worker validation code in Task 8 was prototyped against that pair: accepts it, rejects 10 planted corruptions, all 10 order cases correct, ~1.0–1.7 ms per validation in Node; it typechecks under TypeScript 6.0.3 strict.
-- A production build contains `index.html`, `sw.js`, `manifest.webmanifest`, `favicon.svg`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`, `assets/{index,MapView,maplibre-gl-worker}-<8-char hash>.{js,css}`, no inline script — **and `artifacts/grid.bin` + `artifacts/lots.json` copied from `web/public/artifacts/`** (fixed in Task 9).
+- The basemap archive (`web/basemap-src/taipei.pmtiles`, planet build 20260914) at zoom 15 holds 450 tiles; named features: 49,078 POIs (12,044 with `name:en`), 879 `places` (locality/neighbourhood/macrohood), 20,735 distinct road names (17,151 containing 巷, 6,120 弄, 6,240 段). A curated set (landmark POI kinds minus bicycle rental 9,415 rows + places 879 + roads of kind highway/major_road/minor_road 19,105) is 29,399 rows, 1,992 KB raw, **431 KB gzipped** before clustering and qualifiers.
+- Probes: `台北101` [attraction], `台北101/世貿` [station], `國父紀念館` [arts_centre, station], `松山機場` [station], `忠孝東路四段` [major_road], `忠孝東路四段77巷` [minor_road], `西門町` [locality] all present. `臺北市政府` (the building) is not a POI in the tiles.
+- The fixed clock in `web/tests/app.test.tsx` (`BASE_DATA_TS = 1788677280`) is 2026-09-06 06:48:00 UTC = **14:48 Taipei**; `NOW_MS` is four minutes later, 14:52. So `defaultArrival` there is 15:10 (14:52 + 15 → ceil to 15:10), 22 minutes after the reading, column `round(22/5) − 1 = 3`.
+- The hot store's `observations` table has `(lot_id, data_ts, observed_at, free_car, free_motor, quality)`; `quality.validate` maps the feed's `-9` sentinel to `NULL`.
+- Live `lots.json` today: 1,091 rows, no `f`; the Worker rejects nothing it does not know about (`validRow` checks named keys only), so the Python side may ship `f` before the Worker learns it — the Worker change in Task 2 tightens, never loosens.
 
-## File structure
+## File structure (what each new file is for)
 
 | Path | Responsibility |
 |---|---|
-| `src/parkcast/scheduler.py` | prune cutoff never passes the archive watermark (T1); hands published blobs to the uploader (T4) |
-| `src/parkcast/collector.py` | feed fetch refuses redirects, caps body size (T2) |
-| `src/parkcast/upload.py` (new) | secret and URL loading, `UploadGuard`, `send_pair`, `Uploader` thread, `from_environment` (T3) |
-| `src/parkcast/config.py` | upload and feed-size constants (T2, T3) |
-| `src/parkcast/__main__.py` | builds the uploader, passes it to publishing (T4) |
-| `scripts/new-upload-secret.py`, `scripts/check-staged-secrets.mjs`, `scripts/hooks/pre-commit` | secret generation and the commit guard (T5) |
-| `docker/Dockerfile`, `docker/docker-compose.yml`, `docker/docker-compose.dryrun.yml`, `scripts/hardening-dryrun.py` | hardened container and its dry run (T6) |
-| `worker/` (new) | `src/{index,http,kv,cache,serve,validate,upload}.ts`, `tests/`, `wrangler.jsonc`, `package.json` (T7, T8) |
-| `web/dev/liveArtifacts.ts`, `web/dev/localArtifacts.ts`, `web/vite.config.ts` | dev middleware, base `/`, localhost only (T9) |
-| `web/public/{_headers,404.html,robots.txt,fallback.css}`, `web/index.html`, `web/public/sw.js`, `web/src/App.tsx` | site hardening, future-dated grid (T10) |
-| `scripts/check-deploy-bundle.mjs`, `scripts/deploy-check.mjs`, `scripts/release.mjs`, `scripts/smoke-live.mjs`, `scripts/tests/` | the deploy gate (T11) |
-| `docs/deploy.md` (new) and existing docs | T12 |
+| `src/parkcast/store.py` `free_at` | each lot's `free_car` at one `data_ts` |
+| `src/parkcast/artifacts.py` `build_lots_json(free=…)` | `f` on each observed row |
+| `worker/src/validate.ts` | accept `f` as null or a non-negative integer |
+| `scripts/build-place-index.mjs` | tiles → `web/public/places/taipei.json` |
+| `web/src/styles/{tokens,base,components,motion}.css` | the visual system, replacing `index.css` |
+| `web/src/icons.tsx` | inline SVG icon components |
+| `web/src/motion.ts` | reduced-motion gate, `tween`, FLIP helpers |
+| `web/src/arrival.ts` | clock-time options and horizon arithmetic |
+| `web/src/confidence.ts` | the three-level label |
+| `web/src/places.ts` | index parsing, search ranking, recent searches |
+| `web/src/useGeolocation.ts` | the geolocation state machine, moved out of `App.tsx` |
+| `web/src/layout/sheet.ts`, `useMediaQuery.ts`, `BottomSheet.tsx`, `SidePanel.tsx`, `Shell.tsx` | the two arrangements |
+| `web/src/components/*.tsx` | `TopBar`, `PlaceSearch`, `ArrivalStrip`, `LotCard`, `LotList`, `ProbabilityRing`, `ConfidencePill`, `FreshnessBadge`, `Skeleton`, `Notice`, `LangToggle`, `LocateButton` |
+| `web/src/map/MapView.tsx`, `colour.ts`, `lotSource.ts` | selection, popup, transitions; the new ramp |
+
+Removed by the end: `web/src/index.css`, `components/DestinationSearch.tsx`, `components/LotRow.tsx`, `components/Scrubber.tsx`, `search.ts`, `tests/scrubber.test.tsx`, `tests/search.test.ts` (its cases move to `places.test.ts`).
 
 ---
 
-### Task 1: Prune never deletes a day compaction has not written (existing data-loss bug, §5.0)
+## Phase A — the observed free count (§7.1)
+
+### Task 1: `f` on the Python side
 
 **Files:**
-- Modify: `src/parkcast/scheduler.py` (imports; the prune call in `run_forever`, currently `removed = store.prune(conn, now_fn() - config.HOT_RETENTION_SEC)`)
-- Test: `tests/test_scheduler.py`
+- Modify: `src/parkcast/store.py` (append after `count_rows`)
+- Modify: `src/parkcast/artifacts.py:102-158` (`build_lots_json`)
+- Modify: `src/parkcast/scheduler.py:157-176` (`publish_artifacts`)
+- Test: `tests/test_store.py`, `tests/test_artifacts.py`, `tests/test_scheduler.py`
 
 **Interfaces:**
-- Consumes: `parkcast.compact.day_bounds(day: date) -> tuple[int, int]`
-- Produces: nothing new; `run_forever` behaviour only.
+- Produces: `store.free_at(conn, data_ts: int) -> dict[str, int | None]`; `artifacts.build_lots_json(lots, *, generated_at, base_data_ts, not_updating=None, free=None)` where `free: Mapping[str, int | None] | None`. A row carries `"f"` only when its lot id is a key of `free` (observed at the reading); the value is the count or `None`.
 
-- [ ] **Step 1: Write the failing test** — append after `test_failed_compaction_is_retried_for_the_same_day_and_collection_continues`:
+- [ ] **Step 1: Write the failing tests**
 
-```python
-def test_prune_keeps_a_day_whose_compaction_keeps_failing(monkeypatch):
-    """Prune must never delete rows no Parquet file holds.
-
-    Compaction stops at its first failure, but prune used to run regardless with
-    a cutoff of now - 48h. A day whose compaction failed for about a day was
-    therefore deleted from the hot store with no cold copy -- gone for good.
-    Found by the 2026-09-14 security review.
-    """
-    cutoffs = []
-    ticks = []
-    # 23:59:30 Taipei on 2026-09-04; compaction of 09-04 is due at the rollover.
-    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
-
-    def fake_prune(conn, cutoff_ts):
-        cutoffs.append(cutoff_ts)
-        return 0
-
-    monkeypatch.setattr(scheduler.store, "prune", fake_prune)
-
-    def always_fails(conn, day):
-        raise OSError("disk full")
-
-    def collect(conn, capacities):
-        ticks.append(clock.now)
-        # Three days of slots: well past the point where now - 48h passes the
-        # start of 2026-09-04.
-        if len(ticks) > 3 * 288:
-            raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
-
-    with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
-                              now_fn=clock.now_fn, archive=always_fails)
-
-    unarchived_start, _ = day_bounds(date(2026, 9, 4))
-    assert clock.now - config.HOT_RETENTION_SEC > unarchived_start, "scenario must reach the old failure"
-    assert max(cutoffs) <= unarchived_start, "prune reached into a day that was never archived"
-
-
-def test_prune_uses_the_normal_window_once_days_are_archived(monkeypatch):
-    cutoffs = []
-    ticks = []
-    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
-    monkeypatch.setattr(scheduler.store, "prune", lambda conn, cutoff_ts: cutoffs.append(cutoff_ts) or 0)
-
-    def collect(conn, capacities):
-        ticks.append(clock.now)
-        if len(ticks) > 3 * 288:
-            raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
-
-    with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
-                              now_fn=clock.now_fn, archive=_no_archive)
-
-    assert cutoffs[-1] == clock.now - config.HOT_RETENTION_SEC
-```
-
-- [ ] **Step 2: Run to verify the first test fails**
-
-Run the container command with `tests/test_scheduler.py::test_prune_keeps_a_day_whose_compaction_keeps_failing`.
-Expected: FAIL on `max(cutoffs) <= unarchived_start`. The second test passes already.
-
-- [ ] **Step 3: Implement.** In `scheduler.py` change the compact import line to:
+Append to `tests/test_store.py` (it already imports `store`, `FeedSnapshot`, `Observation`; add any missing import at the top in the file's own style):
 
 ```python
-from parkcast.compact import compact_day, day_bounds
-```
-
-and replace the prune call in `run_forever` with:
-
-```python
-        # Prune is the only thing that destroys rows, and it must never take a
-        # day compaction has not written out. Compaction stops at its first
-        # failure and retries next slot; without this bound, a day whose
-        # compaction kept failing for ~24 h fell out of the 48 h window and was
-        # deleted with no cold copy. `archived_day` is the earliest day not yet
-        # archived, so nothing from its first second onward may go.
-        cutoff = min(now_fn() - config.HOT_RETENTION_SEC, day_bounds(archived_day)[0])
-        removed = store.prune(conn, cutoff)
-```
-
-- [ ] **Step 4: Run the whole scheduler module** — container command with `tests/test_scheduler.py`. Expected: all pass, including `test_run_forever_prunes_even_when_every_attempt_in_the_slot_fails` (its day equals the watermark, so the cutoff is still `now - 48h`).
-
-- [ ] **Step 5: Checkpoint** — `git add src/parkcast/scheduler.py tests/test_scheduler.py`
-
----
-
-### Task 2: The feed fetch refuses redirects and caps the body (§5.3)
-
-**Files:**
-- Modify: `src/parkcast/config.py`, `src/parkcast/collector.py` (`fetch_json`)
-- Test: `tests/test_collector.py`
-
-**Interfaces:**
-- Produces: `collector.FeedError(RuntimeError)`; `fetch_json(url, *, timeout=config.HTTP_TIMEOUT_SEC, max_bytes=config.MAX_FEED_BYTES) -> dict` (same call shape as today).
-
-- [ ] **Step 1: Write the failing tests** — append to `tests/test_collector.py`:
-
-```python
-import requests as _requests
-
-
-class _FakeResponse:
-    def __init__(self, status=200, headers=None, chunks=(b'{"ok": true}',)):
-        self.status_code = status
-        self.headers = headers or {}
-        self._chunks = chunks
-        self.is_redirect = 300 <= status < 400 and "Location" in self.headers
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise _requests.HTTPError(str(self.status_code))
-
-    def iter_content(self, chunk_size):
-        yield from self._chunks
-
-
-def _patch_get(monkeypatch, response, calls):
-    def fake_get(url, **kwargs):
-        calls.append((url, kwargs))
-        return response
-
-    monkeypatch.setattr(collector.requests, "get", fake_get)
-
-
-def test_fetch_json_streams_without_following_redirects(monkeypatch):
-    calls = []
-    _patch_get(monkeypatch, _FakeResponse(chunks=(b'{"a":', b" 1}")), calls)
-    assert collector.fetch_json("https://example.test/x.json") == {"a": 1}
-    _, kwargs = calls[0]
-    assert kwargs["allow_redirects"] is False
-    assert kwargs["stream"] is True
-    assert kwargs["timeout"] == collector.config.HTTP_TIMEOUT_SEC
-
-
-def test_fetch_json_refuses_a_redirect(monkeypatch):
-    _patch_get(monkeypatch, _FakeResponse(302, {"Location": "http://10.0.0.1/"}), [])
-    with pytest.raises(collector.FeedError):
-        collector.fetch_json("https://example.test/x.json")
-
-
-def test_fetch_json_refuses_a_declared_oversize_body(monkeypatch):
-    _patch_get(monkeypatch, _FakeResponse(headers={"Content-Length": "2000"}), [])
-    with pytest.raises(collector.FeedError):
-        collector.fetch_json("https://example.test/x.json", max_bytes=1000)
-
-
-def test_fetch_json_refuses_an_oversize_stream_without_a_length(monkeypatch):
-    _patch_get(monkeypatch, _FakeResponse(chunks=(b"x" * 600, b"x" * 600)), [])
-    with pytest.raises(collector.FeedError):
-        collector.fetch_json("https://example.test/x.json", max_bytes=1000)
-
-
-def test_fetch_json_still_raises_on_http_errors(monkeypatch):
-    _patch_get(monkeypatch, _FakeResponse(503), [])
-    with pytest.raises(_requests.HTTPError):
-        collector.fetch_json("https://example.test/x.json")
-```
-
-- [ ] **Step 2: Run** `tests/test_collector.py`. Expected: the new tests FAIL (`FeedError` missing / kwargs missing).
-
-- [ ] **Step 3: Implement.** Add to `config.py` after `HTTP_TIMEOUT_SEC`:
-
-```python
-# Largest feed body accepted. Measured 2026-09-14: availability 421,825 B,
-# metadata 2,883,343 B. 32 MiB is ~11x the larger, so growth never trips it,
-# while a hijacked or broken endpoint cannot stream gigabytes into memory.
-MAX_FEED_BYTES = 32 * 1024 * 1024
-```
-
-In `collector.py` add `import json` and replace `fetch_json`:
-
-```python
-class FeedError(RuntimeError):
-    """The feed answered with something we refuse to read."""
-
-
-def fetch_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC,
-               max_bytes: int = config.MAX_FEED_BYTES) -> dict:
-    """GET one feed blob as JSON, refusing redirects and oversized bodies.
-
-    Both feed URLs answer 200 directly (checked 2026-09-14), so a redirect is
-    never legitimate: following one would let a hijacked endpoint send this
-    container's requests anywhere, including the local network. The size cap
-    bounds memory against a body that never ends.
-    """
-    with requests.get(url, timeout=timeout, allow_redirects=False, stream=True) as response:
-        if response.is_redirect or 300 <= response.status_code < 400:
-            raise FeedError(f"refusing a redirect from the feed (HTTP {response.status_code})")
-        response.raise_for_status()
-        declared = response.headers.get("Content-Length")
-        if declared is not None and declared.isdigit() and int(declared) > max_bytes:
-            raise FeedError(f"feed body of {declared} bytes exceeds {max_bytes}")
-        body = bytearray()
-        for chunk in response.iter_content(chunk_size=64 * 1024):
-            body += chunk
-            if len(body) > max_bytes:
-                raise FeedError(f"feed body exceeds {max_bytes} bytes")
-    return json.loads(bytes(body))
-```
-
-- [ ] **Step 4: Run** `tests/test_collector.py` and `tests/test_main.py`. Expected: PASS.
-
-- [ ] **Step 5: Checkpoint** — `git add src/parkcast/config.py src/parkcast/collector.py tests/test_collector.py`
-
----
-
-### Task 3: The upload module — secret, URL, guard, sender, thread (§5.1, §5.2)
-
-**Files:**
-- Modify: `src/parkcast/config.py`
-- Create: `src/parkcast/upload.py`
-- Test: `tests/test_upload.py`
-
-**Interfaces:**
-- Produces (used by Tasks 4, 5):
-  - `upload.SECRET_RE`, `upload.new_secret() -> str`, `upload.load_secret(path: Path) -> str | None`
-  - `upload.upload_url(env: Mapping[str, str]) -> str | None`
-  - `upload.UploadGuard(*, clock=time.time, daily_cap=..., max_skip_ticks=..., auth_retry_sec=..., limit_probe_sec=...)` with `should_attempt(key) -> tuple[bool, str]` and `record(key, status: int | None) -> None`
-  - `upload.send_pair(url, secret, grid: bytes, lots: bytes, *, opener, timeout) -> tuple[int, str | None, str | None]` (status, `X-Reject`, `Date`)
-  - `upload.build_opener() -> urllib.request.OpenerDirector`
-  - `upload.Uploader(url, secret, *, send=send_pair, guard=None, opener=None, deadline_sec=..., timeout_sec=..., clock=time.time)` with `start() -> Uploader`, `offer(grid, lots, *, base_data_ts: int, roster_id: int) -> None`, `process_pending() -> bool`
-  - `upload.from_environment(env=os.environ, secret_path=config.UPLOAD_SECRET_PATH) -> Uploader | None` (started)
-
-- [ ] **Step 1: Add constants to `config.py`** (end of file):
-
-```python
-# --- uploading to the deployed site (docs/deploy.md) ---
-# The Worker's hostname. Not secret -- the repository is public. The sentinel
-# keeps uploads switched off until the account exists; `upload.upload_url`
-# refuses any URL whose host is not exactly this.
-UPLOAD_HOST = "parkcast.REPLACE-SUBDOMAIN.workers.dev"
-UPLOAD_URL_ENV = "PARKCAST_UPLOAD_URL"
-UPLOAD_SECRET_PATH = Path("/run/secrets/parkcast_upload_secret")
-UPLOAD_TIMEOUT_SEC = 10          # per socket operation
-UPLOAD_DEADLINE_SEC = 30         # whole attempt, DNS included
-UPLOAD_DAILY_CAP = 300           # attempts per Taipei day; 288 slots exist
-UPLOAD_MAX_SKIP_TICKS = 12       # back-off ceiling: one hour of slots
-UPLOAD_AUTH_RETRY_SEC = 3600     # after a 401
-UPLOAD_LIMIT_PROBE_SEC = 3600    # after the daily-limit response
-```
-
-- [ ] **Step 2: Write the failing tests** — create `tests/test_upload.py`:
-
-```python
-import http.server
-import logging
-import threading
-import time
-from datetime import datetime, timezone
-
-import pytest
-
-from parkcast import config, upload
-
-HOST = "parkcast.example-sub.workers.dev"
-URL = f"https://{HOST}/artifacts/latest"
-# Built, never written literally: the pre-commit hook rejects secret-shaped text.
-SECRET = "pcu" + "_" + "A" * 43
-
-
-@pytest.fixture
-def host(monkeypatch):
-    monkeypatch.setattr(config, "UPLOAD_HOST", HOST)
-
-
-class _Clock:
-    def __init__(self, now: float):
-        self.now = now
-
-    def __call__(self) -> float:
-        return self.now
-
-
-# --- secrets and URLs --------------------------------------------------------
-
-def test_new_secret_has_the_documented_shape_and_is_random():
-    a, b = upload.new_secret(), upload.new_secret()
-    assert upload.SECRET_RE.fullmatch(a) and upload.SECRET_RE.fullmatch(b)
-    assert a != b
-
-
-@pytest.mark.parametrize("raw", [SECRET, SECRET + "\n", SECRET + "\r\n", "\ufeff" + SECRET])
-def test_load_secret_accepts_the_value_with_editor_noise(tmp_path, raw):
-    path = tmp_path / "s"
-    path.write_text(raw, encoding="utf-8")
-    assert upload.load_secret(path) == SECRET
-
-
-@pytest.mark.parametrize("raw", ["", "pcu_short", SECRET + "x", "Bearer " + SECRET])
-def test_load_secret_refuses_anything_else_without_logging_it(tmp_path, caplog, raw):
-    path = tmp_path / "s"
-    path.write_text(raw, encoding="utf-8")
-    with caplog.at_level(logging.DEBUG):
-        assert upload.load_secret(path) is None
-    assert raw.strip() == "" or raw not in caplog.text
-
-
-def test_load_secret_missing_file_is_none(tmp_path):
-    assert upload.load_secret(tmp_path / "missing") is None
-
-
-def test_upload_url_accepts_only_the_pinned_https_endpoint(host):
-    assert upload.upload_url({config.UPLOAD_URL_ENV: URL}) == URL
-    for bad in [
-        f"http://{HOST}/artifacts/latest",
-        "https://evil.example/artifacts/latest",
-        f"https://{HOST}.evil.example/artifacts/latest",
-        f"https://{HOST}:8443/artifacts/latest",
-        f"https://user@{HOST}/artifacts/latest",
-        f"https://{HOST}/artifacts/latest?x=1",
-        f"https://{HOST}/other",
-    ]:
-        assert upload.upload_url({config.UPLOAD_URL_ENV: bad}) is None, bad
-    assert upload.upload_url({}) is None
-
-
-def test_upload_url_is_off_while_the_host_is_a_sentinel(monkeypatch):
-    # Patched, not read from config: Task 13 replaces the sentinel with the real host.
-    sentinel = "parkcast.REPLACE-SUBDOMAIN.workers.dev"
-    monkeypatch.setattr(config, "UPLOAD_HOST", sentinel)
-    url = f"https://{sentinel}/artifacts/latest"
-    assert upload.upload_url({config.UPLOAD_URL_ENV: url}) is None
-
-
-# --- the guard ---------------------------------------------------------------
-
-T0 = datetime(2026, 9, 14, 4, 0, tzinfo=timezone.utc).timestamp()  # 12:00 Taipei
-
-
-def test_guard_skips_a_duplicate_of_the_last_accepted_upload():
-    guard = upload.UploadGuard(clock=_Clock(T0))
-    assert guard.should_attempt("k1") == (True, "")
-    guard.record("k1", 204)
-    assert guard.should_attempt("k1") == (False, "duplicate")
-    assert guard.should_attempt("k2")[0]
-
-
-def test_guard_caps_attempts_per_taipei_day_and_resets_at_taipei_midnight():
-    clock = _Clock(T0)
-    guard = upload.UploadGuard(clock=clock, daily_cap=3)
-    assert [guard.should_attempt(f"k{i}")[0] for i in range(4)] == [True, True, True, False]
-    clock.now = datetime(2026, 9, 14, 16, 0, 1, tzinfo=timezone.utc).timestamp()  # 00:00:01 Taipei
-    assert guard.should_attempt("k9")[0]
-
-
-def test_guard_does_not_back_off_on_409():
-    guard = upload.UploadGuard(clock=_Clock(T0))
-    guard.should_attempt("k1")
-    guard.record("k1", 409)
-    assert guard.should_attempt("k2") == (True, "")
-
-
-def test_guard_waits_an_hour_after_401():
-    clock = _Clock(T0)
-    guard = upload.UploadGuard(clock=clock)
-    guard.should_attempt("k1")
-    guard.record("k1", 401)
-    clock.now += 3599
-    assert guard.should_attempt("k2") == (False, "paused")
-    clock.now += 1
-    assert guard.should_attempt("k2")[0]
-
-
-def test_guard_pauses_on_the_daily_limit_until_utc_midnight_probing_hourly():
-    clock = _Clock(datetime(2026, 9, 14, 23, 30, tzinfo=timezone.utc).timestamp())
-    guard = upload.UploadGuard(clock=clock)
-    guard.should_attempt("k1")
-    guard.record("k1", 429)
-    clock.now += 29 * 60
-    assert guard.should_attempt("k2") == (False, "paused")
-    clock.now += 60  # 00:00 UTC, before a full hour passed
-    assert guard.should_attempt("k2")[0]
-
-
-def test_guard_backs_off_exponentially_to_twelve_ticks_and_resets_on_success():
-    guard = upload.UploadGuard(clock=_Clock(T0))
-    key = 0
-    assert guard.should_attempt(key)[0]
-    skips = []
-    for _ in range(6):
-        guard.record(key, None)          # this attempt failed
-        count = 0
-        while True:                      # ticks until the next attempt is allowed
-            key += 1
-            if guard.should_attempt(key)[0]:
-                break
-            count += 1
-        skips.append(count)
-    assert skips == [1, 2, 4, 8, 12, 12]
-    guard.record(key, 204)
-    assert guard.should_attempt(key + 1) == (True, "")
-
-
-# --- the sender, against a local server -------------------------------------
-
-class _Handler(http.server.BaseHTTPRequestHandler):
-    seen: list = []
-    status = 204
-    extra_headers: dict = {}
-
-    def do_PUT(self):
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length)
-        type(self).seen.append((self.path, dict(self.headers), body))
-        self.send_response(type(self).status)
-        for k, v in type(self).extra_headers.items():
-            self.send_header(k, v)
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-    def log_message(self, *args):
-        pass
-
-
-@pytest.fixture
-def server():
-    _Handler.seen = []
-    _Handler.status = 204
-    _Handler.extra_headers = {}
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=srv.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{srv.server_address[1]}"
-    srv.shutdown()
-
-
-def test_send_pair_puts_the_pair_with_headers(server):
-    status, reject, _ = upload.send_pair(server + "/artifacts/latest", SECRET, b"GRID", b"LOTS",
-                                         opener=upload.build_opener(), timeout=5)
-    assert (status, reject) == (204, None)
-    path, headers, body = _Handler.seen[0]
-    assert path == "/artifacts/latest" and body == b"GRIDLOTS"
-    assert headers["X-Grid-Length"] == "4"
-    assert headers["Authorization"] == f"Bearer {SECRET}"
-
-
-def test_send_pair_reports_rejections(server):
-    _Handler.status = 409
-    _Handler.extra_headers = {"X-Reject": "stale"}
-    status, reject, _ = upload.send_pair(server + "/artifacts/latest", SECRET, b"G", b"L",
-                                         opener=upload.build_opener(), timeout=5)
-    assert (status, reject) == (409, "stale")
-
-
-def test_send_pair_refuses_redirects_and_never_forwards_the_secret(server):
-    _Handler.status = 307
-    _Handler.extra_headers = {"Location": server + "/elsewhere"}
-    status, _, _ = upload.send_pair(server + "/artifacts/latest", SECRET, b"G", b"L",
-                                    opener=upload.build_opener(), timeout=5)
-    assert status == 307
-    assert [p for p, _, _ in _Handler.seen] == ["/artifacts/latest"]
-
-
-def test_send_pair_ignores_proxy_environment(server, monkeypatch):
-    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
-    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
-    status, _, _ = upload.send_pair(server + "/artifacts/latest", SECRET, b"G", b"L",
-                                    opener=upload.build_opener(), timeout=5)
-    assert status == 204
-
-
-# --- the thread --------------------------------------------------------------
-
-def _uploader(send, **kwargs):
-    return upload.Uploader(URL, SECRET, send=send, guard=upload.UploadGuard(), **kwargs)
-
-
-def test_offer_never_blocks_and_only_the_latest_waits(caplog):
-    release = threading.Event()
-    sent = []
-
-    def slow_send(url, secret, grid, lots, *, opener, timeout):
-        sent.append(grid)
-        release.wait(5)
-        return 204, None, None
-
-    up = _uploader(slow_send).start()
-    started = time.monotonic()
-    up.offer(b"one", b"L", base_data_ts=1, roster_id=7)
-    time.sleep(0.2)
-    up.offer(b"two", b"L", base_data_ts=2, roster_id=7)
-    up.offer(b"three", b"L", base_data_ts=3, roster_id=7)
-    assert time.monotonic() - started < 1.0
-    release.set()
-    deadline = time.monotonic() + 5
-    while len(sent) < 2 and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert sent == [b"one", b"three"]
-
-
-def test_an_attempt_past_the_deadline_is_abandoned_and_blocks_the_next(caplog):
-    release = threading.Event()
-
-    def hung_send(url, secret, grid, lots, *, opener, timeout):
-        release.wait(5)
-        return 204, None, None
-
-    up = _uploader(hung_send, deadline_sec=0.2)
-    up.offer(b"one", b"L", base_data_ts=1, roster_id=7)
-    with caplog.at_level(logging.WARNING, logger="parkcast.upload"):
-        assert up.process_pending()
-        up.offer(b"two", b"L", base_data_ts=2, roster_id=7)
-        assert up.process_pending()
-    assert "abandoned" in caplog.text
-    assert "still running" in caplog.text
-    release.set()
-
-
-def test_send_exceptions_are_logged_by_type_only(caplog):
-    def leaky_send(url, secret, grid, lots, *, opener, timeout):
-        raise ValueError(f"Invalid header value {('Bearer ' + secret + chr(10))!r}")
-
-    up = _uploader(leaky_send)
-    up.offer(b"one", b"L", base_data_ts=1, roster_id=7)
-    with caplog.at_level(logging.DEBUG):
-        up.process_pending()
-    assert "ValueError" in caplog.text
-    assert SECRET not in caplog.text
-    assert all(SECRET not in str(r.args) and SECRET not in r.getMessage() for r in caplog.records)
-
-
-def test_from_environment_is_off_and_says_so_once_without_the_value(tmp_path, caplog, host):
-    with caplog.at_level(logging.INFO, logger="parkcast.upload"):
-        assert upload.from_environment({}, secret_path=tmp_path / "none") is None
-    assert "uploads disabled" in caplog.text
-
-
-def test_from_environment_builds_a_started_uploader(tmp_path, host):
-    path = tmp_path / "s"
-    path.write_text(SECRET, encoding="utf-8")
-    up = upload.from_environment({config.UPLOAD_URL_ENV: URL}, secret_path=path)
-    assert isinstance(up, upload.Uploader)
-```
-
-- [ ] **Step 3: Run** `tests/test_upload.py`. Expected: FAIL (`ModuleNotFoundError: parkcast.upload`).
-
-- [ ] **Step 4: Implement `src/parkcast/upload.py`:**
-
-```python
-"""Upload each published forecast pair to the deployed site.
-
-Downstream of publishing, which is downstream of collection: nothing here may
-block the collection loop, raise into it, or log the secret. See
-docs/superpowers/specs/2026-09-14-deployment-design.md §5.
-"""
-import hashlib
-import logging
-import os
-import re
-import secrets
-import threading
-import time
-import urllib.error
-import urllib.request
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
-from pathlib import Path
-from urllib.parse import urlsplit
-
-from parkcast import config
-
-log = logging.getLogger("parkcast.upload")
-
-SECRET_RE = re.compile(r"pcu_[A-Za-z0-9_-]{43}")
-UPLOAD_PATH = "/artifacts/latest"
-KNOWN_REJECTS = frozenset({"future", "too-old", "stale", "too-soon", "roster-shrink"})
-SendResult = tuple[int, str | None, str | None]
-
-
-def new_secret() -> str:
-    """`pcu_` + 32 random bytes as unpadded base64url (43 characters)."""
-    return "pcu_" + secrets.token_urlsafe(32)
-
-
-def load_secret(path: Path) -> str | None:
-    """The secret, or None. Never logs the file's contents."""
-    try:
-        value = Path(path).read_text(encoding="utf-8-sig").strip()
-    except OSError:
-        return None
-    return value if SECRET_RE.fullmatch(value) else None
-
-
-def upload_url(env: Mapping[str, str]) -> str | None:
-    """The configured endpoint, only if it is exactly the pinned HTTPS URL."""
-    raw = env.get(config.UPLOAD_URL_ENV, "")
-    if not raw or "REPLACE" in config.UPLOAD_HOST:
-        return None
-    parts = urlsplit(raw)
-    if (parts.scheme != "https" or parts.hostname != config.UPLOAD_HOST or parts.port is not None
-            or parts.username or parts.password or parts.path != UPLOAD_PATH
-            or parts.query or parts.fragment):
-        return None
-    return raw
-
-
-class UploadGuard:
-    """Decides whether to attempt an upload, so no failure mode becomes a loop."""
-
-    def __init__(self, *, clock: Callable[[], float] = time.time,
-                 daily_cap: int = config.UPLOAD_DAILY_CAP,
-                 max_skip_ticks: int = config.UPLOAD_MAX_SKIP_TICKS,
-                 auth_retry_sec: int = config.UPLOAD_AUTH_RETRY_SEC,
-                 limit_probe_sec: int = config.UPLOAD_LIMIT_PROBE_SEC):
-        self._clock = clock
-        self._daily_cap = daily_cap
-        self._max_skip = max_skip_ticks
-        self._auth_retry_sec = auth_retry_sec
-        self._limit_probe_sec = limit_probe_sec
-        self._last_done: object = None
-        self._day = None
-        self._attempts = 0
-        self._skip = 0
-        self._backoff = 0
-        self._paused_until = 0.0
-
-    def should_attempt(self, key: object) -> tuple[bool, str]:
-        now = self._clock()
-        if key == self._last_done:
-            return False, "duplicate"
-        day = datetime.fromtimestamp(now, config.TAIPEI_TZ).date()
-        if day != self._day:
-            self._day, self._attempts = day, 0
-        if now < self._paused_until:
-            return False, "paused"
-        if self._skip > 0:
-            self._skip -= 1
-            return False, "backing off"
-        if self._attempts >= self._daily_cap:
-            return False, "daily cap reached"
-        self._attempts += 1
-        return True, ""
-
-    def record(self, key: object, status: int | None) -> None:
-        now = self._clock()
-        if status in (204, 409):
-            self._last_done, self._backoff, self._skip = key, 0, 0
-        elif status == 401:
-            self._paused_until = now + self._auth_retry_sec
-        elif status == 429:
-            # Provisional match for the daily Worker limit; Task 13 confirms the
-            # exact response and tightens this.
-            tomorrow = datetime.fromtimestamp(now, timezone.utc) + timedelta(days=1)
-            midnight = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-            self._paused_until = min(now + self._limit_probe_sec, midnight)
-        else:
-            self._backoff = min(max(1, self._backoff * 2), self._max_skip)
-            self._skip = self._backoff
-
-
-class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise urllib.error.HTTPError(req.full_url, code, "redirect refused", headers, fp)
-
-
-def build_opener() -> urllib.request.OpenerDirector:
-    """No proxies from the environment, no redirects, certificate checks on."""
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}),
-        _RefuseRedirect(),
-        urllib.request.HTTPSHandler(),
-    )
-
-
-def send_pair(url: str, secret: str, grid: bytes, lots: bytes, *,
-              opener: urllib.request.OpenerDirector, timeout: float) -> SendResult:
-    request = urllib.request.Request(url, data=grid + lots, method="PUT")
-    request.add_header("Content-Type", "application/octet-stream")
-    request.add_header("X-Grid-Length", str(len(grid)))
-    request.add_unredirected_header("Authorization", f"Bearer {secret}")
-    try:
-        with opener.open(request, timeout=timeout) as response:
-            return response.status, response.headers.get("X-Reject"), response.headers.get("Date")
-    except urllib.error.HTTPError as err:
-        try:
-            headers = err.headers
-            return err.code, headers.get("X-Reject") if headers else None, headers.get("Date") if headers else None
-        finally:
-            err.close()
-
-
-@dataclass(frozen=True, slots=True)
-class _Job:
-    grid: bytes
-    lots: bytes
-    key: tuple[int, int, str]
-
-
-class Uploader:
-    """One daemon thread, one waiting job at most, one attempt at a time."""
-
-    def __init__(self, url: str, secret: str, *, send: Callable[..., SendResult] = send_pair,
-                 guard: UploadGuard | None = None, opener=None,
-                 deadline_sec: float = config.UPLOAD_DEADLINE_SEC,
-                 timeout_sec: float = config.UPLOAD_TIMEOUT_SEC,
-                 clock: Callable[[], float] = time.time):
-        self._url = url
-        self._secret = secret
-        self._send = send
-        self._guard = guard or UploadGuard(clock=clock)
-        self._opener = opener or build_opener()
-        self._deadline = deadline_sec
-        self._timeout = timeout_sec
-        self._clock = clock
-        self._cond = threading.Condition()
-        self._pending: _Job | None = None
-        self._helper: threading.Thread | None = None
-        self._skew_logged = False
-
-    def start(self) -> "Uploader":
-        threading.Thread(target=self._loop, name="parkcast-upload", daemon=True).start()
-        return self
-
-    def offer(self, grid: bytes, lots: bytes, *, base_data_ts: int, roster_id: int) -> None:
-        key = (base_data_ts, roster_id, hashlib.sha256(grid + lots).hexdigest())
-        with self._cond:
-            self._pending = _Job(grid, lots, key)
-            self._cond.notify()
-
-    def process_pending(self) -> bool:
-        with self._cond:
-            job, self._pending = self._pending, None
-        if job is None:
-            return False
-        self._attempt(job)
-        return True
-
-    def _loop(self) -> None:
-        while True:
-            with self._cond:
-                while self._pending is None:
-                    self._cond.wait()
-            try:
-                self.process_pending()
-            except Exception as exc:  # never let the thread die
-                log.warning("upload thread error: %s", type(exc).__name__)
-
-    def _attempt(self, job: _Job) -> None:
-        if self._helper is not None and self._helper.is_alive():
-            log.warning("upload skipped: previous attempt still running")
-            return
-        ok, reason = self._guard.should_attempt(job.key)
-        if not ok:
-            if reason != "duplicate":
-                log.info("upload skipped: %s", reason)
-            return
-        box: dict = {}
-
-        def run() -> None:
-            started = time.monotonic()
-            try:
-                box["result"] = self._send(self._url, self._secret, job.grid, job.lots,
-                                           opener=self._opener, timeout=self._timeout)
-            except Exception as exc:
-                box["error"] = type(exc).__name__
-            box["seconds"] = time.monotonic() - started
-
-        self._helper = threading.Thread(target=run, name="parkcast-upload-send", daemon=True)
-        self._helper.start()
-        self._helper.join(self._deadline)
-        if self._helper.is_alive():
-            log.warning("upload abandoned after %ss", self._deadline)
-            self._guard.record(job.key, None)
-            return
-        if "error" in box:
-            log.warning("upload failed: %s", box["error"])
-            self._guard.record(job.key, None)
-            return
-        status, reject, date_header = box["result"]
-        self._guard.record(job.key, status)
-        self._check_skew(date_header)
-        if status == 204:
-            log.info("uploaded %s bytes in %.1fs", len(job.grid) + len(job.lots), box["seconds"])
-        elif status == 409:
-            log.info("upload not needed: %s", reject if reject in KNOWN_REJECTS else "rejected")
-        elif status == 401:
-            log.warning("upload unauthorized; retrying in an hour")
-        elif status == 429:
-            log.warning("upload refused by the daily limit; pausing")
-        else:
-            log.warning("upload failed: HTTP %s", status)
-
-    def _check_skew(self, date_header: str | None) -> None:
-        if not date_header or self._skew_logged:
-            return
-        try:
-            skew = abs(parsedate_to_datetime(date_header).timestamp() - self._clock())
-        except (TypeError, ValueError):
-            return
-        if skew > 60:
-            self._skew_logged = True
-            log.warning("container clock differs from the server by %ss", round(skew))
-
-
-def from_environment(env: Mapping[str, str] = os.environ,
-                     secret_path: Path = config.UPLOAD_SECRET_PATH) -> Uploader | None:
-    url = upload_url(env)
-    secret = load_secret(secret_path)
-    if url is None or secret is None:
-        log.info("uploads disabled (%s)", "no valid upload URL" if url is None else "no valid secret file")
-        return None
-    return Uploader(url, secret).start()
-```
-
-- [ ] **Step 5: Run** `tests/test_upload.py`. Expected: PASS. If `test_guard_backs_off_exponentially…` fails, fix the implementation, not the expected `[1, 2, 4, 8, 12, 12]`.
-
-- [ ] **Step 6: Checkpoint** — `git add src/parkcast/config.py src/parkcast/upload.py tests/test_upload.py`
-
----
-
-### Task 4: Publishing hands its exact bytes to the uploader (§5.1)
-
-**Files:**
-- Modify: `src/parkcast/scheduler.py` (`publish_artifacts`), `src/parkcast/__main__.py`
-- Test: `tests/test_scheduler.py`, `tests/test_main.py`
-
-**Interfaces:**
-- Consumes: `upload.from_environment() -> Uploader | None`; `Uploader.offer(grid, lots, *, base_data_ts, roster_id)` (Task 3)
-- Produces: `publish_artifacts(conn, lots, out_dir=config.ARTIFACT_DIR, uploader=None) -> None`
-
-- [ ] **Step 1: Write the failing tests.** Append to `tests/test_scheduler.py` (after `test_publish_artifacts_still_overwrites_on_a_normal_publish`):
-
-```python
-class _RecordingUploader:
-    def __init__(self):
-        self.offers = []
-
-    def offer(self, grid, lots, *, base_data_ts, roster_id):
-        self.offers.append((grid, lots, base_data_ts, roster_id))
-
-
-def test_publish_artifacts_hands_the_published_bytes_to_the_uploader(tmp_path):
-    """What goes to the site must be byte-identical to what was published here."""
+def test_free_at_returns_each_lots_count_at_one_tick(tmp_path):
     conn = store.connect(tmp_path / "t.sqlite")
-    _seed(conn, date(2026, 9, 4), lot="A")
-    out_dir = tmp_path / "artifacts"
-    up = _RecordingUploader()
-
-    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, uploader=up)
-    conn.close()
-
-    assert len(up.offers) == 1
-    grid, lots, base_data_ts, roster = up.offers[0]
-    assert grid == (out_dir / "grid.bin").read_bytes()
-    assert lots == (out_dir / "lots.json").read_bytes()
-    header = artifacts.decode_header(grid)
-    assert (base_data_ts, roster) == (header["base_data_ts"], header["roster_id"])
-
-
-def test_publish_artifacts_offers_nothing_when_it_refuses_to_publish(tmp_path):
-    conn = store.connect(tmp_path / "t.sqlite")  # no observations: publishing refuses
-    up = _RecordingUploader()
-
-    scheduler.publish_artifacts(conn, [_make_lot("A")], tmp_path / "artifacts", uploader=up)
-    conn.close()
-
-    assert up.offers == []
-```
-
-Append to `tests/test_main.py`:
-
-```python
-def test_publishing_is_wired_to_the_uploader_from_the_environment(monkeypatch, tmp_path):
-    seen = {}
-    monkeypatch.setattr(entry.config, "DB_PATH", tmp_path / "hot.sqlite")
-    _capture_run_forever(monkeypatch, seen)
-    monkeypatch.setattr(entry, "build_capacities", lambda day: {})
-    sentinel = object()
-    monkeypatch.setattr(entry.upload, "from_environment", lambda: sentinel)
-    calls = []
-    monkeypatch.setattr(entry, "publish_artifacts", lambda conn, lots, **kw: calls.append(kw))
-
-    entry.main()
-    seen["kwargs"]["publish"]("conn")
-
-    assert calls == [{"uploader": sentinel}]
-```
-
-- [ ] **Step 2: Run** `tests/test_scheduler.py tests/test_main.py`. Expected: the three new tests FAIL (`unexpected keyword argument 'uploader'`; `module ... has no attribute 'upload'`).
-
-- [ ] **Step 3: Implement.** In `scheduler.py` change the signature to
-`def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=None) -> None:`,
-add to its docstring "`uploader`, when given, receives the exact published bytes and never blocks
-(see `upload.Uploader`).", and replace the `artifacts.publish(...)` call and the log line after it with:
-
-```python
-    grid_blob = artifacts.encode_grid(grid, lot_ids=lot_ids, **identity)
-    lots_blob = artifacts.build_lots_json(ordered, not_updating=withheld, **identity)
-    artifacts.publish(out_dir, grid_blob=grid_blob, lots_blob=lots_blob)
-    log.info(
-        "published %s lots x %s horizons, %s not updating",
-        len(ordered), config.HORIZON_COUNT, len(withheld),
+    store.insert_snapshot(
+        conn,
+        FeedSnapshot(1000, 1200, (Observation("A", 12, None), Observation("B", -9, None))),
+        {"A": 50, "B": 50},
     )
-    if uploader is not None:
-        # The same bytes just written locally, handed to a thread that never
-        # blocks this loop. Uploading is downstream of publishing, which is
-        # downstream of collection.
-        uploader.offer(grid_blob, lots_blob, base_data_ts=history.latest_ts,
-                       roster_id=artifacts.roster_id(lot_ids))
+    store.insert_snapshot(conn, FeedSnapshot(1300, 1500, (Observation("A", 7, None),)), {"A": 50})
+    # The feed's -9 sentinel was stored as NULL: seen, reported nothing -> None, not dropped.
+    assert store.free_at(conn, 1000) == {"A": 12, "B": None}
+    assert store.free_at(conn, 1300) == {"A": 7}
+    assert store.free_at(conn, 999) == {}
 ```
 
-In `__main__.py`: change the import to `from parkcast import config, store, upload`; in `main()`,
-just before `run_forever(...)`, add
+Append to `tests/test_artifacts.py`:
 
 ```python
-    # None unless the upload URL and the secret file are both valid; logs why once.
-    uploader = upload.from_environment()
+def test_lots_json_carries_the_observed_free_count_at_the_reading():
+    doc = json.loads(build_lots_json([lot(1), lot(2), lot(3)], generated_at=1, base_data_ts=1,
+                                     free={"TPE0001": 12, "TPE0002": None}))
+    rows = {r["id"]: r for r in doc["lots"]}
+    assert rows["TPE0001"]["f"] == 12
+    assert rows["TPE0002"]["f"] is None, "seen at the reading, reported nothing: null, not dropped"
+    assert "f" not in rows["TPE0003"], "not observed at the reading: no field at all"
+
+
+def test_free_count_is_additive_and_leaves_the_schema_version_alone():
+    with_free = json.loads(build_lots_json([lot(1)], generated_at=1, base_data_ts=1,
+                                           free={"TPE0001": 3}))
+    without = json.loads(build_lots_json([lot(1)], generated_at=1, base_data_ts=1))
+    assert with_free["v"] == VERSION == without["v"]
+    assert "f" not in without["lots"][0]
 ```
 
-and change the publish argument to `publish=lambda conn: publish_artifacts(conn, _lots, uploader=uploader),`.
-
-- [ ] **Step 4: Run the full Python suite** (container command, `tests/`). Expected: all pass.
-
-- [ ] **Step 5: Checkpoint** — `git add src/parkcast/scheduler.py src/parkcast/__main__.py tests/test_scheduler.py tests/test_main.py`
-
----
-
-### Task 5: Secrets cannot be committed or baked into an image (§6.1 T13, §8.2)
-
-**Files:**
-- Modify: `.gitignore`, `.dockerignore`
-- Create: `scripts/new-upload-secret.py`, `scripts/check-staged-secrets.mjs`, `scripts/hooks/pre-commit`, `scripts/tests/check-staged-secrets.test.mjs`
-
-**Interfaces:**
-- Consumes: `upload.new_secret`, `upload.SECRET_RE` (Task 3)
-- Produces: `findSecrets(diff: string, knownSecret: string) -> string[]` in `scripts/check-staged-secrets.mjs`. The secret file `docker/secrets/parkcast_upload_secret` is created by the user in Task 13, never by an implementer.
-
-- [ ] **Step 1: Write the failing test** `scripts/tests/check-staged-secrets.test.mjs`:
-
-```js
-import assert from "node:assert/strict";
-import { test } from "node:test";
-import { findSecrets } from "../check-staged-secrets.mjs";
-
-// Built at runtime so this file never contains a secret-shaped literal.
-const SHAPED = "pcu" + "_" + "Z".repeat(43);
-const diff = (added) =>
-  `diff --git a/x.txt b/x.txt\n--- a/x.txt\n+++ b/x.txt\n@@ -0,0 +1 @@\n+${added}\n`;
-
-test("refuses an added line shaped like an upload secret", () => {
-  assert.equal(findSecrets(diff(`token = "${SHAPED}"`), "").length, 1);
-});
-
-test("refuses the known secret value wherever it appears", () => {
-  assert.ok(findSecrets(diff("prefix-known-value-suffix"), "known-value").length >= 1);
-});
-
-test("ignores removed lines", () => {
-  assert.deepEqual(findSecrets(`+++ b/x.txt\n-${SHAPED}\n`, ""), []);
-});
-
-test("allows code that only builds the shape", () => {
-  assert.deepEqual(findSecrets(diff('SECRET = "pcu" + "_" + "A" * 43'), ""), []);
-});
-```
-
-- [ ] **Step 2: Run** `node --test scripts/tests/*.test.mjs`. Expected: FAIL (module not found).
-
-- [ ] **Step 3: Implement** `scripts/check-staged-secrets.mjs`:
-
-```js
-#!/usr/bin/env node
-/**
- * Refuse a commit whose staged changes contain the upload secret, or anything
- * shaped like one. GitHub push protection cannot recognise a random secret, so
- * this hook is the control (spec §6.1 T13).
- *
- * Enable once per clone:  git config core.hooksPath scripts/hooks
- */
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-export const SECRET_SHAPE = /pcu_[A-Za-z0-9_-]{43}/;
-
-export function findSecrets(diff, knownSecret) {
-  const problems = [];
-  let file = "";
-  for (const line of diff.split(/\r?\n/)) {
-    if (line.startsWith("+++ ")) {
-      file = line.slice(4).replace(/^b\//, "");
-      continue;
-    }
-    if (!line.startsWith("+")) continue;
-    if (SECRET_SHAPE.test(line)) problems.push(`${file}: a line shaped like an upload secret`);
-    if (knownSecret && line.includes(knownSecret)) problems.push(`${file}: the upload secret itself`);
-  }
-  return problems;
-}
-
-function main() {
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const diff = execFileSync(
-    "git",
-    ["diff", "--cached", "--no-color", "--no-ext-diff", "--text", "-U0"],
-    { cwd: root, encoding: "utf8", maxBuffer: 512 * 1024 * 1024 },
-  );
-  const secretPath = join(root, "docker", "secrets", "parkcast_upload_secret");
-  const known = existsSync(secretPath) ? readFileSync(secretPath, "utf8").trim() : "";
-  const problems = [...new Set(findSecrets(diff, known))];
-  if (problems.length > 0) {
-    console.error(`commit refused:\n  ${problems.join("\n  ")}`);
-    process.exit(1);
-  }
-}
-
-const invoked = process.argv[1] ? resolve(process.argv[1]).toLowerCase() : "";
-if (invoked === fileURLToPath(import.meta.url).toLowerCase()) main();
-```
-
-`scripts/hooks/pre-commit` (LF line endings):
-
-```sh
-#!/bin/sh
-# Refuses commits containing the upload secret. Enable once per clone:
-#   git config core.hooksPath scripts/hooks
-exec node "$(git rev-parse --show-toplevel)/scripts/check-staged-secrets.mjs"
-```
-
-`scripts/new-upload-secret.py`:
+Append to `tests/test_scheduler.py` (uses the existing `_seed`, `_make_lot`, `date`, `json`, `store`, `scheduler`):
 
 ```python
-"""Create the collector's upload secret file. Never prints the value.
+def test_publish_artifacts_stamps_each_lots_free_count_at_the_reading(tmp_path):
+    """The count on the card is the one behind the forecast -- the reading at base_data_ts."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A", free=12)
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
 
-    python scripts/new-upload-secret.py            # docker/secrets/parkcast_upload_secret
-    python scripts/new-upload-secret.py --force    # rotate an existing one
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir)
+    conn.close()
 
-The file holds exactly the secret -- no newline, no BOM -- so the same bytes can
-be fed to `wrangler secret put` with a shell redirect (docs/deploy.md).
-"""
-import argparse
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-
-from parkcast.upload import SECRET_RE, new_secret  # noqa: E402
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path,
-                        default=ROOT / "docker" / "secrets" / "parkcast_upload_secret")
-    parser.add_argument("--force", action="store_true", help="replace an existing secret")
-    args = parser.parse_args()
-    if args.out.exists() and not args.force:
-        print(f"{args.out} already exists; pass --force to rotate it", file=sys.stderr)
-        return 1
-    value = new_secret()
-    if not SECRET_RE.fullmatch(value):
-        print("generated value has the wrong shape; nothing written", file=sys.stderr)
-        return 1
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_bytes(value.encode("ascii"))
-    print(f"wrote a new upload secret to {args.out} ({len(value)} characters, not shown)")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert doc["lots"][0]["f"] == 12
 ```
 
-In `.gitignore`, replace the line `.env` with:
+- [ ] **Step 2: Run them to verify they fail**
 
-```
-# Secrets and local tool state (docs/deploy.md). Never commit these.
-.env*
-!.env.example
-.dev.vars*
-.wrangler/
-docker/secrets/
-*.pem
-worker/node_modules/
-web/.dev-artifacts/
-```
+Run the container command from Global Constraints with `tests/test_store.py tests/test_artifacts.py tests/test_scheduler.py -k "free"`.
+Expected: FAIL — `AttributeError: module 'parkcast.store' has no attribute 'free_at'`, `TypeError: build_lots_json() got an unexpected keyword argument 'free'`, `KeyError: 'f'`.
 
-Append to `.dockerignore`, one per line: `docker/secrets`, `web`, `worker`, `scripts`.
+- [ ] **Step 3: Implement**
 
-- [ ] **Step 4: Run** `node --test scripts/tests/*.test.mjs`. Expected: 4 pass.
-
-- [ ] **Step 5: Prove the hook end to end, outside the repository.** In the scratchpad: `git init` a new
-  repository, copy `scripts/check-staged-secrets.mjs` into its `scripts/`, create `leak.txt` with
-  `node -e "process.stdout.write('pcu'+'_'+'Q'.repeat(43))" > leak.txt`, `git add leak.txt`, run
-  `node scripts/check-staged-secrets.mjs`. Expected: exit 1 and "commit refused". Unstage it, stage a
-  harmless file, expect exit 0. Also run `python scripts/new-upload-secret.py --out <scratch>/s` and
-  confirm the file is 47 bytes with no trailing newline. Delete the scratch repository and file.
-
-- [ ] **Step 6: Checkpoint** — `git add .gitignore .dockerignore scripts/new-upload-secret.py scripts/check-staged-secrets.mjs scripts/hooks/pre-commit scripts/tests/check-staged-secrets.test.mjs`, then `git update-index --chmod=+x scripts/hooks/pre-commit`. Do **not** run `git config core.hooksPath` — the user enables it in Task 13.
-
----
-
-### Task 6: Harden the collector container, and rehearse it offline (§5.4)
-
-**Files:**
-- Modify: `docker/Dockerfile`, `docker/docker-compose.yml`
-- Create: `docker/docker-compose.dryrun.yml`, `scripts/hardening-dryrun.py`
-
-**Interfaces:**
-- Consumes: `collector.fetch_json` (Task 2), `metadata.parse_metadata`, `scheduler.publish_artifacts`, `scheduler.archive_day(conn, day)`, `store.connect`, `store.prune`
-- Produces: the hardened image definition. The live container is **not** recreated here (Task 13). The upload `secrets:` and `PARKCAST_UPLOAD_URL` are **not** added here either — compose refuses to start when a secret file is missing, so they arrive in Task 13 together with the file.
-
-- [ ] **Step 1: `docker/Dockerfile`** becomes:
-
-```dockerfile
-FROM python:3.13-slim
-
-# A fixed, unprivileged identity. Nothing in the image runs as root at runtime.
-RUN groupadd --gid 10001 parkcast \
- && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin parkcast
-
-WORKDIR /app
-COPY pyproject.toml ./
-COPY src ./src
-RUN pip install --no-cache-dir .
-
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
-# No VOLUME declaration: compose already bind-mounts ../data, and under a plain
-# `docker run` a VOLUME silently creates an anonymous volume that `docker rm`
-# then orphans -- the operator loses the corpus without ever being told.
-USER 10001:10001
-CMD ["python", "-m", "parkcast"]
-```
-
-- [ ] **Step 2: `docker/docker-compose.yml`** becomes:
-
-```yaml
-services:
-  collector:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    restart: unless-stopped
-    # Hardening (docs/superpowers/specs/2026-09-14-deployment-design.md §5.4).
-    # Read-only root; the only writable places are data/, /scratch and a small /tmp.
-    read_only: true
-    tmpfs:
-      - /tmp:size=64m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    # CPU is throttled, never killed. There is deliberately NO memory limit: an
-    # OOM kill of the one irreplaceable process costs ticks that cannot be
-    # re-fetched, and Docker Desktop's VM already bounds memory.
-    cpus: "1.0"
-    pids_limit: 256
-    volumes:
-      - ../data:/app/data
-      # Snapshots for analysis go here, never to /tmp (docker/README.md).
-      - ../../parkcast-scratch:/scratch
-    environment:
-      TZ: Asia/Taipei
-```
-
-- [ ] **Step 3: `docker/docker-compose.dryrun.yml`:**
-
-```yaml
-# A rehearsal of the hardened settings against a SNAPSHOT COPY of data/.
-# It never polls the availability feed, never uploads, and never touches the live
-# corpus: its only bind mount is the copy outside the repository.
-name: parkcast-dryrun
-services:
-  rehearsal:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    read_only: true
-    tmpfs:
-      - /tmp:size=64m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    cpus: "1.0"
-    pids_limit: 256
-    volumes:
-      - ../../parkcast-dryrun/data:/app/data
-      - ../scripts/hardening-dryrun.py:/app/hardening-dryrun.py:ro
-    environment:
-      TZ: Asia/Taipei
-    entrypoint: ["python", "/app/hardening-dryrun.py"]
-```
-
-- [ ] **Step 4: `scripts/hardening-dryrun.py`:**
+`src/parkcast/store.py`, after `count_rows`:
 
 ```python
-"""Rehearse the collector's offline work under the hardened container settings.
+def free_at(conn: sqlite3.Connection, data_ts: int) -> dict[str, int | None]:
+    """Each lot's validated free_car at one tick, keyed by lot id.
 
-Run only through docker/docker-compose.dryrun.yml, against a snapshot copy. It
-makes ONE metadata request (what the collector does at startup and each
-day-rollover) and never polls availability or uploads. It proves that uid 10001
-can write through the Docker Desktop bind mount, that pyproj works on a
-read-only root, and that a publish, a compaction and a prune complete.
-
-    ... run --rm rehearsal --day 2026-09-13
-"""
-import argparse
-import os
-import sys
-import time
-from datetime import date
-from pathlib import Path
-
-from parkcast import config, store
-from parkcast.collector import fetch_json
-from parkcast.metadata import parse_metadata
-from parkcast.scheduler import archive_day, publish_artifacts
-
-
-def _peak(name: str) -> str:
-    path = Path("/sys/fs/cgroup") / name
-    return path.read_text().strip() if path.exists() else "n/a"
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--day", required=True, type=date.fromisoformat,
-                        help="a completed day in the snapshot whose cold file was removed")
-    args = parser.parse_args()
-
-    print(f"uid={os.getuid()} gid={os.getgid()}")
-    if os.getuid() != 10001:
-        print("FAIL: not running as uid 10001")
-        return 1
-
-    probe = config.DATA_DIR / ".write-probe"
-    probe.write_bytes(b"ok")
-    probe.unlink()
-    print("bind mount writable by uid 10001")
-
-    started = time.monotonic()
-    lots = parse_metadata(fetch_json(config.METADATA_URL))
-    print(f"metadata parsed on a read-only root: {len(lots)} lots in {time.monotonic() - started:.1f}s")
-
-    conn = store.connect(config.DB_PATH)
-    try:
-        started = time.monotonic()
-        publish_artifacts(conn, lots)
-        print(f"publish ok in {time.monotonic() - started:.1f}s")
-
-        cold = config.PARQUET_DIR / f"{args.day.isoformat()}.parquet"
-        if cold.exists():
-            print(f"FAIL: {cold} exists; remove it from the COPY first")
-            return 1
-        started = time.monotonic()
-        archive_day(conn, args.day)
-        print(f"compaction ok in {time.monotonic() - started:.1f}s: {cold.exists()=}")
-
-        removed = store.prune(conn, int(time.time()) - config.HOT_RETENTION_SEC)
-        print(f"prune ok: {removed} rows")
-    finally:
-        conn.close()
-
-    print(f"memory.peak={_peak('memory.peak')} pids.peak={_peak('pids.peak')}")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+    Only lots observed at exactly `data_ts` appear. A NULL free_car -- the
+    feed's -9 sentinel, or a reading `validate` refused -- maps to None rather
+    than being dropped: "seen, reported nothing" and "not seen" are different
+    facts, and the card shows them differently.
+    """
+    rows = conn.execute("SELECT lot_id, free_car FROM observations WHERE data_ts = ?", (data_ts,))
+    return {lot_id: free for lot_id, free in rows}
 ```
 
-- [ ] **Step 5: Validate both compose files without starting anything:**
-`docker compose -f docker/docker-compose.yml config --quiet` and
-`docker compose -f docker/docker-compose.dryrun.yml config --quiet`. Expected: no output, exit 0.
-Confirm `docker inspect -f '{{.State.StartedAt}}' docker-collector-1` is unchanged afterwards.
+`src/parkcast/artifacts.py` — change the signature and the row loop of `build_lots_json`:
 
-- [ ] **Step 6: Take the snapshot copy** with the existing procedure in `docker/README.md`
-("Analysing the corpus while it runs", step 1), but copy it to `D:/Projects/parkcast-dryrun/data`
-(outside the repository) instead of `../parkcast-snap`, then remove `/tmp/snap` from the container.
-Pick `DAY` = the day before the newest reading's Taipei date, and delete **the copy's**
-`D:/Projects/parkcast-dryrun/data/cold/DAY.parquet`. Double-check the path starts with
-`D:/Projects/parkcast-dryrun/` before deleting.
+```python
+def build_lots_json(
+    lots: Sequence[Lot], *, generated_at: int, base_data_ts: int,
+    not_updating: Mapping[str, int] | None = None,
+    free: Mapping[str, int | None] | None = None,
+) -> bytes:
+```
 
-- [ ] **Step 7: Rehearse** (Git Bash):
+Add to the docstring, after the `u` paragraph:
+
+```
+    `f` is the lot's observed free_car at `base_data_ts` -- the reading the
+    forecast was made from -- and is present only for a lot that was observed at
+    that reading; None means observed but reporting nothing. It is the one
+    *observed* number on the card, and the client labels it with the reading's
+    age so it is never mistaken for a forecast. Additive: `v` stays where it is.
+```
+
+In the loop, after the `u` block:
+
+```python
+        if free is not None and lot.id in free:
+            row["f"] = free[lot.id]
+```
+
+`src/parkcast/scheduler.py` `publish_artifacts` — replace the `lots_blob = ...` line:
+
+```python
+    # The observed count behind each forecast row, from the same reading the
+    # grid was built from. `store.free_at` is one indexed query on data_ts.
+    free = store.free_at(conn, history.latest_ts)
+    lots_blob = artifacts.build_lots_json(ordered, not_updating=withheld, free=free, **identity)
+```
+
+- [ ] **Step 4: Run the whole Python suite**
+
+Run the container command (all of `tests/`). Expected: everything passes (351 + 4 new; 3 skipped as before).
+
+- [ ] **Step 5: Checkpoint**
 
 ```bash
-MSYS_NO_PATHCONV=1 docker compose -f docker/docker-compose.dryrun.yml run --rm --build rehearsal --day DAY; echo "exit=$?"
+git add src/parkcast/store.py src/parkcast/artifacts.py src/parkcast/scheduler.py tests/test_store.py tests/test_artifacts.py tests/test_scheduler.py
 ```
+Commit only if authorised: `feat(artifacts): publish each lot's observed free count`.
 
-Expected: `uid=10001`, `bind mount writable`, `metadata parsed`, `publish ok`, `compaction ok ... True`,
-`prune ok`, a `memory.peak` and `pids.peak`, `exit=0`. Exit 137 means an OOM kill and is a failure.
-- If only the bind-mount write fails: **Ruling** — keep every other setting, drop `USER` to root in the
-  Dockerfile with a comment citing this measurement, and record it in the Review section. Do not relax
-  anything else.
-- Set `pids_limit` in both compose files to `max(256, 4 × pids.peak)` if that is larger.
-
-- [ ] **Step 8: Clean up** `D:/Projects/parkcast-dryrun` (it is our own copy; confirm the path) and
-remove the rehearsal image: `docker compose -f docker/docker-compose.dryrun.yml down --rmi local`.
-
-- [ ] **Step 9: Checkpoint** — `git add docker/Dockerfile docker/docker-compose.yml docker/docker-compose.dryrun.yml scripts/hardening-dryrun.py`
-
----
-
-### Task 7: The Worker — scaffold, routing and serving (§4.1, §4.2, §4.4)
+### Task 2: `f` accepted by the Worker and typed on the web
 
 **Files:**
-- Create: `worker/package.json`, `worker/package-lock.json` (generated), `worker/tsconfig.json`, `worker/vitest.config.ts`, `worker/wrangler.jsonc`
-- Create: `worker/src/http.ts`, `worker/src/kv.ts`, `worker/src/cache.ts`, `worker/src/serve.ts`, `worker/src/index.ts`
-- Test: `worker/tests/setup.ts`, `worker/tests/fakes.ts`, `worker/tests/serve.test.ts`, `worker/tests/routes.test.ts`
+- Modify: `worker/src/validate.ts:59-73` (`validRow`)
+- Modify: `web/src/types.ts:47-59` (add `f`)
+- Test: `worker/tests/validate.test.ts`, `web/tests/artifacts.test.ts`
 
 **Interfaces:**
-- Produces (used by Tasks 8, 11):
-  - `kv.ts`: `LATEST_KEY`, `interface StoredMeta`, `interface ArtifactsKV`, `interface Env { ARTIFACTS; UPLOAD_SECRET; PRODUCTION_HOST }`, `asStoredMeta(v: unknown): StoredMeta | null`
-  - `http.ts`: `respond(status, body, headers?)`, `notFound()`, `TEXT`
-  - `cache.ts`: `class LatestCache(now?: () => number)` with `get(kv): Promise<Latest | null>`, `set(latest: Latest)`; `interface Latest { bytes: Uint8Array; meta: StoredMeta }`; `CACHE_TTL_MS = 60_000`
-  - `index.ts`: `route(request, env, cache, nowSec): Promise<Response>` and the default `{ fetch }`
-  - tests: `FakeKV` (counts `reads`/`writes`), `makePair({ baseDataTs, generatedAt?, nLots?, rosterId? })`, `metaFor(pair, overrides?)`
+- Produces: `Lot.f?: number | null` on the web.
 
-- [ ] **Step 1: Scaffold.** `worker/package.json`:
+- [ ] **Step 1: Write the failing tests**
 
-```json
-{
-  "name": "parkcast-worker",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit",
-    "dev": "wrangler dev --local"
-  },
-  "devDependencies": {
-    "typescript": "6.0.3",
-    "vitest": "5.0.0",
-    "wrangler": "4.131.1"
-  }
-}
-```
-
-`worker/tsconfig.json`:
-
-```json
-{
-  "compilerOptions": {
-    "target": "es2023",
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "types": [],
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "verbatimModuleSyntax": true,
-    "skipLibCheck": true,
-    "noEmit": true
-  },
-  "include": ["src", "tests", "vitest.config.ts"]
-}
-```
-
-`worker/vitest.config.ts`:
+In `worker/tests/validate.test.ts`, add rows to the `it.each` table in `describe("validatePair")`, after `["negative capacity", …]`:
 
 ```ts
-import { defineConfig } from "vitest/config";
-
-export default defineConfig({
-  test: {
-    environment: "node",
-    include: ["tests/**/*.test.ts"],
-    setupFiles: ["./tests/setup.ts"],
-  },
-});
+    ["fractional f", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].f = 1.5; })]],
+    ["negative f", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].f = -1; })]],
+    ["string f", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].f = "12"; })]],
 ```
 
-`worker/wrangler.jsonc` — **strict JSON, no comments** (the release script parses it with `JSON.parse`):
-
-```json
-{
-  "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "parkcast",
-  "main": "src/index.ts",
-  "compatibility_date": "2026-09-01",
-  "workers_dev": true,
-  "preview_urls": false,
-  "observability": { "enabled": false },
-  "assets": {
-    "directory": "../web/dist",
-    "run_worker_first": ["/artifacts/*"],
-    "not_found_handling": "404-page"
-  },
-  "kv_namespaces": [
-    { "binding": "ARTIFACTS", "id": "REPLACE_WITH_PROD_KV_ID", "preview_id": "REPLACE_WITH_PREVIEW_KV_ID" }
-  ],
-  "vars": { "PRODUCTION_HOST": "parkcast.REPLACE-SUBDOMAIN.workers.dev" },
-  "secrets": { "required": ["UPLOAD_SECRET"] }
-}
-```
-
-Install from inside `worker/`: `cd worker && npm install --ignore-scripts` (npm 10 ignores `--prefix` when resolving package.json for install/ci/audit). Confirm
-`worker/package-lock.json` exists and `worker/node_modules` is ignored (`git check-ignore worker/node_modules`).
-
-- [ ] **Step 2: Test support.** `worker/tests/setup.ts`:
+And a new `it` in the same describe:
 
 ```ts
-// Workers add crypto.subtle.timingSafeEqual; Node does not. A test-only stand-in
-// with the same contract (throws on unequal lengths).
-type Bytes = ArrayBuffer | ArrayBufferView;
-const toBytes = (v: Bytes): Uint8Array =>
-  v instanceof ArrayBuffer ? new Uint8Array(v) : new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
-
-const subtle = globalThis.crypto.subtle as SubtleCrypto & { timingSafeEqual?: unknown };
-if (typeof subtle.timingSafeEqual !== "function") {
-  Object.defineProperty(subtle, "timingSafeEqual", {
-    configurable: true,
-    value: (a: Bytes, b: Bytes): boolean => {
-      const x = toBytes(a);
-      const y = toBytes(b);
-      if (x.byteLength !== y.byteLength) throw new TypeError("Input buffers must have the same byte length");
-      let diff = 0;
-      for (let i = 0; i < x.byteLength; i++) diff |= (x[i] ?? 0) ^ (y[i] ?? 0);
-      return diff === 0;
-    },
+  it("accepts the observed free count as an integer or null", () => {
+    const withCounts = mutateLots(pair.lots, (d) => { d.lots[0].f = 12; d.lots[1].f = null; });
+    expect(validatePair(pair.grid, withCounts).ok).toBe(true);
   });
-}
 ```
 
-`worker/tests/fakes.ts`:
+In `web/tests/artifacts.test.ts`, find the existing test that fetches a `lots.json` through `loadArtifacts` (search for `roster_id` in the file) and add, beside it, following its own stubbing style:
 
 ```ts
-import type { ArtifactsKV, StoredMeta } from "../src/kv";
-
-export class FakeKV implements ArtifactsKV {
-  reads = 0;
-  writes = 0;
-  failReads = false;
-  private readonly entries = new Map<string, { value: ArrayBuffer; metadata: unknown }>();
-
-  async getWithMetadata(key: string): Promise<{ value: ArrayBuffer | null; metadata: unknown }> {
-    this.reads++;
-    if (this.failReads) throw new Error("kv unavailable");
-    const entry = this.entries.get(key);
-    return { value: entry ? entry.value.slice(0) : null, metadata: entry ? entry.metadata : null };
-  }
-
-  async put(key: string, value: ArrayBuffer | Uint8Array, options: { metadata: StoredMeta }): Promise<void> {
-    this.writes++;
-    const copy = value instanceof Uint8Array ? (value.slice().buffer as ArrayBuffer) : value.slice(0);
-    this.entries.set(key, { value: copy, metadata: options.metadata });
-  }
-
-  seed(key: string, bytes: Uint8Array, metadata: unknown): void {
-    this.entries.set(key, { value: bytes.slice().buffer as ArrayBuffer, metadata });
-  }
-}
-
-export interface Pair { grid: Uint8Array; lots: Uint8Array; baseDataTs: number; generatedAt: number; nLots: number; rosterId: number }
-
-export function makePair(o: { baseDataTs: number; generatedAt?: number; nLots?: number; rosterId?: number }): Pair {
-  const nLots = o.nLots ?? 3;
-  const generatedAt = o.generatedAt ?? o.baseDataTs + 200;
-  const rosterId = o.rosterId ?? 42;
-  const grid = new Uint8Array(21 + nLots * 24);
-  const dv = new DataView(grid.buffer);
-  grid.set([0x50, 0x43, 0x47, 0x31], 0);
-  dv.setUint8(4, 1);
-  dv.setUint32(5, generatedAt, true);
-  dv.setUint32(9, o.baseDataTs, true);
-  dv.setUint16(13, nLots, true);
-  dv.setUint8(15, 24);
-  dv.setUint8(16, 5);
-  dv.setUint32(17, rosterId, true);
-  const rows = Array.from({ length: nLots }, (_unused, i) => ({
-    i, id: `TPE${i}`, n: `lot ${i}`, a: "信義區", y: 25.03, x: 121.56, c: 50, t: "民營停車場",
-    p: { k: "exact", lo: 40, hi: 40 },
-  }));
-  const lots = new TextEncoder().encode(JSON.stringify({
-    v: 1, generated_at: generatedAt, base_data_ts: o.baseDataTs, n_lots: nLots, roster_id: rosterId, lots: rows,
-  }));
-  return { grid, lots, baseDataTs: o.baseDataTs, generatedAt, nLots, rosterId };
-}
-
-export function joined(pair: Pair): Uint8Array {
-  const out = new Uint8Array(pair.grid.byteLength + pair.lots.byteLength);
-  out.set(pair.grid, 0);
-  out.set(pair.lots, pair.grid.byteLength);
-  return out;
-}
-
-export function metaFor(pair: Pair, overrides: Partial<StoredMeta> = {}): StoredMeta {
-  return {
-    v: 1, gridLength: pair.grid.byteLength, nLots: pair.nLots, rosterId: pair.rosterId,
-    generatedAt: pair.generatedAt, baseDataTs: pair.baseDataTs, uploadedAt: pair.baseDataTs + 250,
-    gridSha256: "g".repeat(64), lotsSha256: "l".repeat(64), ...overrides,
-  };
-}
+  it("passes the observed free count through untouched, null included", async () => {
+    // Build a two-row doc the way the file's other tests do, then:
+    //   expect(loaded.lots.lots[0].f).toBe(12);
+    //   expect(loaded.lots.lots[1].f).toBeNull();
+    //   expect("f" in loaded.lots.lots[2]).toBe(false);   // a row without the field stays without it
+  });
 ```
 
-- [ ] **Step 3: Write the failing tests.** `worker/tests/serve.test.ts`:
+(Write the body with that file's fixture helpers; the three assertions above are the contract.)
+
+- [ ] **Step 2: Run to verify failure**
+
+`npm test --prefix worker` → the three new reject rows fail (they are accepted today). `npm run typecheck --prefix web` → `f` does not exist on `Lot`.
+
+- [ ] **Step 3: Implement**
+
+`worker/src/validate.ts`, in `validRow` before `return true;`:
 
 ```ts
-import { describe, expect, it } from "vitest";
-import { LatestCache } from "../src/cache";
-import { LATEST_KEY, type Env } from "../src/kv";
-import { route } from "../src/index";
-import { FakeKV, joined, makePair, metaFor } from "./fakes";
-
-const NOW = 1_789_352_400;
-const origin = "https://parkcast.example.workers.dev";
-
-function setup(seed = true) {
-  const kv = new FakeKV();
-  const pair = makePair({ baseDataTs: NOW - 240, generatedAt: NOW - 30 });
-  if (seed) kv.seed(LATEST_KEY, joined(pair), metaFor(pair));
-  let clock = NOW * 1000;
-  const cache = new LatestCache(() => clock);
-  const env = { ARTIFACTS: kv, UPLOAD_SECRET: "x", PRODUCTION_HOST: "parkcast.example.workers.dev" } as Env;
-  const get = (path: string, init?: RequestInit) => route(new Request(origin + path, init), env, cache, NOW);
-  return { kv, pair, get, advance: (ms: number) => { clock += ms; } };
-}
-
-function expectSecurityHeaders(res: Response) {
-  expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
-  expect(res.headers.get("Content-Security-Policy")).toBe("default-src 'none'; frame-ancestors 'none'");
-}
-
-describe("serving the forecast", () => {
-  it("serves each half of the stored pair with its own caching", async () => {
-    const { get, pair } = setup();
-    const grid = await get("/artifacts/grid.bin");
-    expect(grid.status).toBe(200);
-    expect(new Uint8Array(await grid.arrayBuffer())).toEqual(pair.grid);
-    expect(grid.headers.get("Content-Type")).toBe("application/octet-stream");
-    expect(grid.headers.get("Cache-Control")).toBe("max-age=300"); // clamp(gen+330-now) = 300
-    expect(grid.headers.get("ETag")).toBe(`"${"g".repeat(64)}"`);
-    expectSecurityHeaders(grid);
-
-    const lots = await get("/artifacts/lots.json");
-    expect(new Uint8Array(await lots.arrayBuffer())).toEqual(pair.lots);
-    expect(lots.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
-    expect(lots.headers.get("Cache-Control")).toBe("max-age=900");
-    expect(lots.headers.has("Access-Control-Allow-Origin")).toBe(false);
-  });
-
-  it("answers a weak or strong If-None-Match with 304 and no body", async () => {
-    const { get } = setup();
-    const res = await get("/artifacts/grid.bin", { headers: { "If-None-Match": `W/"${"g".repeat(64)}"` } });
-    expect(res.status).toBe(304);
-    expect(await res.text()).toBe("");
-  });
-
-  it("sends no body for HEAD", async () => {
-    const { get } = setup();
-    const res = await get("/artifacts/lots.json", { method: "HEAD" });
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("");
-  });
-
-  it("reads KV at most once a minute, even under concurrency", async () => {
-    const { get, kv, advance } = setup();
-    await Promise.all(Array.from({ length: 50 }, () => get("/artifacts/grid.bin")));
-    expect(kv.reads).toBe(1);
-    advance(59_000);
-    await get("/artifacts/lots.json");
-    expect(kv.reads).toBe(1);
-    advance(2_000);
-    await get("/artifacts/lots.json");
-    expect(kv.reads).toBe(2);
-  });
-
-  it("says 503 when nothing is stored, and caches that answer too", async () => {
-    const { get, kv } = setup(false);
-    expect((await get("/artifacts/grid.bin")).status).toBe(503);
-    expect((await get("/artifacts/grid.bin")).status).toBe(503);
-    expect(kv.reads).toBe(1);
-  });
-});
-```
-
-`worker/tests/routes.test.ts`:
-
-```ts
-import { afterEach, describe, expect, it, vi } from "vitest";
-import worker, { route } from "../src/index";
-import { LatestCache } from "../src/cache";
-import type { Env } from "../src/kv";
-import { FakeKV } from "./fakes";
-
-const origin = "https://parkcast.example.workers.dev";
-const NOW = 1_789_352_400;
-const untouchableEnv = new Proxy({}, { get() { throw new Error("env was read"); } }) as unknown as Env;
-
-afterEach(() => vi.unstubAllGlobals());
-
-describe("routing", () => {
-  it.each(["/", "/index.html", "/wp-login.php", "/.env", "/artifacts", "/artifacts%2Fgrid.bin", "/artifacts/%2e%2e/sw.js"])(
-    "answers %s with 404 without reading env",
-    async (path) => {
-      const res = await route(new Request(origin + path), untouchableEnv, new LatestCache(), NOW);
-      expect(res.status).toBe(404);
-      expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
-    },
-  );
-
-  it.each(["/artifacts/grid.bin/", "/artifacts/GRID.BIN", "/artifacts/grid.bin.tmp", "/artifacts/other"])(
-    "answers unknown artifact path %s with 404",
-    async (path) => {
-      const env = { ARTIFACTS: new FakeKV(), UPLOAD_SECRET: "x", PRODUCTION_HOST: "h" } as Env;
-      expect((await route(new Request(origin + path), env, new LatestCache(), NOW)).status).toBe(404);
-    },
-  );
-
-  it("refuses other methods on known paths", async () => {
-    const env = { ARTIFACTS: new FakeKV(), UPLOAD_SECRET: "x", PRODUCTION_HOST: "h" } as Env;
-    const post = await route(new Request(origin + "/artifacts/grid.bin", { method: "POST" }), env, new LatestCache(), NOW);
-    expect(post.status).toBe(405);
-    expect(post.headers.get("Allow")).toBe("GET, HEAD");
-    const getLatest = await route(new Request(origin + "/artifacts/latest"), env, new LatestCache(), NOW);
-    expect(getLatest.status).toBe(405);
-    expect(getLatest.headers.get("Allow")).toBe("PUT");
-  });
-
-  it("turns an unexpected failure into a generic 500", async () => {
-    const kv = new FakeKV();
-    kv.failReads = true;
-    const env = { ARTIFACTS: kv, UPLOAD_SECRET: "x", PRODUCTION_HOST: "h" } as Env;
-    const res = await worker.fetch(new Request(origin + "/artifacts/grid.bin"), env);
-    expect(res.status).toBe(500);
-    expect(await res.text()).toBe("Internal error");
-  });
-
-  it("never makes a subrequest", async () => {
-    vi.stubGlobal("fetch", () => { throw new Error("subrequest"); });
-    const env = { ARTIFACTS: new FakeKV(), UPLOAD_SECRET: "x", PRODUCTION_HOST: "h" } as Env;
-    expect((await route(new Request(origin + "/artifacts/grid.bin"), env, new LatestCache(), NOW)).status).toBe(503);
-  });
-});
-```
-
-- [ ] **Step 4: Run** `npm test --prefix worker`. Expected: FAIL (modules missing).
-
-- [ ] **Step 5: Implement.** `worker/src/http.ts`:
-
-```ts
-/** Headers on every response the Worker generates; `_headers` does not reach these. */
-const SECURITY: Readonly<Record<string, string>> = {
-  "X-Content-Type-Options": "nosniff",
-  "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
-};
-
-export const TEXT: Readonly<Record<string, string>> = { "Content-Type": "text/plain; charset=utf-8" };
-
-export function respond(status: number, body: BodyInit | null, headers: Record<string, string> = {}): Response {
-  // SECURITY is spread last so no caller can weaken it.
-  return new Response(body, { status, headers: { "Cache-Control": "no-store", ...headers, ...SECURITY } });
-}
-
-export const notFound = (): Response => respond(404, "Not found", TEXT);
-```
-
-`worker/src/kv.ts`:
-
-```ts
-export const LATEST_KEY = "latest";
-
-export interface StoredMeta {
-  v: 1;
-  gridLength: number;
-  nLots: number;
-  rosterId: number;
-  generatedAt: number;
-  baseDataTs: number;
-  uploadedAt: number;
-  gridSha256: string;
-  lotsSha256: string;
-}
-
-/** The two KV calls the Worker makes; the real binding satisfies this. */
-export interface ArtifactsKV {
-  getWithMetadata(key: string, options: { type: "arrayBuffer" }): Promise<{ value: ArrayBuffer | null; metadata: unknown }>;
-  put(key: string, value: ArrayBuffer | Uint8Array, options: { metadata: StoredMeta }): Promise<void>;
-}
-
-export interface Env {
-  ARTIFACTS: ArtifactsKV;
-  UPLOAD_SECRET: string;
-  PRODUCTION_HOST: string;
-}
-
-const INTEGER_FIELDS = ["gridLength", "nLots", "rosterId", "generatedAt", "baseDataTs", "uploadedAt"] as const;
-
-export function asStoredMeta(v: unknown): StoredMeta | null {
-  if (typeof v !== "object" || v === null) return null;
-  const m = v as Record<string, unknown>;
-  if (m.v !== 1 || !INTEGER_FIELDS.every((k) => Number.isInteger(m[k]))) return null;
-  if (typeof m.gridSha256 !== "string" || typeof m.lotsSha256 !== "string") return null;
-  return m as unknown as StoredMeta;
-}
-```
-
-`worker/src/cache.ts`:
-
-```ts
-import { LATEST_KEY, asStoredMeta, type ArtifactsKV, type StoredMeta } from "./kv";
-
-export const CACHE_TTL_MS = 60_000;
-
-export interface Latest {
-  /** `ArrayBuffer`-backed, so a slice is a valid `Response` body under TS 6's DOM types. */
-  bytes: Uint8Array<ArrayBuffer>;
-  meta: StoredMeta;
-}
-
-/** The latest pair, re-read from KV at most once a minute per isolate. */
-export class LatestCache {
-  private latest: Latest | null = null;
-  private readAt = Number.NEGATIVE_INFINITY;
-  private inflight: Promise<Latest | null> | null = null;
-
-  constructor(private readonly now: () => number = Date.now) {}
-
-  get(kv: ArtifactsKV): Promise<Latest | null> {
-    if (this.now() - this.readAt < CACHE_TTL_MS) return Promise.resolve(this.latest);
-    if (this.inflight !== null) return this.inflight;
-    this.inflight = kv.getWithMetadata(LATEST_KEY, { type: "arrayBuffer" }).then(
-      ({ value, metadata }) => {
-        const meta = asStoredMeta(metadata);
-        const bytes = value === null ? null : new Uint8Array(value);
-        this.latest = bytes !== null && meta !== null && meta.gridLength <= bytes.byteLength ? { bytes, meta } : null;
-        this.readAt = this.now();
-        this.inflight = null;
-        return this.latest;
-      },
-      (error: unknown) => {
-        this.inflight = null;
-        throw error;
-      },
-    );
-    return this.inflight;
-  }
-
-  set(latest: Latest): void {
-    this.latest = latest;
-    this.readAt = this.now();
-    this.inflight = null;
-  }
-}
-```
-
-`worker/src/serve.ts`:
-
-```ts
-import type { LatestCache } from "./cache";
-import { TEXT, respond } from "./http";
-import type { Env } from "./kv";
-
-export type Part = "grid" | "lots";
-
-export const ARTIFACT_PATHS: Readonly<Record<string, Part>> = {
-  "/artifacts/grid.bin": "grid",
-  "/artifacts/lots.json": "lots",
-};
-
-export function etagMatches(header: string | null, etag: string): boolean {
-  if (header === null) return false;
-  const bare = etag.replace(/^W\//, "");
-  return header.split(",").some((token) => {
-    const t = token.trim();
-    return t === "*" || t.replace(/^W\//, "") === bare;
-  });
-}
-
-export async function serveArtifact(request: Request, part: Part, env: Env, cache: LatestCache, nowSec: number): Promise<Response> {
-  const latest = await cache.get(env.ARTIFACTS);
-  if (latest === null) return respond(503, "No forecast yet", { ...TEXT, "Retry-After": "300" });
-  const { bytes, meta } = latest;
-  const body = part === "grid" ? bytes.subarray(0, meta.gridLength) : bytes.subarray(meta.gridLength);
-  // lots.json changes rarely and the app bypasses the cache when the roster moves;
-  // grid.bin is cached only until the next publish is due.
-  const maxAge = part === "lots" ? 900 : Math.min(300, Math.max(0, meta.generatedAt + 330 - nowSec));
-  const headers = {
-    "Content-Type": part === "grid" ? "application/octet-stream" : "application/json; charset=utf-8",
-    "Cache-Control": `max-age=${maxAge}`,
-    ETag: `"${part === "grid" ? meta.gridSha256 : meta.lotsSha256}"`,
-  };
-  if (etagMatches(request.headers.get("If-None-Match"), headers.ETag)) return respond(304, null, headers);
-  return respond(200, request.method === "HEAD" ? null : body, headers);
-}
-```
-
-`worker/src/index.ts`:
-
-```ts
-import { LatestCache } from "./cache";
-import { TEXT, notFound, respond } from "./http";
-import type { Env } from "./kv";
-import { ARTIFACT_PATHS, serveArtifact } from "./serve";
-
-const isolateCache = new LatestCache();
-
-export async function route(request: Request, env: Env, cache: LatestCache, nowSec: number): Promise<Response> {
-  const url = new URL(request.url);
-  // Before `env` is touched: scanners probing random paths cost nothing further.
-  if (!url.pathname.startsWith("/artifacts/")) return notFound();
-
-  if (url.pathname === "/artifacts/latest") {
-    if (request.method !== "PUT") return respond(405, "Method not allowed", { ...TEXT, Allow: "PUT" });
-    return notFound(); // Task 8 replaces this line with the host check and the upload.
-  }
-
-  const part = ARTIFACT_PATHS[url.pathname];
-  if (part === undefined) return notFound();
-  if (request.method !== "GET" && request.method !== "HEAD") {
-    return respond(405, "Method not allowed", { ...TEXT, Allow: "GET, HEAD" });
-  }
-  return serveArtifact(request, part, env, cache, nowSec);
-}
-
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
-    try {
-      return await route(request, env, isolateCache, Math.floor(Date.now() / 1000));
-    } catch {
-      return respond(500, "Internal error", TEXT);
-    }
-  },
-};
-```
-
-- [ ] **Step 6: Run** `npm test --prefix worker` and `npm run typecheck --prefix worker`. Expected: PASS, no type errors. (`/artifacts%2Fgrid.bin` must stay a 404: `%2F` is not decoded into a path separator by the URL parser.)
-
-- [ ] **Step 7: Checkpoint** — `git add worker/package.json worker/package-lock.json worker/tsconfig.json worker/vitest.config.ts worker/wrangler.jsonc worker/src worker/tests`
-
----
-
-### Task 8: The Worker — authenticated, validated upload (§4.3)
-
-**Files:**
-- Create: `worker/src/validate.ts`, `worker/src/upload.ts`
-- Modify: `worker/src/index.ts` (the `/artifacts/latest` branch)
-- Test: `worker/tests/validate.test.ts`, `worker/tests/upload.test.ts`
-
-**Interfaces:**
-- Consumes: `StoredMeta`, `asStoredMeta`, `LATEST_KEY`, `Env` (kv.ts); `respond`, `TEXT`, `notFound` (http.ts); `LatestCache.set` (cache.ts); `FakeKV`, `makePair`, `joined`, `metaFor` (tests/fakes.ts)
-- Produces: `validatePair(grid, lots): { ok: true; header: GridHeader } | { ok: false }`, `checkOrder(header, stored, nowSec): Reject | null`, `parseGridHeader`; `handleUpload(request, env, cache, nowSec): Promise<Response>`, `authorized(header, secret)`, `readCapped(body, cap)`, `sha256Hex(bytes)`, `MAX_BODY_BYTES`
-
-- [ ] **Step 1: Write the failing tests.** `worker/tests/validate.test.ts`:
-
-```ts
-import { describe, expect, it } from "vitest";
-import { checkOrder, parseGridHeader, validatePair } from "../src/validate";
-import { makePair, metaFor } from "./fakes";
-
-const NOW = 1_789_352_400;
-const enc = new TextEncoder();
-
-function mutateLots(lots: Uint8Array, change: (doc: any) => void): Uint8Array {
-  const doc = JSON.parse(new TextDecoder().decode(lots));
-  change(doc);
-  return enc.encode(JSON.stringify(doc));
-}
-
-describe("validatePair", () => {
-  const pair = makePair({ baseDataTs: NOW - 240 });
-
-  it("accepts a well-formed pair", () => {
-    expect(validatePair(pair.grid, pair.lots).ok).toBe(true);
-  });
-
-  it.each<[string, () => [Uint8Array, Uint8Array]]>([
-    ["bad magic", () => { const g = pair.grid.slice(); g[0] = 0x51; return [g, pair.lots]; }],
-    ["truncated grid", () => [pair.grid.slice(0, -1), pair.lots]],
-    ["wrong horizon count", () => { const g = pair.grid.slice(); g[15] = 12; return [g, pair.lots]; }],
-    ["invalid UTF-8", () => [pair.grid, new Uint8Array([0xff, 0xfe])]],
-    ["JSON array", () => [pair.grid, enc.encode("[]")]],
-    ["roster mismatch", () => [pair.grid, mutateLots(pair.lots, (d) => { d.roster_id = 1; })]],
-    ["stamp mismatch", () => [pair.grid, mutateLots(pair.lots, (d) => { d.generated_at += 1; })]],
-    ["row index shifted", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[1].i = 2; })]],
-    ["row outside Taipei", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].y = 0; })]],
-    ["201-character name", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].n = "x".repeat(201); })]],
-    ["unknown fare kind", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].p = { k: "free" }; })]],
-    ["fractional u", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].u = 1.5; })]],
-    ["negative capacity", () => [pair.grid, mutateLots(pair.lots, (d) => { d.lots[0].c = -1; })]],
-  ])("rejects %s", (_label, build) => {
-    const [grid, lots] = build();
-    expect(validatePair(grid, lots).ok).toBe(false);
-  });
-});
-
-describe("checkOrder", () => {
-  const pair = makePair({ baseDataTs: NOW - 240, generatedAt: NOW - 30 });
-  const header = parseGridHeader(pair.grid)!;
-  const older = makePair({ baseDataTs: NOW - 540, generatedAt: NOW - 330 });
-  const stored = (o = {}) => metaFor(older, { uploadedAt: NOW - 300, ...o });
-
-  it.each<[string, () => string | null, string | null]>([
-    ["first upload", () => checkOrder(header, null, NOW), null],
-    ["newer than stored", () => checkOrder(header, stored(), NOW), null],
-    ["replay of what is stored", () => checkOrder(header, metaFor(pair), NOW), "stale"],
-    ["too soon after the last write", () => checkOrder(header, stored({ uploadedAt: NOW - 60 }), NOW), "too-soon"],
-    ["future-dated reading", () => checkOrder({ ...header, baseDataTs: 4_294_967_295 }, null, NOW), "future"],
-    ["stored future value is void", () => checkOrder(header, stored({ baseDataTs: 4_294_967_295 }), NOW), null],
-    ["reading older than six hours", () => checkOrder(header, null, NOW + 7 * 3600), "too-old"],
-    ["roster collapse", () => checkOrder({ ...header, nLots: 1 }, stored({ nLots: 1000 }), NOW), "roster-shrink"],
-    ["roster collapse after a day of silence", () => checkOrder({ ...header, nLots: 1 }, stored({ nLots: 1000, uploadedAt: NOW - 25 * 3600 }), NOW), null],
-    ["same reading, newer generation (PC clock behind)", () => checkOrder({ ...header, generatedAt: pair.generatedAt + 5 }, metaFor(pair, { uploadedAt: NOW - 300 }), NOW), null],
-  ])("%s", (_label, run, want) => {
-    expect(run()).toBe(want);
-  });
-});
-```
-
-`worker/tests/upload.test.ts`:
-
-```ts
-import { describe, expect, it } from "vitest";
-import { LatestCache } from "../src/cache";
-import { route } from "../src/index";
-import { LATEST_KEY, type Env } from "../src/kv";
-import { handleUpload, sha256Hex } from "../src/upload";
-import { FakeKV, joined, makePair, metaFor, type Pair } from "./fakes";
-
-const NOW = 1_789_352_400;
-const HOST = "parkcast.example.workers.dev";
-const SECRET = "pcu" + "_" + "S".repeat(43); // built, never a literal
-
-function setup() {
-  const kv = new FakeKV();
-  const cache = new LatestCache(() => NOW * 1000);
-  const env: Env = { ARTIFACTS: kv, UPLOAD_SECRET: SECRET, PRODUCTION_HOST: HOST };
-  const put = (pair: Pair, o: { auth?: string | null; host?: string; gridLength?: string; at?: number } = {}) => {
-    const headers = new Headers({ "X-Grid-Length": o.gridLength ?? String(pair.grid.byteLength) });
-    const auth = o.auth === undefined ? `Bearer ${SECRET}` : o.auth;
-    if (auth !== null) headers.set("Authorization", auth);
-    const request = new Request(`https://${o.host ?? HOST}/artifacts/latest`, { method: "PUT", headers, body: joined(pair) });
-    return route(request, env, cache, o.at ?? NOW);
-  };
-  return { kv, cache, env, put };
-}
-
-/** A request object whose headers are not filtered, to test Content-Length handling. */
-function rawRequest(headers: Record<string, string>, body: ReadableStream<Uint8Array>): Request {
-  return { headers: new Headers(headers), body } as unknown as Request;
-}
-
-function streamOf(totalBytes: number): ReadableStream<Uint8Array> {
-  let sent = 0;
-  return new ReadableStream({
-    pull(controller) {
-      if (sent >= totalBytes) return controller.close();
-      const chunk = new Uint8Array(Math.min(64_000, totalBytes - sent));
-      sent += chunk.byteLength;
-      controller.enqueue(chunk);
-    },
-  });
-}
-
-describe("upload", () => {
-  it("stores a valid pair with Worker-computed hashes and serves it without another read", async () => {
-    const { kv, env, cache, put } = setup();
-    const pair = makePair({ baseDataTs: NOW - 240, generatedAt: NOW - 30 });
-    expect((await put(pair)).status).toBe(204);
-    expect(kv.writes).toBe(1);
-
-    // The isolate that accepted the upload serves it straight from memory.
-    const readsBefore = kv.reads;
-    const res = await route(new Request(`https://${HOST}/artifacts/grid.bin`), env, cache, NOW);
-    expect(new Uint8Array(await res.arrayBuffer())).toEqual(pair.grid);
-    expect(kv.reads).toBe(readsBefore);
-
-    const { metadata } = await kv.getWithMetadata(LATEST_KEY);
-    expect(metadata).toMatchObject({
-      gridSha256: await sha256Hex(pair.grid.slice()),
-      lotsSha256: await sha256Hex(pair.lots.slice()),
-      uploadedAt: NOW,
-    });
-  });
-
-  it.each([null, "", "Basic abc", `Bearer ${SECRET}x`, `Bearer ${"a".repeat(300)}`])(
-    "refuses authorization %s before touching storage",
-    async (auth) => {
-      const { kv, put } = setup();
-      const res = await put(makePair({ baseDataTs: NOW - 240 }), { auth });
-      expect(res.status).toBe(401);
-      expect([kv.reads, kv.writes]).toEqual([0, 0]);
-    },
-  );
-
-  it("does not let a preview hostname write", async () => {
-    const { kv, put } = setup();
-    const res = await put(makePair({ baseDataTs: NOW - 240 }), { host: `abc123-${HOST}` });
-    expect(res.status).toBe(404);
-    expect([kv.reads, kv.writes]).toEqual([0, 0]);
-  });
-
-  it("refuses a declared oversize body, and an oversize stream whatever it declares", async () => {
-    const { env, cache, kv } = setup();
-    const auth = { Authorization: `Bearer ${SECRET}`, "X-Grid-Length": "45" };
-    const declared = await handleUpload(rawRequest({ ...auth, "Content-Length": String(2 * 1024 * 1024) }, streamOf(10)), env, cache, NOW);
-    expect(declared.status).toBe(413);
-    const lying = await handleUpload(rawRequest({ ...auth, "Content-Length": "10" }, streamOf(2 * 1024 * 1024)), env, cache, NOW);
-    expect(lying.status).toBe(413);
-    const undeclared = await handleUpload(rawRequest(auth, streamOf(2 * 1024 * 1024)), env, cache, NOW);
-    expect(undeclared.status).toBe(413);
-    expect(kv.writes).toBe(0);
-  });
-
-  it.each(["0x15", "21abc", "1e3", "", "1", "99999999"])("refuses X-Grid-Length %s", async (gridLength) => {
-    const { kv, put } = setup();
-    expect((await put(makePair({ baseDataTs: NOW - 240 }), { gridLength })).status).toBe(422);
-    expect(kv.writes).toBe(0);
-  });
-
-  it("refuses a replay, a too-soon write and a future-dated reading", async () => {
-    const { kv, put } = setup();
-    const pair = makePair({ baseDataTs: NOW - 240, generatedAt: NOW - 30 });
-    expect((await put(pair)).status).toBe(204);
-    const replay = await put(pair, { at: NOW + 400 });
-    expect([replay.status, replay.headers.get("X-Reject")]).toEqual([409, "stale"]);
-    const soon = await put(makePair({ baseDataTs: NOW + 60, generatedAt: NOW + 70 }), { at: NOW + 100 });
-    expect([soon.status, soon.headers.get("X-Reject")]).toEqual([409, "too-soon"]);
-    const future = await put(makePair({ baseDataTs: NOW + 3600, generatedAt: NOW + 3600 }), { at: NOW + 400 });
-    expect([future.status, future.headers.get("X-Reject")]).toEqual([409, "future"]);
-    expect(kv.writes).toBe(1);
-  });
-
-  it("is not locked out by a stored future-dated value", async () => {
-    const { kv, put } = setup();
-    const forged = makePair({ baseDataTs: 4_000_000_000, generatedAt: 4_000_000_000 });
-    kv.seed(LATEST_KEY, joined(forged), metaFor(forged, { uploadedAt: NOW - 300 }));
-    expect((await put(makePair({ baseDataTs: NOW - 240 }))).status).toBe(204);
-  });
-
-  it("does not let an unauthenticated flood read or write anything", async () => {
-    const { kv, put } = setup();
-    const pair = makePair({ baseDataTs: NOW - 240 });
-    await Promise.all(Array.from({ length: 200 }, () => put(pair, { auth: "Bearer wrong" })));
-    expect([kv.reads, kv.writes]).toEqual([0, 0]);
-  });
-});
-```
-
-- [ ] **Step 2: Run** `npm test --prefix worker`. Expected: the new files FAIL (modules missing); Task 7's tests still pass.
-
-- [ ] **Step 3: Implement `worker/src/validate.ts`** — the prototype verified against the live 10:16 pair (see "Facts measured while planning"), with `StoredMeta` imported rather than redeclared:
-
-```ts
-import type { StoredMeta } from "./kv";
-
-export const HEADER_SIZE = 21;
-export const MAX_LOTS = 4000;
-export const N_HORIZONS = 24;
-export const STEP_MIN = 5;
-export const GRID_VERSION = 1;
-export const LOTS_VERSION = 1;
-export const MAX_STRING = 200;
-/** Same box as `LAT_MIN..LON_MAX` in src/parkcast/config.py. */
-export const BBOX = { latMin: 24.5, latMax: 25.5, lonMin: 121.0, lonMax: 122.5 } as const;
-export const FUTURE_TOLERANCE_SEC = 600;
-export const MAX_BASE_AGE_SEC = 6 * 3600;
-export const MIN_UPLOAD_SPACING_SEC = 180;
-export const ROSTER_FLOOR = 0.5;
-export const ROSTER_ESCAPE_SEC = 24 * 3600;
-const PRICE_KINDS: ReadonlySet<string> = new Set(["exact", "range", "entry", "unknown"]);
-
-export interface GridHeader {
-  version: number;
-  generatedAt: number;
-  baseDataTs: number;
-  nLots: number;
-  nHorizons: number;
-  stepMin: number;
-  rosterId: number;
-}
-
-export type Reject = "future" | "too-old" | "stale" | "too-soon" | "roster-shrink";
-export type PairResult = { ok: true; header: GridHeader } | { ok: false };
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-const shortString = (v: unknown): boolean => typeof v === "string" && v.length <= MAX_STRING;
-
-const within = (v: unknown, lo: number, hi: number): boolean =>
-  typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
-
-const numberOrNull = (v: unknown): boolean =>
-  v === null || (typeof v === "number" && Number.isFinite(v));
-
-export function parseGridHeader(grid: Uint8Array): GridHeader | null {
-  if (grid.byteLength < HEADER_SIZE) return null;
-  if (grid[0] !== 0x50 || grid[1] !== 0x43 || grid[2] !== 0x47 || grid[3] !== 0x31) return null;
-  const dv = new DataView(grid.buffer, grid.byteOffset, grid.byteLength);
-  return {
-    version: dv.getUint8(4),
-    generatedAt: dv.getUint32(5, true),
-    baseDataTs: dv.getUint32(9, true),
-    nLots: dv.getUint16(13, true),
-    nHorizons: dv.getUint8(15),
-    stepMin: dv.getUint8(16),
-    rosterId: dv.getUint32(17, true),
-  };
-}
-
-function validRow(row: unknown, index: number): boolean {
-  if (!isRecord(row) || row.i !== index) return false;
-  if (!shortString(row.id) || !shortString(row.n) || !shortString(row.a) || !shortString(row.t)) {
+  // The observed free count (docs/superpowers/specs/2026-09-15-ui-redesign-design.md §7.1):
+  // absent, null, or a non-negative integer. Anything else is not our collector.
+  if ("f" in row && !(row.f === null || (Number.isInteger(row.f) && (row.f as number) >= 0))) {
     return false;
   }
-  if (!within(row.y, BBOX.latMin, BBOX.latMax) || !within(row.x, BBOX.lonMin, BBOX.lonMax)) {
-    return false;
-  }
-  if (!(row.c === null || (Number.isInteger(row.c) && (row.c as number) >= 0))) return false;
-  const price = row.p;
-  if (!isRecord(price) || typeof price.k !== "string" || !PRICE_KINDS.has(price.k)) return false;
-  if (price.k !== "unknown" && !(numberOrNull(price.lo) && numberOrNull(price.hi))) return false;
-  if ("u" in row && !Number.isInteger(row.u)) return false;
-  return true;
-}
-
-export function validatePair(grid: Uint8Array, lotsBytes: Uint8Array): PairResult {
-  const h = parseGridHeader(grid);
-  if (h === null || h.version !== GRID_VERSION || h.nHorizons !== N_HORIZONS || h.stepMin !== STEP_MIN) {
-    return { ok: false };
-  }
-  if (h.nLots < 1 || h.nLots > MAX_LOTS || grid.byteLength !== HEADER_SIZE + h.nLots * h.nHorizons) {
-    return { ok: false };
-  }
-  let doc: unknown;
-  try {
-    doc = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(lotsBytes));
-  } catch {
-    return { ok: false };
-  }
-  if (
-    !isRecord(doc) ||
-    doc.v !== LOTS_VERSION ||
-    doc.n_lots !== h.nLots ||
-    doc.roster_id !== h.rosterId ||
-    doc.generated_at !== h.generatedAt ||
-    doc.base_data_ts !== h.baseDataTs
-  ) {
-    return { ok: false };
-  }
-  const rows = doc.lots;
-  if (!Array.isArray(rows) || rows.length !== h.nLots) return { ok: false };
-  for (let i = 0; i < rows.length; i++) {
-    if (!validRow(rows[i], i)) return { ok: false };
-  }
-  return { ok: true, header: h };
-}
-
-export function checkOrder(h: GridHeader, stored: StoredMeta | null, now: number): Reject | null {
-  if (h.baseDataTs > now + FUTURE_TOLERANCE_SEC || h.generatedAt > now + FUTURE_TOLERANCE_SEC) {
-    return "future";
-  }
-  if (h.baseDataTs < now - MAX_BASE_AGE_SEC || h.generatedAt < h.baseDataTs - FUTURE_TOLERANCE_SEC) {
-    return "too-old";
-  }
-  // A stored value dated in the future is void: it must never lock out real uploads.
-  if (stored === null || stored.baseDataTs > now + FUTURE_TOLERANCE_SEC) return null;
-  const newer =
-    h.baseDataTs > stored.baseDataTs ||
-    (h.baseDataTs === stored.baseDataTs && h.generatedAt > stored.generatedAt);
-  if (!newer) return "stale";
-  if (now - stored.uploadedAt < MIN_UPLOAD_SPACING_SEC) return "too-soon";
-  if (h.nLots < ROSTER_FLOOR * stored.nLots && now - stored.uploadedAt <= ROSTER_ESCAPE_SEC) {
-    return "roster-shrink";
-  }
-  return null;
-}
 ```
 
-- [ ] **Step 4: Implement `worker/src/upload.ts`:**
+`web/src/types.ts`, after `u?: number;`:
 
 ```ts
-import type { LatestCache } from "./cache";
-import { TEXT, respond } from "./http";
-import { LATEST_KEY, asStoredMeta, type Env, type StoredMeta } from "./kv";
-import { checkOrder, validatePair } from "./validate";
-
-export const MAX_BODY_BYTES = 1024 * 1024;
-export const MAX_AUTH_HEADER_LENGTH = 200;
-const GRID_LENGTH = /^[0-9]{2,7}$/;
-const DECIMAL = /^[0-9]+$/;
-
-type TimingSafeSubtle = SubtleCrypto & {
-  timingSafeEqual(a: ArrayBuffer | ArrayBufferView, b: ArrayBuffer | ArrayBufferView): boolean;
-};
-
-/** The secret's digest, computed once per isolate. */
-let secretDigest: { secret: string; digest: Promise<ArrayBuffer> } | null = null;
-
-const encode = (s: string): Uint8Array<ArrayBuffer> => new TextEncoder().encode(s);
-
-export async function authorized(header: string | null, secret: string): Promise<boolean> {
-  if (header === null || header.length > MAX_AUTH_HEADER_LENGTH || !header.startsWith("Bearer ") || secret === "") {
-    return false;
-  }
-  if (secretDigest === null || secretDigest.secret !== secret) {
-    secretDigest = { secret, digest: crypto.subtle.digest("SHA-256", encode(secret)) };
-  }
-  // Comparing equal-length digests keeps timingSafeEqual from throwing and hides the secret's length.
-  const [presented, expected] = await Promise.all([
-    crypto.subtle.digest("SHA-256", encode(header.slice("Bearer ".length))),
-    secretDigest.digest,
-  ]);
-  return (crypto.subtle as TimingSafeSubtle).timingSafeEqual(presented, expected);
-}
-
-/** The whole body, or null as soon as it passes `cap` bytes -- whatever Content-Length claimed. */
-export async function readCapped(body: ReadableStream<Uint8Array> | null, cap: number): Promise<Uint8Array<ArrayBuffer> | null> {
-  if (body === null) return new Uint8Array(0);
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > cap) {
-      await reader.cancel();
-      return null;
-    }
-    chunks.push(value);
-  }
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
-}
-
-export async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
-  return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-export async function handleUpload(request: Request, env: Env, cache: LatestCache, nowSec: number): Promise<Response> {
-  // 1. Authentication before anything else: no body read, no storage touched.
-  if (!(await authorized(request.headers.get("Authorization"), env.UPLOAD_SECRET))) {
-    return respond(401, "Unauthorized", TEXT);
-  }
-  // 2. Size, by declaration and then by counting.
-  const declared = request.headers.get("Content-Length");
-  if (declared !== null && (!DECIMAL.test(declared) || Number(declared) > MAX_BODY_BYTES)) {
-    return respond(413, "Too large", TEXT);
-  }
-  const gridHeader = request.headers.get("X-Grid-Length") ?? "";
-  if (!GRID_LENGTH.test(gridHeader)) return respond(422, "Invalid upload", TEXT);
-  const body = await readCapped(request.body, MAX_BODY_BYTES);
-  if (body === null) return respond(413, "Too large", TEXT);
-  const gridLength = Number(gridHeader);
-  if (gridLength > body.byteLength) return respond(422, "Invalid upload", TEXT);
-
-  // 3. Shape.
-  const grid = body.subarray(0, gridLength);
-  const lots = body.subarray(gridLength);
-  const result = validatePair(grid, lots);
-  if (!result.ok) return respond(422, "Invalid upload", TEXT);
-
-  // 4. Time and order, against what is stored (one KV read).
-  const stored = await env.ARTIFACTS.getWithMetadata(LATEST_KEY, { type: "arrayBuffer" });
-  const reject = checkOrder(result.header, asStoredMeta(stored.metadata), nowSec);
-  if (reject !== null) return respond(409, "Not accepted", { ...TEXT, "X-Reject": reject });
-
-  // 5. One write, with metadata the Worker computed itself.
-  const meta: StoredMeta = {
-    v: 1,
-    gridLength,
-    nLots: result.header.nLots,
-    rosterId: result.header.rosterId,
-    generatedAt: result.header.generatedAt,
-    baseDataTs: result.header.baseDataTs,
-    uploadedAt: nowSec,
-    gridSha256: await sha256Hex(grid),
-    lotsSha256: await sha256Hex(lots),
-  };
-  await env.ARTIFACTS.put(LATEST_KEY, body, { metadata: meta });
-  cache.set({ bytes: body, meta });
-  return respond(204, null);
-}
+  /**
+   * Observed free car spaces at `base_data_ts`, the reading the forecast was
+   * made from. Present only when the lot was observed at that reading; `null`
+   * when it was observed but reported nothing. An *observation*, never a
+   * forecast: the UI shows it with the reading's age for that reason.
+   */
+  f?: number | null;
 ```
 
-If `tsc` rejects `request.body` against `ReadableStream<Uint8Array>`, widen the parameter to
-`ReadableStream<Uint8Array<ArrayBufferLike>> | null` — do not add a cast at the call site.
+- [ ] **Step 4: Verify**
 
-- [ ] **Step 5: Wire the route.** In `worker/src/index.ts` add `import { handleUpload } from "./upload";`
-and replace the line `return notFound(); // Task 8 replaces this line ...` with:
+`npm test --prefix worker && npm run typecheck --prefix worker && npm test --prefix web && npm run typecheck --prefix web`. Expected: all green.
 
-```ts
-    // Preview URLs have their own hostnames; only the production hostname may write.
-    if (url.hostname !== env.PRODUCTION_HOST) return notFound();
-    return handleUpload(request, env, cache, nowSec);
+- [ ] **Step 5: Checkpoint**
+
+```bash
+git add worker/src/validate.ts worker/tests/validate.test.ts web/src/types.ts web/tests/artifacts.test.ts
 ```
+Commit only if authorised: `feat(worker): validate the observed free count`.
 
-- [ ] **Step 6: Run** `npm test --prefix worker` and `npm run typecheck --prefix worker`. Expected: all pass.
+### Task 3: Ship `f` from the collector — USER-GATED
 
-- [ ] **Step 7: Measure the upload's cost locally** on the real pair (git-ignored copy in
-  `web/public/artifacts/` or, after Task 9, `web/.dev-artifacts/`): a throwaway vitest file in the
-  scratchpad (not committed) that runs `validatePair` + both `sha256Hex` 200 times and prints the mean.
-  Record the number in the Review section. §10.9's real measurement happens on Cloudflare in Task 13.
+**This task recreates the live collector. The controller stops and asks the user; the implementer never runs these commands without the ledger recording the user's yes.**
 
-- [ ] **Step 8: Checkpoint** — `git add worker/src worker/tests`
+- [ ] **Step 1:** Rebuild the image without touching the running container: `docker compose -f docker/docker-compose.yml build` (from `D:\Projects\ParkCast`). Expected: `docker-collector Built`.
+- [ ] **Step 2:** Wait for the next tick to finish (`docker logs --since 1m docker-collector-1` shows `pruned … rows`), then within the following 60 s: `docker compose -f docker/docker-compose.yml up -d --force-recreate`.
+- [ ] **Step 3:** Verify the next tick: `docker logs --since 6m docker-collector-1` shows `published … lots`, then `uploaded: status=204`. `docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}} {{.Config.User}}' docker-collector-1` → `false 0 10001:10001`.
+- [ ] **Step 4:** Confirm live: `curl -s https://parkcast.tpe-dev.workers.dev/artifacts/lots.json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const d=JSON.parse(s);const withF=d.lots.filter(l=>'f' in l).length;console.log('rows',d.lots.length,'with f',withF,'sample',d.lots.find(l=>typeof l.f==='number'))})"` → most rows carry `f`.
+- [ ] **Step 5:** Ledger: `Task 3: complete — recreated at <UTC time>, first 204 at <time>`.
 
----
+## Phase B — the place index (§7.2)
 
-### Task 9: Web — root base, localhost-only dev server, budgeted live data (§7, §6.1 T14)
+### Task 4: `scripts/build-place-index.mjs`
 
 **Files:**
-- Create: `web/dev/liveArtifacts.ts` (no Node types), `web/dev/localArtifacts.ts` (Node only)
-- Modify: `web/vite.config.ts`, `web/tsconfig.node.json`, `scripts/sync-artifacts.mjs`, `scripts/refresh-demo-artifacts.py`
-- Test: `web/tests/liveArtifacts.test.ts`
-
-**Interfaces:**
-- Produces: `parseLiveOrigin(raw: string): string`; `createLiveArtifacts({ origin, fetchImpl?, now?, refreshMs?, budgetPerHour? })` → `(req: DevRequest, res: DevResponse, next: Next) => Promise<void>`; `createLocalArtifacts(dir: string)` with the same middleware shape; `ARTIFACT_TYPES`
-- Dev data now lives in git-ignored `web/.dev-artifacts/`, never under `web/public/` (so a build can never contain it).
-
-- [ ] **Step 1: Write the failing test** `web/tests/liveArtifacts.test.ts`:
-
-```ts
-// @vitest-environment node
-import { describe, expect, it, vi } from "vitest";
-import { createLiveArtifacts, parseLiveOrigin } from "../dev/liveArtifacts";
-
-const ORIGIN = "https://parkcast.example.workers.dev";
-
-function fakeRes() {
-  return {
-    statusCode: 200,
-    headers: {} as Record<string, string>,
-    body: undefined as unknown,
-    setHeader(name: string, value: string) { this.headers[name.toLowerCase()] = value; },
-    end(body?: Uint8Array | string) { this.body = body; },
-  };
-}
-
-function setup(o: { refreshMs?: number; budgetPerHour?: number } = {}) {
-  let clock = 1_000_000;
-  const fetchImpl = vi.fn(async (_url: string, _init?: RequestInit) => new Response(new Uint8Array([1, 2, 3])));
-  const mw = createLiveArtifacts({ origin: ORIGIN, fetchImpl: fetchImpl as unknown as typeof fetch, now: () => clock, ...o });
-  const hit = async (url: string, method = "GET") => {
-    const res = fakeRes();
-    const next = vi.fn();
-    await mw({ url, method }, res, next);
-    return { res, next };
-  };
-  return { fetchImpl, hit, advance: (ms: number) => { clock += ms; } };
-}
-
-describe("live artifacts middleware", () => {
-  it("turns ten thousand local requests into at most two upstream requests", async () => {
-    const { fetchImpl, hit } = setup();
-    for (let i = 0; i < 5_000; i++) {
-      await hit("/artifacts/grid.bin");
-      await hit("/artifacts/lots.json?t=1");
-    }
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-  });
-
-  it("serves the copy with its type and nothing cached by the browser", async () => {
-    const { hit } = setup();
-    const { res } = await hit("/artifacts/lots.json");
-    expect(res.statusCode).toBe(200);
-    expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
-    expect(res.headers["cache-control"]).toBe("no-store");
-    expect(res.body).toEqual(new Uint8Array([1, 2, 3]));
-  });
-
-  it("forwards no browser headers and refuses upstream redirects", async () => {
-    const { fetchImpl, hit } = setup();
-    await hit("/artifacts/grid.bin");
-    const [url, init] = fetchImpl.mock.calls[0]!;
-    expect(url).toBe(`${ORIGIN}/artifacts/grid.bin`);
-    expect(init).toEqual({ redirect: "error", headers: {} });
-  });
-
-  it("refuses anything but GET and HEAD, and ignores other paths", async () => {
-    const { fetchImpl, hit } = setup();
-    expect((await hit("/artifacts/latest", "PUT")).next).toHaveBeenCalled();
-    const put = await hit("/artifacts/grid.bin", "PUT");
-    expect(put.res.statusCode).toBe(405);
-    expect((await hit("/src/main.tsx")).next).toHaveBeenCalled();
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("stops at the hourly budget and serves the last copy", async () => {
-    const { fetchImpl, hit, advance } = setup({ refreshMs: 0, budgetPerHour: 5 });
-    for (let i = 0; i < 100; i++) expect((await hit("/artifacts/grid.bin")).res.statusCode).toBe(200);
-    expect(fetchImpl).toHaveBeenCalledTimes(5);
-    advance(3_600_000);
-    await hit("/artifacts/grid.bin");
-    expect(fetchImpl).toHaveBeenCalledTimes(6);
-  });
-
-  it("answers 429 when the budget is spent before any copy exists", async () => {
-    const { hit } = setup({ budgetPerHour: 0 });
-    expect((await hit("/artifacts/grid.bin")).res.statusCode).toBe(429);
-  });
-
-  it.each(["http://parkcast.example.workers.dev", `${ORIGIN}/path`, `${ORIGIN}/?q=1`, "not a url"])(
-    "rejects live origin %s",
-    (raw) => expect(() => parseLiveOrigin(raw)).toThrow(),
-  );
-});
-```
-
-- [ ] **Step 2: Run** `npm test --prefix web -- liveArtifacts`. Expected: FAIL (module missing).
-
-- [ ] **Step 3: Implement `web/dev/liveArtifacts.ts`:**
-
-```ts
-/**
- * Dev only: serve the two forecast files from the LIVE site through one shared
- * copy, so local testing uses today's data but cannot use up the live site's
- * daily Worker limit, even if code under edit loops (spec §7, §6.1 T14).
- *
- * Deliberately free of Node types, so the app's tests can import it.
- */
-export interface DevRequest { url?: string; method?: string }
-export interface DevResponse {
-  statusCode: number;
-  setHeader(name: string, value: string): unknown;
-  end(body?: Uint8Array | string): unknown;
-}
-export type Next = () => void;
-
-export const ARTIFACT_TYPES: ReadonlyMap<string, string> = new Map([
-  ["/artifacts/grid.bin", "application/octet-stream"],
-  ["/artifacts/lots.json", "application/json; charset=utf-8"],
-]);
-
-export interface LiveOptions {
-  origin: string;
-  fetchImpl?: typeof fetch;
-  now?: () => number;
-  refreshMs?: number;
-  budgetPerHour?: number;
-}
-
-export function parseLiveOrigin(raw: string): string {
-  const url = new URL(raw);
-  if (url.protocol !== "https:" || url.pathname !== "/" || url.search || url.hash || url.username || url.password) {
-    throw new Error("PARKCAST_LIVE_ORIGIN must be an https origin with no path, e.g. https://parkcast.<name>.workers.dev");
-  }
-  return url.origin;
-}
-
-export function createLiveArtifacts(options: LiveOptions) {
-  const origin = parseLiveOrigin(options.origin);
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const now = options.now ?? Date.now;
-  const refreshMs = options.refreshMs ?? 60_000;
-  const budget = options.budgetPerHour ?? 120;
-  const copies = new Map<string, { body: Uint8Array; at: number }>();
-  const inflight = new Map<string, Promise<void>>();
-  let windowStart = now();
-  let used = 0;
-
-  async function refresh(path: string): Promise<void> {
-    if (now() - windowStart >= 3_600_000) {
-      windowStart = now();
-      used = 0;
-    }
-    if (used >= budget) return;
-    used++;
-    const upstream = await fetchImpl(origin + path, { redirect: "error", headers: {} });
-    if (!upstream.ok) return;
-    copies.set(path, { body: new Uint8Array(await upstream.arrayBuffer()), at: now() });
-  }
-
-  return async function liveArtifacts(req: DevRequest, res: DevResponse, next: Next): Promise<void> {
-    const path = (req.url ?? "").split("?")[0] ?? "";
-    const type = ARTIFACT_TYPES.get(path);
-    if (type === undefined) return next();
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      res.statusCode = 405;
-      res.setHeader("Allow", "GET, HEAD");
-      res.end();
-      return;
-    }
-    const copy = copies.get(path);
-    if (copy === undefined || now() - copy.at >= refreshMs) {
-      let pending = inflight.get(path);
-      if (pending === undefined) {
-        pending = refresh(path)
-          .catch(() => undefined)
-          .finally(() => inflight.delete(path));
-        inflight.set(path, pending);
-      }
-      await pending;
-    }
-    const served = copies.get(path);
-    if (served === undefined) {
-      res.statusCode = used >= budget ? 429 : 503;
-      res.end("live forecast unavailable");
-      return;
-    }
-    res.statusCode = 200;
-    res.setHeader("Content-Type", type);
-    res.setHeader("Cache-Control", "no-store");
-    res.end(req.method === "HEAD" ? undefined : served.body);
-  };
-}
-```
-
-`web/dev/localArtifacts.ts`:
-
-```ts
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { ARTIFACT_TYPES, type DevRequest, type DevResponse, type Next } from "./liveArtifacts.ts";
-
-/** Dev only: serve `web/.dev-artifacts/` (filled by scripts/sync-artifacts.mjs). */
-export function createLocalArtifacts(dir: string) {
-  return async (req: DevRequest, res: DevResponse, next: Next): Promise<void> => {
-    const path = (req.url ?? "").split("?")[0] ?? "";
-    const type = ARTIFACT_TYPES.get(path);
-    if (type === undefined) return next();
-    try {
-      const body = await readFile(join(dir, path.slice("/artifacts/".length)));
-      res.statusCode = 200;
-      res.setHeader("Content-Type", type);
-      res.setHeader("Cache-Control", "no-store");
-      res.end(req.method === "HEAD" ? undefined : body);
-    } catch {
-      res.statusCode = 404;
-      res.end("no local artifacts: run scripts/sync-artifacts.mjs, or set PARKCAST_LIVE_ORIGIN");
-    }
-  };
-}
-```
-
-- [ ] **Step 4: Replace `web/vite.config.ts`:**
-
-```ts
-import react from '@vitejs/plugin-react'
-import { fileURLToPath } from 'node:url'
-import type { Plugin } from 'vite'
-import { defineConfig } from 'vitest/config'
-import { createLiveArtifacts } from './dev/liveArtifacts.ts'
-import { createLocalArtifacts } from './dev/localArtifacts.ts'
-
-/**
- * Forecast files for `npm run dev`. With PARKCAST_LIVE_ORIGIN set, from the live
- * site through a shared, budgeted copy; otherwise from web/.dev-artifacts/.
- * Nothing under public/ -- whatever is there is copied into every build.
- */
-function devArtifacts(): Plugin {
-  const live = process.env.PARKCAST_LIVE_ORIGIN
-  const middleware = live
-    ? createLiveArtifacts({ origin: live })
-    : createLocalArtifacts(fileURLToPath(new URL('./.dev-artifacts', import.meta.url)))
-  return {
-    name: 'parkcast-dev-artifacts',
-    apply: 'serve',
-    configureServer(server) {
-      server.middlewares.use((req, res, next) => {
-        middleware(req, res, next).catch(next)
-      })
-    },
-  }
-}
-
-// https://vite.dev/config/
-export default defineConfig({
-  // The app is served from the root of its workers.dev address (docs/deploy.md).
-  // PARKCAST_BASE overrides it -- set it from PowerShell: Git Bash rewrites "/"
-  // into a Windows path (measured 2026-09-14).
-  base: process.env.PARKCAST_BASE ?? '/',
-  plugins: [react(), devArtifacts()],
-  // Never reachable from the network: the dev server can read files and relay the live site.
-  server: { host: '127.0.0.1', strictPort: true },
-  preview: { host: '127.0.0.1', strictPort: true },
-  test: {
-    // jsdom, not node: later tasks render components against this same config.
-    environment: 'jsdom',
-    include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
-    // Registers the jest-dom matchers. Without it `toBeInTheDocument()` fails
-    // as "not a function" -- an error that points at the assertion rather than
-    // at the missing wiring, and costs the next author an afternoon.
-    setupFiles: ['./tests/setup.ts'],
-  },
-})
-```
-
-In `web/tsconfig.node.json` change `"include": ["vite.config.ts"]` to `"include": ["vite.config.ts", "dev"]`.
-If `tsc` rejects passing Connect's `req`/`res` to the structural `DevRequest`/`DevResponse`, adapt
-inside `configureServer` with a small wrapper object — keep `web/dev/liveArtifacts.ts` free of Node types.
-
-- [ ] **Step 5: Move dev data out of `public/`.**
-  - `scripts/sync-artifacts.mjs`: `join(repoRoot, "web", "public", "artifacts")` → `join(repoRoot, "web", ".dev-artifacts")`; update the header comment and the log line to `web/.dev-artifacts/`.
-  - `scripts/refresh-demo-artifacts.py`: replace every `web/public/artifacts` (the docstring and the `--out` default) with `web/.dev-artifacts`.
-  - Move the existing local copy: `mkdir -p web/.dev-artifacts && mv web/public/artifacts/* web/.dev-artifacts/ && rmdir web/public/artifacts`.
-
-- [ ] **Step 6: Run** `npm test --prefix web`, `npm run typecheck --prefix web`, `npm run lint --prefix web`. Expected: all pass.
-
-- [ ] **Step 7: Verify by hand.**
-  - `npm run build --prefix web`, then list `web/dist`: **no `artifacts/` directory**; `index.html` asset URLs start with `/assets/`.
-  - Start `npm run dev --prefix web`; `curl -s -o NUL -w "%{http_code} %{size_download}" http://127.0.0.1:5173/artifacts/grid.bin` → `200` and the file's size; `Get-NetTCPConnection -LocalPort 5173 -State Listen` shows only `127.0.0.1`. Stop the server.
-
-- [ ] **Step 8: Checkpoint** — `git add web/dev web/vite.config.ts web/tsconfig.node.json web/tests/liveArtifacts.test.ts scripts/sync-artifacts.mjs scripts/refresh-demo-artifacts.py`
-
----
-
-### Task 10: Web — security headers, fallback styles, 404 page, future-dated forecasts (§6.2)
-
-**Files:**
-- Create: `web/public/_headers`, `web/public/404.html`, `web/public/robots.txt`, `web/public/fallback.css`
-- Modify: `web/index.html`, `web/public/sw.js` (`PRECACHE`), `web/src/App.tsx` (the artifact fetch effect)
-- Test: `web/tests/siteHardening.test.ts`, `web/tests/app.test.tsx`
-
-**Interfaces:**
-- Produces: `FUTURE_TOLERANCE_SEC = 600` exported from `web/src/App.tsx`; the files `_headers`, `404.html`, `robots.txt` and `fallback.css`, which the deploy gate (Task 11) requires.
-
-- [ ] **Step 1: Write the failing tests.** `web/tests/siteHardening.test.ts`:
-
-```ts
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
-
-const WEB = join(dirname(fileURLToPath(import.meta.url)), "..");
-const PUBLIC = join(WEB, "public");
-const read = (...parts: string[]) => readFileSync(join(...parts), "utf8");
-
-describe("site hardening", () => {
-  it("sends a strict Content-Security-Policy on every static file", () => {
-    const headers = read(PUBLIC, "_headers");
-    const csp = headers.match(/Content-Security-Policy: (.*)/)?.[1] ?? "";
-    for (const directive of [
-      "default-src 'self'", "script-src 'self'", "style-src 'self'", "worker-src 'self'",
-      "connect-src 'self'", "object-src 'none'", "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
-    ]) {
-      expect(csp).toContain(directive);
-    }
-    expect(csp).not.toContain("unsafe-inline");
-    expect(csp).not.toContain("unsafe-eval");
-    expect(csp).not.toMatch(/worker-src[^;]*blob:/);
-    expect(headers).toContain("X-Content-Type-Options: nosniff");
-    expect(headers).toMatch(/^\/sw\.js\r?\n\s+Cache-Control: no-cache/m);
-  });
-
-  it("has no inline style or inline script in index.html", () => {
-    const html = read(WEB, "index.html");
-    expect(html).not.toMatch(/\sstyle=/);
-    expect(html).not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/);
-    expect(html).toContain('href="/fallback.css"');
-  });
-
-  it("precaches the fallback stylesheet", () => {
-    expect(read(PUBLIC, "sw.js")).toContain('"./fallback.css"');
-  });
-
-  it("keeps crawlers out of the forecast files", () => {
-    expect(read(PUBLIC, "robots.txt")).toMatch(/^Disallow: \/artifacts\/$/m);
-  });
-
-  it("ships a bilingual 404 page with no inline style", () => {
-    const html = read(PUBLIC, "404.html");
-    expect(html).toContain('lang="zh-Hant"');
-    expect(html).not.toMatch(/\sstyle=/);
-  });
-});
-```
-
-In `web/tests/app.test.tsx`, next to the existing test for an initial load that fails (find the test
-that renders the load-failure state; mirror its assertion for that state), add:
-
-```tsx
-  it("refuses a forecast dated in the future instead of calling it fresh", async () => {
-    const grid = makeGrid();
-    // base_data_ts sits at header offset 9; an hour ahead of the frozen clock.
-    new DataView(grid).setUint32(9, BASE_DATA_TS + 3600, true);
-    stubFetch(grid);
-    render(<App />);
-    expect(await screen.findByRole("alert")).toBeDefined();
-    expect(screen.queryByTestId("staleness")).toBeNull();
-  });
-```
-
-Next to "keeps showing the forecast it has when a refresh fails" (same describe, same setup), add the
-spec §9 bound — our own code must not turn a dead network into a request loop:
-
-```tsx
-  it("keeps its request rate bounded when every fetch fails for an hour", async () => {
-    useDrivableFakeTimers();
-    render(<App />);
-    await screen.findByTestId("staleness");
-    let calls = 0;
-    vi.stubGlobal("fetch", () => {
-      calls++;
-      return Promise.reject(new Error("offline"));
-    });
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
-    });
-
-    // One refresh per REFRESH_MS asks for both files; a failure must never trigger a retry loop.
-    expect(calls).toBeLessThanOrEqual(2 * Math.ceil((60 * 60 * 1000) / REFRESH_MS) + 2);
-  });
-```
-
-If the load-failure state in this file is asserted by something other than `role="alert"`, use that
-instead — the requirement is "the could-not-load state, never a staleness line".
-
-- [ ] **Step 2: Run** `npm test --prefix web -- siteHardening app`. Expected: FAIL.
-
-- [ ] **Step 3: Create the public files.**
-
-`web/public/_headers` (LF line endings; header lines indented two spaces):
-
-```
-/*
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; worker-src 'self'; connect-src 'self'; font-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
-  X-Content-Type-Options: nosniff
-  Referrer-Policy: no-referrer
-  Permissions-Policy: geolocation=(self), camera=(), microphone=(), payment=(), usb=()
-  Cross-Origin-Opener-Policy: same-origin
-  X-Frame-Options: DENY
-/sw.js
-  Cache-Control: no-cache
-```
-
-`web/public/fallback.css`:
-
-```css
-/* The static boot fallback in index.html and 404.html. Unhashed and precached,
-   so it is still there in the offline case the fallback exists for, and the
-   Content-Security-Policy needs no 'unsafe-inline'. No colours: the app's own
-   light and dark themes still apply when it is only the script that failed. */
-.boot-fallback {
-  margin: 0 auto;
-  max-width: 26rem;
-  padding: 4rem 1.5rem;
-  font-family: system-ui, sans-serif;
-  line-height: 1.6;
-}
-```
-
-`web/public/404.html`:
-
-```html
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Not found — ParkCast 停車先知</title>
-    <link rel="stylesheet" href="/fallback.css" />
-  </head>
-  <body>
-    <div class="boot-fallback">
-      <p>This page does not exist. <a href="/">Open ParkCast</a>.</p>
-      <p lang="zh-Hant">找不到此頁面。<a href="/">開啟停車先知</a>。</p>
-    </div>
-  </body>
-</html>
-```
-
-`web/public/robots.txt`:
-
-```
-User-agent: *
-Disallow: /artifacts/
-```
-
-- [ ] **Step 4: Update `web/index.html`.**
-  - After the `<link rel="manifest" … />` line add `<link rel="stylesheet" href="/fallback.css" />`.
-  - Replace `<div style="margin: 0 auto; max-width: 26rem; padding: 4rem 1.5rem; font-family: system-ui, sans-serif; line-height: 1.6">` with `<div class="boot-fallback">`.
-  - In the comment above it, replace "Styles are inline because the stylesheet is one of the files that may be missing, and no colour is set so the app's own light and dark themes still apply when it is only the script that failed." with "It is styled by the unhashed, precached `/fallback.css` rather than the hashed bundle, which is one of the files that may be missing — and not inline, so the Content-Security-Policy needs no `'unsafe-inline'`."
-  - In the comment on the icon links, replace "(`/ParkCast/`)" with "(`/` on workers.dev)".
-
-- [ ] **Step 5: Update `web/public/sw.js`.** Add `"./fallback.css",` to `PRECACHE` after `"./manifest.webmanifest",`.
-  Do not bump `VERSION` (nothing deployed has ever used it).
-
-- [ ] **Step 6: Update `web/src/App.tsx`.** After `MIN_REFETCH_MS` add:
-
-```ts
-/**
- * How far ahead of this device's clock a reading may claim to be before it is
- * refused. A reading from the future is a broken clock upstream or a forged
- * upload; shown as it is, it would read "0 min old" forever (spec §6.2).
- */
-export const FUTURE_TOLERANCE_SEC = 600;
-```
-
-In the artifact fetch effect, change the success handler to:
-
-```ts
-      (loaded) => {
-        if (cancelled) return;
-        if (loaded.grid.baseDataTs > Date.now() / 1000 + FUTURE_TOLERANCE_SEC) {
-          // Handled exactly like a failed load: keep the grid we have, or say we
-          // could not load. Never present it as fresh.
-          if (!loadedRef.current) setLoadFailed(true);
-          return;
-        }
-        loadedRef.current = true;
-        setArtifacts(loaded);
-        setLoadFailed(false);
-      },
-```
-
-- [ ] **Step 7: Run** `npm test --prefix web`, `npm run typecheck --prefix web`, `npm run lint --prefix web`. Expected: all pass.
-
-- [ ] **Step 8: Checkpoint** — `git add web/public/_headers web/public/404.html web/public/robots.txt web/public/fallback.css web/index.html web/public/sw.js web/src/App.tsx web/tests/siteHardening.test.ts web/tests/app.test.tsx`
-
----
-
-### Task 11A: The deploy gate's checks — bundle allowlist and live smoke test (§8.3)
-
-**Files:**
-- Create: `scripts/check-deploy-bundle.mjs`, `scripts/smoke-live.mjs`
-- Test: `scripts/tests/check-deploy-bundle.test.mjs`, `scripts/tests/smoke-live.test.mjs`
-
-**Interfaces:**
-- Produces (used by Task 11B): `checkBundle({ distDir, workerDir?, secrets?, basemapBytes? }) -> string[]` (problems; empty means pass) and `listFiles(root) -> string[]` (POSIX relative paths); `smoke(origin, { fetchImpl?, now? }) -> Promise<{ failures: string[]; warnings: string[] }>`. Both files are also CLIs that exit 1 on a problem.
-
-- [ ] **Step 1: Write the failing tests.** `scripts/tests/check-deploy-bundle.test.mjs`:
-
-```js
-import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { afterEach, beforeEach, test } from "node:test";
-import { checkBundle } from "../check-deploy-bundle.mjs";
-
-let dist;
-const put = (rel, content = "x") => {
-  mkdirSync(dirname(join(dist, rel)), { recursive: true });
-  writeFileSync(join(dist, rel), content);
-};
-const check = (extra = {}) => checkBundle({ distDir: dist, basemapBytes: [1, 1000], ...extra });
-
-beforeEach(() => {
-  dist = mkdtempSync(join(tmpdir(), "dist-"));
-  for (const f of ["index.html", "404.html", "sw.js", "manifest.webmanifest", "_headers", "fallback.css",
-    "robots.txt", "favicon.svg", "icon-192.png", "icon-512.png", "icon-maskable-512.png",
-    "assets/index-DsYeQuWT.js", "assets/index-Bmp4thyU.css", "assets/maplibre-gl-worker-AbPoOmO0.js"]) put(f);
-  put("basemap/taipei.pmtiles", "p".repeat(500));
-});
-afterEach(() => rmSync(dist, { recursive: true, force: true }));
-
-test("passes a clean build", () => assert.deepEqual(check(), []));
-
-for (const [label, rel] of [
-  ["a source map", "assets/index-DsYeQuWT.js.map"],
-  ["a TypeScript file", "src/main.tsx"],
-  ["an env file", ".env.production"],
-  ["wrangler local secrets", ".dev.vars"],
-  ["forecast data", "artifacts/grid.bin"],
-  ["a database", "hot.sqlite"],
-  ["an unknown file", "notes.txt"],
-]) {
-  test(`fails on ${label}`, () => {
-    put(rel);
-    assert.ok(check().length > 0, rel);
-  });
-}
-
-test("fails when the basemap is missing or the wrong size", () => {
-  rmSync(join(dist, "basemap/taipei.pmtiles"));
-  assert.ok(check().some((p) => p.includes("basemap/taipei.pmtiles")));
-  put("basemap/taipei.pmtiles", "p".repeat(5000));
-  assert.ok(check().some((p) => p.includes("basemap size")));
-});
-
-test("fails on the upload secret, its shape, or the deploy key anywhere in any file", () => {
-  const shaped = "pcu" + "_" + "K".repeat(43);
-  put("assets/index-DsYeQuWT.js", `const leaked = "${shaped}";`);
-  assert.ok(check().some((p) => p.includes("secret")));
-  put("assets/index-DsYeQuWT.js", "ordinary");
-  put("sw.js", "token-value-1234567890abcdef");
-  assert.ok(check({ secrets: ["token-value-1234567890abcdef"] }).some((p) => p.includes("secret")));
-});
-
-test("scans a Worker bundle directory too", () => {
-  const worker = mkdtempSync(join(tmpdir(), "worker-"));
-  try {
-    writeFileSync(join(worker, "index.js"), "export default {}");
-    writeFileSync(join(worker, "index.js.map"), "{}");
-    assert.ok(check({ workerDir: worker }).some((p) => p.includes("index.js.map")));
-  } finally {
-    rmSync(worker, { recursive: true, force: true });
-  }
-});
-```
-
-`scripts/tests/smoke-live.test.mjs`:
+- Create: `scripts/build-place-index.mjs`
+- Test: `scripts/tests/build-place-index.test.mjs`
+- Consumes: `scripts/basemap-archive.mjs` — `ARCHIVE`, `openArchive()`, `repoRoot`, `tileCoords(header)`, `webModule(path)`.
+
+**Interfaces (Produces):**
+- `groupOf(layer: "pois"|"places"|"roads", kind: string): "station"|"landmark"|"street"|"area"|null`
+- `STATION_KINDS`, `LANDMARK_KINDS`, `ROAD_KINDS` (ordered arrays, most prominent first), `prominenceOf(kind): number` (lower is more prominent; unknown → 1000)
+- `clusterPoints(points: {lat,lon}[], linkMeters): {lat,lon}[][]`
+- `nearestLocality(point, localities: {name,lat,lon}[], maxMeters): string`
+- `buildRows(features, localities): Row[]` where `features: {name, en, kind, group, lat, lon}[]`, `Row = [name, en, kind, lat, lon, qualifier]`
+- `checkIndex(rows, gzipBytes): string[]` (problems; empty means OK)
+- `buildPlaceIndex(): Promise<{rows: number, gzipBytes: number, byKind: Record<string, number>}>` — writes the file
+- The file: `{ v: 1, built: <unix s>, source: <planet build date from build-basemap's SOURCE_URL>, rows: Row[] }`
+
+- [ ] **Step 1: Write the failing tests** — `scripts/tests/build-place-index.test.mjs`:
 
 ```js
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { smoke } from "../smoke-live.mjs";
+import {
+  LANDMARK_KINDS, STATION_KINDS, buildRows, checkIndex, clusterPoints, groupOf, nearestLocality, prominenceOf,
+} from "../build-place-index.mjs";
 
-const ORIGIN = "https://parkcast.example.workers.dev";
-const NOW = 1_789_352_400_000;
-const SITE_CSP = "default-src 'self'; script-src 'self'; style-src 'self'";
+const TAIPEI = { lat: 25.0478, lon: 121.517 };
+const north = (m) => ({ lat: TAIPEI.lat + m / 111_320, lon: TAIPEI.lon });
 
-function gridBytes(rosterId, baseDataTs) {
-  const g = new Uint8Array(21 + 24);
-  const dv = new DataView(g.buffer);
-  g.set([0x50, 0x43, 0x47, 0x31]);
-  dv.setUint32(9, baseDataTs, true);
-  dv.setUint32(17, rosterId, true);
-  return g;
-}
-
-function site(overrides = {}) {
-  const routes = {
-    "GET /": () => new Response("<html>", { headers: { "content-security-policy": SITE_CSP, "x-content-type-options": "nosniff" } }),
-    "GET /sw.js": () => new Response("", { headers: { "cache-control": "no-cache" } }),
-    "GET /artifacts/grid.bin": () => new Response(gridBytes(7, NOW / 1000 - 240)),
-    "GET /artifacts/lots.json": () => new Response(JSON.stringify({ roster_id: 7 })),
-    "PUT /artifacts/latest": () => new Response("", { status: 401 }),
-    ...overrides,
-  };
-  return async (url, init = {}) => {
-    const key = `${init.method ?? "GET"} ${new URL(url).pathname}`;
-    return (routes[key] ?? (() => new Response("", { status: 404 })))();
-  };
-}
-
-test("passes a healthy site", async () => {
-  const { failures, warnings } = await smoke(ORIGIN, { fetchImpl: site(), now: () => NOW });
-  assert.deepEqual([failures, warnings], [[], []]);
+test("maps tile layers and kinds onto the four search groups", () => {
+  assert.equal(groupOf("places", "locality"), "area");
+  assert.equal(groupOf("roads", "minor_road"), "street");
+  assert.equal(groupOf("roads", "path"), null);
+  assert.equal(groupOf("pois", "station"), "station");
+  assert.equal(groupOf("pois", "subway_entrance"), "station");
+  assert.equal(groupOf("pois", "hospital"), "landmark");
+  assert.equal(groupOf("pois", "restaurant"), null);
+  assert.equal(groupOf("pois", "bicycle_rental"), null);
 });
 
-test("fails when a source path is served", async () => {
-  const { failures } = await smoke(ORIGIN, { fetchImpl: site({ "GET /src/main.tsx": () => new Response("code") }), now: () => NOW });
-  assert.ok(failures.some((f) => f.includes("/src/main.tsx")));
+test("prominence follows the fixed kind order", () => {
+  assert.ok(prominenceOf("station") < prominenceOf("subway_entrance"));
+  assert.ok(prominenceOf("university") < prominenceOf("clinic"));
+  assert.ok(prominenceOf(LANDMARK_KINDS.at(-1)) < prominenceOf("major_road"));
+  assert.ok(prominenceOf("major_road") < prominenceOf("minor_road"));
+  assert.equal(prominenceOf("nonsense"), 1000);
+  assert.deepEqual(STATION_KINDS, ["station", "subway_entrance"]);
 });
 
-test("fails when an unauthenticated upload is not refused", async () => {
-  const { failures } = await smoke(ORIGIN, { fetchImpl: site({ "PUT /artifacts/latest": () => new Response("", { status: 204 }) }), now: () => NOW });
-  assert.ok(failures.some((f) => f.includes("PUT")));
+test("clusters points by single linkage within the link distance", () => {
+  const points = [north(0), north(400), north(800), north(5000), north(5300)];
+  const clusters = clusterPoints(points, 1000);
+  assert.deepEqual(clusters.map((c) => c.length).sort(), [2, 3]);
 });
 
-test("fails when the forecast files do not pair", async () => {
-  const { failures } = await smoke(ORIGIN, { fetchImpl: site({ "GET /artifacts/lots.json": () => new Response(JSON.stringify({ roster_id: 8 })) }), now: () => NOW });
-  assert.ok(failures.some((f) => f.includes("pair")));
+test("names a cluster after the nearest locality, or nothing when none is near", () => {
+  const localities = [{ name: "士林", ...north(500) }, { name: "板橋", ...north(9000) }];
+  assert.equal(nearestLocality(north(0), localities, 3000), "士林");
+  assert.equal(nearestLocality(north(20000), localities, 3000), "");
 });
 
-test("only warns when the forecast is old, because the collector may be paused", async () => {
-  const { failures, warnings } = await smoke(ORIGIN, { fetchImpl: site(), now: () => NOW + 3 * 3600_000 });
-  assert.deepEqual(failures, []);
-  assert.equal(warnings.length, 1);
+test("one name in two places becomes two rows, each qualified; one kind wins per cluster", () => {
+  const localities = [{ name: "士林", ...north(100) }, { name: "板橋", ...north(9100) }];
+  const features = [
+    { name: "中正路", en: "Zhongzheng Rd", kind: "major_road", group: "street", ...north(0) },
+    { name: "中正路", en: "", kind: "minor_road", group: "street", ...north(300) },
+    { name: "中正路", en: "Zhongzheng Rd", kind: "major_road", group: "street", ...north(9000) },
+    { name: "國父紀念館", en: "", kind: "arts_centre", group: "landmark", ...north(50) },
+    { name: "國父紀念館", en: "SYS Memorial Hall", kind: "theatre", group: "landmark", ...north(60) },
+    { name: "國父紀念館", en: "", kind: "station", group: "station", ...north(70) },
+  ];
+  const rows = buildRows(features, localities);
+  const roads = rows.filter((r) => r[0] === "中正路");
+  assert.equal(roads.length, 2);
+  assert.deepEqual(roads.map((r) => r[5]).sort(), ["士林", "板橋"]);
+  assert.equal(roads[0][2], "major_road", "the most prominent kind in the cluster names it");
+  assert.equal(roads[0][1], "Zhongzheng Rd", "an English name from any member is kept");
+  const hall = rows.filter((r) => r[0] === "國父紀念館");
+  assert.deepEqual(hall.map((r) => r[2]).sort(), ["arts_centre", "station"], "groups never merge");
+  for (const r of rows) {
+    assert.equal(typeof r[3], "number");
+    assert.equal(r[3], Number(r[3].toFixed(5)));
+  }
 });
 
-test("only warns when nothing is stored yet, so the first release is not rolled back", async () => {
-  const empty = () => new Response("No forecast yet", { status: 503 });
-  const { failures, warnings } = await smoke(ORIGIN, {
-    fetchImpl: site({ "GET /artifacts/grid.bin": empty, "GET /artifacts/lots.json": empty }),
-    now: () => NOW,
-  });
-  assert.deepEqual(failures, []);
-  assert.ok(warnings.some((w) => w.includes("no forecast stored yet")));
+test("the size gate refuses a thin or oversized index", () => {
+  assert.deepEqual(checkIndex(new Array(20_000).fill(0), 400 * 1024), []);
+  assert.ok(checkIndex(new Array(100).fill(0), 400 * 1024).some((p) => /rows/.test(p)));
+  assert.ok(checkIndex(new Array(20_000).fill(0), 700 * 1024).some((p) => /gzip/.test(p)));
 });
 ```
 
-- [ ] **Step 2: Run** `node --test scripts/tests/*.test.mjs`. Expected: the two new files FAIL (modules missing).
+- [ ] **Step 2: Run to verify failure** — `node --test scripts/tests/build-place-index.test.mjs`. Expected: fails to import the module.
 
-- [ ] **Step 3: Implement `scripts/check-deploy-bundle.mjs`:**
+- [ ] **Step 3: Implement** — `scripts/build-place-index.mjs`:
 
 ```js
 #!/usr/bin/env node
 /**
- * The deploy gate's content check (spec §8.3 step 3). Node built-ins only.
+ * Build the offline place index the search box uses:
+ * `web/public/places/taipei.json` (docs/basemap.md, design spec §7.2).
  *
- *   node scripts/check-deploy-bundle.mjs [--worker-bundle worker/.wrangler/dry]
+ *   node scripts/build-place-index.mjs
  *
- * Every uploaded file must be on the allowlist, required files must exist, and no
- * byte of any file may contain the upload secret, its shape, the deploy key or a
- * private key.
+ * Every named landmark, station, street/lane and neighbourhood inside the
+ * basemap extract, read from the zoom-15 tiles of the local archive, so the app
+ * can answer "I'm going to 忠孝東路四段216巷" with no geocoder, no key and no
+ * request that leaves the phone. Car parks are not in here: the app already
+ * holds the roster in memory and searches it first.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const MiB = 1024 * 1024;
-
-export const ALLOWED = [
-  /^index\.html$/, /^404\.html$/, /^sw\.js$/, /^manifest\.webmanifest$/, /^favicon\.svg$/,
-  /^icon-(192|512|maskable-512)\.png$/, /^_headers$/, /^robots\.txt$/, /^fallback\.css$/,
-  /^basemap\/taipei\.pmtiles$/, /^assets\/[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(js|css)$/,
-];
-export const REQUIRED = [
-  "index.html", "404.html", "sw.js", "manifest.webmanifest", "_headers", "fallback.css",
-  "robots.txt", "basemap/taipei.pmtiles",
-];
-export const FORBIDDEN = [
-  /\.map$/i, /\.(ts|tsx|py)$/i, /(^|\/)\.env/i, /(^|\/)\.dev\.vars/i,
-  /\.(sqlite|db|parquet)$/i, /^artifacts\//, /^data\//,
-];
-const SECRET_SHAPE = /pcu_[A-Za-z0-9_-]{43}/;
-const PRIVATE_KEY = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
-
-export function listFiles(root) {
-  const out = [];
-  const walk = (dir, prefix) => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      if (entry.isDirectory()) walk(join(dir, entry.name), rel);
-      else out.push(rel);
-    }
-  };
-  walk(root, "");
-  return out.sort();
-}
-
-function scanContent(path, label, secrets, problems) {
-  const text = readFileSync(path).toString("latin1");
-  if (SECRET_SHAPE.test(text)) problems.push(`secret-shaped string in ${label}`);
-  if (PRIVATE_KEY.test(text)) problems.push(`private key in ${label}`);
-  for (const secret of secrets) {
-    if (secret && text.includes(secret)) problems.push(`a known secret value in ${label}`);
-  }
-}
-
-export function checkBundle({ distDir, workerDir = null, secrets = [], basemapBytes = [15 * MiB, 25 * MiB] }) {
-  const problems = [];
-  const files = listFiles(distDir);
-  for (const rel of files) {
-    if (FORBIDDEN.some((r) => r.test(rel))) problems.push(`forbidden file: ${rel}`);
-    else if (!ALLOWED.some((r) => r.test(rel))) problems.push(`not on the allowlist: ${rel}`);
-    if (statSync(join(distDir, rel)).size >= 25 * MiB) problems.push(`over the 25 MiB asset limit: ${rel}`);
-    scanContent(join(distDir, rel), rel, secrets, problems);
-  }
-  for (const rel of REQUIRED) {
-    if (!files.includes(rel)) problems.push(`missing required file: ${rel}`);
-  }
-  if (files.includes("basemap/taipei.pmtiles")) {
-    const size = statSync(join(distDir, "basemap/taipei.pmtiles")).size;
-    const [min, max] = basemapBytes;
-    if (size < min || size >= max) problems.push(`basemap size ${size} outside ${min}..${max}`);
-  }
-  if (workerDir) {
-    for (const rel of listFiles(workerDir)) {
-      if (FORBIDDEN.some((r) => r.test(rel))) problems.push(`forbidden file in the Worker bundle: ${rel}`);
-      scanContent(join(workerDir, rel), `worker/${rel}`, secrets, problems);
-    }
-  }
-  return problems;
-}
-
-function main() {
-  const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-  const flag = process.argv.indexOf("--worker-bundle");
-  const workerDir = flag > 0 ? resolve(process.argv[flag + 1]) : null;
-  const secretPath = join(root, "docker", "secrets", "parkcast_upload_secret");
-  const secrets = [
-    existsSync(secretPath) ? readFileSync(secretPath, "utf8").trim() : "",
-    process.env.CLOUDFLARE_API_TOKEN ?? "",
-  ].filter((s) => s.length >= 16);
-  const problems = checkBundle({ distDir: join(root, "web", "dist"), workerDir, secrets });
-  if (problems.length > 0) {
-    console.error(`deploy bundle check FAILED:\n  ${problems.join("\n  ")}`);
-    process.exit(1);
-  }
-  console.log(`deploy bundle check passed (${listFiles(join(root, "web", "dist")).length} files)`);
-}
-
-const invoked = process.argv[1] ? resolve(process.argv[1]).toLowerCase() : "";
-if (invoked === fileURLToPath(import.meta.url).toLowerCase()) main();
-```
-
-- [ ] **Step 4: Implement `scripts/smoke-live.mjs`:**
-
-```js
-#!/usr/bin/env node
-/**
- * Read-only checks against the live site after a deploy (spec §8.3 step 9).
- *
- *   node scripts/smoke-live.mjs https://parkcast.<name>.workers.dev
- *
- * Freshness is a warning, never a failure: the user pauses the collector at times.
- * The preview-host PUT refusal is covered by the Worker's unit tests, not here.
- */
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const MUST_404 = ["/src/main.tsx", "/assets/index.js.map", "/.env", "/_headers", "/wp-login.php", "/artifacts/grid.bin.tmp"];
-
-export async function smoke(origin, { fetchImpl = fetch, now = Date.now } = {}) {
-  const failures = [];
-  const warnings = [];
-  const get = (path, init = {}) => fetchImpl(origin + path, { redirect: "manual", ...init });
-
-  const root = await get("/");
-  if (root.status !== 200) failures.push(`/ answered ${root.status}`);
-  const csp = root.headers.get("content-security-policy") ?? "";
-  if (!csp.includes("default-src 'self'") || csp.includes("unsafe-inline")) failures.push("/ lacks the site Content-Security-Policy");
-  if (root.headers.get("x-content-type-options") !== "nosniff") failures.push("/ lacks X-Content-Type-Options: nosniff");
-
-  const sw = await get("/sw.js");
-  if (!(sw.headers.get("cache-control") ?? "").includes("no-cache")) failures.push("/sw.js is not served no-cache");
-
-  const grid = await get("/artifacts/grid.bin");
-  const lots = await get("/artifacts/lots.json");
-  if (grid.status === 503 && lots.status === 503) {
-    // Nothing uploaded yet: the first release goes out before the collector uploads.
-    warnings.push("no forecast stored yet (first release, or the collector is not uploading)");
-  } else if (grid.status !== 200 || lots.status !== 200) {
-    failures.push(`forecast files answered ${grid.status} and ${lots.status}`);
-  } else {
-    const bytes = new Uint8Array(await grid.arrayBuffer());
-    const doc = JSON.parse(await lots.text());
-    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const magic = String.fromCharCode(...bytes.subarray(0, 4));
-    if (bytes.byteLength < 21 || magic !== "PCG1" || dv.getUint32(17, true) !== doc.roster_id) {
-      failures.push("grid.bin and lots.json do not pair");
-    } else {
-      const ageMin = (now() / 1000 - dv.getUint32(9, true)) / 60;
-      if (ageMin > 15) warnings.push(`forecast is ${Math.round(ageMin)} min old (collector paused?)`);
-    }
-  }
-
-  for (const path of MUST_404) {
-    const res = await get(path);
-    if (res.status !== 404) failures.push(`${path} answered ${res.status}, expected 404`);
-  }
-
-  const put = await get("/artifacts/latest", { method: "PUT", body: "x", headers: { "X-Grid-Length": "21" } });
-  if (put.status !== 401) failures.push(`unauthenticated PUT answered ${put.status}, expected 401`);
-
-  return { failures, warnings };
-}
-
-async function main() {
-  const origin = new URL(process.argv[2] ?? "").origin;
-  const { failures, warnings } = await smoke(origin);
-  for (const w of warnings) console.warn(`warning: ${w}`);
-  if (failures.length > 0) {
-    console.error(`smoke test FAILED:\n  ${failures.join("\n  ")}`);
-    process.exit(1);
-  }
-  console.log("smoke test passed");
-}
-
-const invoked = process.argv[1] ? resolve(process.argv[1]).toLowerCase() : "";
-if (invoked === fileURLToPath(import.meta.url).toLowerCase()) await main();
-```
-
-- [ ] **Step 5: Run** `node --test scripts/tests/*.test.mjs`. Expected: all pass.
-
-- [ ] **Step 6: Checkpoint** — `git add scripts/check-deploy-bundle.mjs scripts/smoke-live.mjs scripts/tests/check-deploy-bundle.test.mjs scripts/tests/smoke-live.test.mjs`
-
----
-
-### Task 11B: The two-phase deploy — check without a key, release with only `wrangler` (§7, §8.3, §6.1 T8)
-
-**Files:**
-- Create: `scripts/deploy-check.mjs`, `scripts/release.mjs`
-- Modify: `worker/package.json` (scripts)
-- Test: `scripts/tests/release.test.mjs`
-
-**Interfaces:**
-- Consumes: `checkBundle`, `listFiles` (Task 11A); `smoke` (Task 11A)
-- Produces: `findPlaceholders(text) -> string[]`, `parseVersionId(output) -> string | null`, `parsePreviewUrl(output) -> string | null` in `scripts/release.mjs`; npm scripts `deploy:check`, `deploy:release`, `deploy:preview` in `worker/package.json`
-
-- [ ] **Step 1: Verify `wrangler`'s real interface before writing code against it** (from `worker/`):
-  `npx --no-install wrangler --version` (expect `4.131.1`), and the `--help` of `deploy`,
-  `versions upload`, `versions deploy` and `rollback`. Confirm: `deploy --dry-run --outdir`; the
-  version-id line `versions upload` prints; `versions deploy <id>@100%` and its non-interactive flag;
-  `rollback` with a non-interactive flag and `--message`. **If any differs from the code below, change
-  the code and the tests to match what `--help` says**, and record the difference in the Review
-  section. Do not run any command that needs a login.
-
-- [ ] **Step 2: Verify installs without lifecycle scripts (§10.7).** Run
-  `npm ci --ignore-scripts` inside `worker/` then `npx --no-install wrangler --version` there, and
-  `npm ci --ignore-scripts` inside `web/` then `npm test --prefix web` and `npm run build --prefix web`.
-  If a package fails without its install script, note which package and why in the Review section,
-  and document the exception in Task 12's `docs/deploy.md`; do not silently drop `--ignore-scripts`.
-
-- [ ] **Step 3: Write the failing test** `scripts/tests/release.test.mjs`:
-
-```js
-import assert from "node:assert/strict";
-import { test } from "node:test";
-import { findPlaceholders, parsePreviewUrl, parseVersionId } from "../release.mjs";
-
-test("finds every setup sentinel left in the Worker config", () => {
-  const text = '{"id":"REPLACE_WITH_PROD_KV_ID","vars":{"PRODUCTION_HOST":"parkcast.REPLACE-SUBDOMAIN.workers.dev"}}';
-  assert.deepEqual(findPlaceholders(text), ["REPLACE_WITH_PROD_KV_ID", "REPLACE-SUBDOMAIN"]);
-});
-
-test("accepts a filled-in config", () => {
-  assert.deepEqual(findPlaceholders('{"id":"0123456789abcdef0123456789abcdef"}'), []);
-});
-
-test("reads the version id and preview URL from wrangler output", () => {
-  const out = "Uploaded parkcast\nWorker Version ID: 1b2c3d4e-0000-4000-8000-123456789abc\nVersion Preview URL: https://1b2c3d4e-parkcast.example.workers.dev\n";
-  assert.equal(parseVersionId(out), "1b2c3d4e-0000-4000-8000-123456789abc");
-  assert.equal(parsePreviewUrl(out), "https://1b2c3d4e-parkcast.example.workers.dev");
-  assert.equal(parseVersionId("nothing here"), null);
-});
-```
-
-- [ ] **Step 4: Run** `node --test scripts/tests/*.test.mjs`. Expected: `release.test.mjs` FAILS (module missing).
-
-- [ ] **Step 5: Implement `scripts/deploy-check.mjs`:**
-
-```js
-#!/usr/bin/env node
-/**
- * Deploy phase 1 (spec §7, §8.3): every check, with NO Cloudflare credential in
- * the environment -- tests, builds and linters run third-party code, and none of
- * it gets to see the deploy key.
- *
- *   npm run deploy:check --prefix worker            # add -- --with-python when src/ changed
- */
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { checkBundle, listFiles } from "./check-deploy-bundle.mjs";
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const PYTHON_TESTS =
-  'docker run --rm -v "D:/Projects/ParkCast/src:/repo/src:ro" -v "D:/Projects/ParkCast/tests:/repo/tests:ro" ' +
-  '-v "D:/Projects/ParkCast/pyproject.toml:/repo/pyproject.toml:ro" -w /repo -e PYTHONDONTWRITEBYTECODE=1 ' +
-  'docker-collector:latest sh -c "pip install -q pytest 2>/dev/null; python -m pytest -q -p no:cacheprovider tests/"';
-
-function run(label, command, cwd = ROOT) {
-  console.log(`\n=== ${label}: ${command}`);
-  // Fixed command strings only; shell is needed to run npm.cmd/npx.cmd on Windows.
-  const result = spawnSync(command, { cwd, shell: true, stdio: "inherit", env: { ...process.env, MSYS_NO_PATHCONV: "1" } });
-  if (result.status !== 0) {
-    console.error(`\ndeploy check FAILED at: ${label}`);
-    process.exit(1);
-  }
-}
-
-if (process.env.CLOUDFLARE_API_TOKEN) {
-  console.error("CLOUDFLARE_API_TOKEN is set. Run the check phase in a shell without the deploy key.");
-  process.exit(1);
-}
-
-if (process.argv.includes("--with-python")) run("python tests", PYTHON_TESTS);
-run("web tests", "npm test --prefix web");
-run("web typecheck", "npm run typecheck --prefix web");
-run("web lint", "npm run lint --prefix web");
-run("worker tests", "npm test --prefix worker");
-run("worker typecheck", "npm run typecheck --prefix worker");
-run("script tests", "node --test scripts/tests/*.test.mjs");
-run("production build", "npm run build --prefix web");
-run("worker bundle (dry run)", "npx --no-install wrangler deploy --dry-run --outdir .wrangler/dry", join(ROOT, "worker"));
-
-const secretPath = join(ROOT, "docker", "secrets", "parkcast_upload_secret");
-const secrets = existsSync(secretPath) ? [readFileSync(secretPath, "utf8").trim()] : [];
-const problems = checkBundle({
-  distDir: join(ROOT, "web", "dist"),
-  workerDir: join(ROOT, "worker", ".wrangler", "dry"),
-  secrets,
-});
-if (problems.length > 0) {
-  console.error(`\ndeploy bundle check FAILED:\n  ${problems.join("\n  ")}`);
-  process.exit(1);
-}
-console.log(`\nbundle check passed: ${listFiles(join(ROOT, "web", "dist")).length} files`);
-
-console.log("\n=== npm audit (review the output; not a pass/fail gate)");
-spawnSync("npm audit", { cwd: join(ROOT, "web"), shell: true, stdio: "inherit" });
-spawnSync("npm audit", { cwd: join(ROOT, "worker"), shell: true, stdio: "inherit" });
-console.log("\nCheck phase complete. Release from a fresh PowerShell: see docs/deploy.md.");
-```
-
-- [ ] **Step 6: Implement `scripts/release.mjs`:**
-
-```js
-#!/usr/bin/env node
-/**
- * Deploy phase 2 (spec §7, §8.3): upload a version, promote it, smoke-test the
- * live site, and roll back automatically if the smoke test fails.
- *
- * Run ONLY in a fresh PowerShell where the user entered the deploy key with
- * Read-Host -AsSecureString, after `npm run deploy:check` passed. It runs the
- * pinned wrangler in worker/node_modules and Node built-ins -- nothing else.
- *
- *   npm run deploy:release --prefix worker
- *   npm run deploy:preview --prefix worker     # upload a preview version; never promoted
- */
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checkBundle } from "./check-deploy-bundle.mjs";
-import { smoke } from "./smoke-live.mjs";
+import { gzipSync } from "node:zlib";
+import { ARCHIVE, openArchive, repoRoot, tileCoords, webModule } from "./basemap-archive.mjs";
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const WORKER = join(ROOT, "worker");
+export const OUT_PATH = join(repoRoot, "web", "public", "places", "taipei.json");
+export const INDEX_VERSION = 1;
+/** Same-name features closer than this merge into one entry (a road's segments, a park's points). */
+export const LINK_METERS = 1000;
+/** A cluster further than this from every locality gets no qualifier. */
+export const QUALIFIER_MAX_METERS = 3000;
+export const MIN_ROWS = 15_000;
+export const MAX_GZIP_BYTES = 600 * 1024;
 
-export function findPlaceholders(text) {
-  return [...new Set(text.match(/REPLACE[A-Z_-]*/g) ?? [])];
+/**
+ * Kinds kept, most prominent first. `web/src/places.ts` PROMINENCE mirrors this
+ * order; change both together.
+ */
+export const STATION_KINDS = ["station", "subway_entrance"];
+export const LANDMARK_KINDS = [
+  "aerodrome", "bus_station", "ferry_terminal", "terminal", "university", "hospital", "mall",
+  "department_store", "stadium", "museum", "arts_centre", "theatre", "attraction", "park",
+  "townhall", "government", "library", "college", "school", "hotel", "place_of_worship",
+  "marketplace", "supermarket", "cinema", "sports_centre", "swimming_pool", "garden", "viewpoint",
+  "monument", "memorial", "courthouse", "police", "fire_station", "post_office",
+  "community_centre", "clinic", "parking",
+];
+export const ROAD_KINDS = ["highway", "major_road", "minor_road"];
+const AREA_KINDS = ["macrohood", "neighbourhood", "locality"];
+const ORDER = [...STATION_KINDS, ...LANDMARK_KINDS, ...ROAD_KINDS, ...AREA_KINDS];
+
+export function prominenceOf(kind) {
+  const at = ORDER.indexOf(kind);
+  return at < 0 ? 1000 : at;
 }
 
-export function parseVersionId(output) {
-  return output.match(/Worker Version ID:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1] ?? null;
+export function groupOf(layer, kind) {
+  if (layer === "places") return "area";
+  if (layer === "roads") return ROAD_KINDS.includes(kind) ? "street" : null;
+  if (STATION_KINDS.includes(kind)) return "station";
+  if (LANDMARK_KINDS.includes(kind)) return "landmark";
+  return null;
 }
 
-export function parsePreviewUrl(output) {
-  return output.match(/https:\/\/[A-Za-z0-9.-]+\.workers\.dev/)?.[0] ?? null;
+const RAD = Math.PI / 180;
+export function metersBetween(a, b) {
+  const dLat = (b.lat - a.lat) * RAD;
+  const dLon = (b.lon - a.lon) * RAD;
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * RAD) * Math.cos(b.lat * RAD) * Math.sin(dLon / 2) ** 2;
+  return 2 * 6_371_008.8 * Math.asin(Math.min(1, Math.sqrt(s)));
 }
 
-function fail(message) {
-  console.error(`release STOPPED: ${message}`);
-  process.exit(1);
+/** Single-linkage clusters: breadth-first over "within linkMeters". Fine for a name's few hundred points. */
+export function clusterPoints(points, linkMeters) {
+  const seen = new Array(points.length).fill(false);
+  const clusters = [];
+  for (let i = 0; i < points.length; i++) {
+    if (seen[i]) continue;
+    const cluster = [];
+    const queue = [i];
+    seen[i] = true;
+    while (queue.length > 0) {
+      const at = queue.pop();
+      cluster.push(points[at]);
+      for (let j = 0; j < points.length; j++) {
+        if (!seen[j] && metersBetween(points[at], points[j]) <= linkMeters) {
+          seen[j] = true;
+          queue.push(j);
+        }
+      }
+    }
+    clusters.push(cluster);
+  }
+  return clusters;
 }
 
-function wrangler(args, config) {
-  const command = `npx --no-install wrangler ${args} --config ${config}`;
-  console.log(`\n=== ${command}`);
-  const result = spawnSync(command, { cwd: WORKER, shell: true, encoding: "utf8" });
-  process.stdout.write(result.stdout ?? "");
-  process.stderr.write(result.stderr ?? "");
-  return { ok: result.status === 0, output: `${result.stdout ?? ""}\n${result.stderr ?? ""}` };
+export function centroid(points) {
+  const lat = points.reduce((s, p) => s + p.lat, 0) / points.length;
+  const lon = points.reduce((s, p) => s + p.lon, 0) / points.length;
+  return { lat, lon };
 }
 
-const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+export function nearestLocality(point, localities, maxMeters) {
+  let best = { name: "", d: Infinity };
+  for (const l of localities) {
+    const d = metersBetween(point, l);
+    if (d < best.d) best = { name: l.name, d };
+  }
+  return best.d <= maxMeters ? best.name : "";
+}
+
+/** The comparison key: the search folds the same way (web/src/places.ts foldKey). */
+const fold = (s) => s.replaceAll("臺", "台").toLowerCase().replace(/\s+/g, "");
+
+export function buildRows(features, localities) {
+  const byName = new Map();
+  for (const f of features) {
+    const key = `${f.group}|${fold(f.name)}`;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(f);
+  }
+  const rows = [];
+  for (const members of byName.values()) {
+    const clusters = clusterPoints(members, LINK_METERS);
+    for (const cluster of clusters) {
+      const at = centroid(cluster);
+      const lead = [...cluster].sort((a, b) => prominenceOf(a.kind) - prominenceOf(b.kind))[0];
+      const en = cluster.find((m) => m.en)?.en ?? "";
+      const qualifier = lead.group === "area" ? "" : nearestLocality(at, localities, QUALIFIER_MAX_METERS);
+      rows.push([lead.name, en, lead.kind, +at.lat.toFixed(5), +at.lon.toFixed(5), qualifier]);
+    }
+  }
+  rows.sort((a, b) => prominenceOf(a[2]) - prominenceOf(b[2]) || a[0].localeCompare(b[0], "zh-Hant") || a[3] - b[3] || a[4] - b[4]);
+  return rows;
+}
+
+export function checkIndex(rows, gzipBytes) {
+  const problems = [];
+  if (rows.length < MIN_ROWS) problems.push(`only ${rows.length} rows, expected at least ${MIN_ROWS}`);
+  if (gzipBytes > MAX_GZIP_BYTES) problems.push(`gzip size ${gzipBytes} exceeds ${MAX_GZIP_BYTES}`);
+  return problems;
+}
+
+/** A feature's representative point: a point's coordinates, or the middle vertex of a line. */
+function pointOf(geojson) {
+  const g = geojson.geometry;
+  if (g.type === "Point") return { lon: g.coordinates[0], lat: g.coordinates[1] };
+  const lines = g.type === "LineString" ? [g.coordinates] : g.type === "MultiLineString" ? g.coordinates : g.type === "Polygon" ? [g.coordinates[0]] : g.type === "MultiPolygon" ? g.coordinates.map((p) => p[0]) : g.type === "MultiPoint" ? [g.coordinates] : [];
+  const flat = lines.flat();
+  if (flat.length === 0) return null;
+  const mid = flat[Math.floor(flat.length / 2)];
+  return { lon: mid[0], lat: mid[1] };
+}
+
+function sourceBuild() {
+  const text = readFileSync(join(repoRoot, "scripts", "build-basemap.mjs"), "utf8");
+  return text.match(/build\.protomaps\.com\/(\d{8})\.pmtiles/)?.[1] ?? "unknown";
+}
+
+export async function buildPlaceIndex() {
+  if (!existsSync(ARCHIVE)) throw new Error(`${ARCHIVE} is missing -- run scripts/build-basemap.mjs first`);
+  const { VectorTile } = await webModule("@mapbox/vector-tile/index.js");
+  const { PbfReader } = await webModule("pbf/index.js");
+  const archive = await openArchive();
+  const header = await archive.getHeader();
+  const features = [];
+  const localities = [];
+  for (const [z, x, y] of tileCoords(header)) {
+    if (z !== header.maxZoom) continue;
+    const tile = await archive.getZxy(z, x, y);
+    if (!tile) continue;
+    const vt = new VectorTile(new PbfReader(new Uint8Array(tile.data)));
+    for (const layer of ["pois", "places", "roads"]) {
+      const l = vt.layers[layer];
+      if (!l) continue;
+      for (let i = 0; i < l.length; i++) {
+        const f = l.feature(i);
+        const name = f.properties["name"];
+        if (typeof name !== "string" || name === "") continue;
+        const kind = String(f.properties["kind"] ?? "");
+        const group = groupOf(layer, kind);
+        if (group === null) continue;
+        const at = pointOf(f.toGeoJSON(x, y, z));
+        if (at === null) continue;
+        const en = typeof f.properties["name:en"] === "string" ? f.properties["name:en"] : "";
+        const feature = { name, en, kind, group, lat: at.lat, lon: at.lon };
+        features.push(feature);
+        if (group === "area") localities.push({ name, lat: at.lat, lon: at.lon });
+      }
+    }
+  }
+  const rows = buildRows(features, localities);
+  const doc = { v: INDEX_VERSION, built: Math.floor(Date.now() / 1000), source: sourceBuild(), rows };
+  const json = JSON.stringify(doc);
+  const gzipBytes = gzipSync(json).length;
+  const problems = checkIndex(rows, gzipBytes);
+  if (problems.length > 0) throw new Error(`place index rejected: ${problems.join("; ")}`);
+  mkdirSync(dirname(OUT_PATH), { recursive: true });
+  writeFileSync(OUT_PATH, json);
+  const byKind = {};
+  for (const r of rows) byKind[r[2]] = (byKind[r[2]] ?? 0) + 1;
+  return { rows: rows.length, gzipBytes, byKind };
+}
 
 async function main() {
-  const preview = process.argv.includes("--preview");
-  const token = process.env.CLOUDFLARE_API_TOKEN ?? "";
-  if (token.length < 16) fail("the deploy key is not set in this shell (docs/deploy.md)");
-
-  const configText = readFileSync(join(WORKER, "wrangler.jsonc"), "utf8");
-  const placeholders = findPlaceholders(configText);
-  if (placeholders.length > 0) fail(`worker/wrangler.jsonc still has setup sentinels: ${placeholders.join(", ")}`);
-  const config = JSON.parse(configText);
-  if (!existsSync(join(WORKER, ".wrangler", "dry"))) fail("run the check phase first (npm run deploy:check --prefix worker)");
-
-  // Scan again, now that the deploy key exists to be leaked.
-  const secretPath = join(ROOT, "docker", "secrets", "parkcast_upload_secret");
-  const secrets = [token, existsSync(secretPath) ? readFileSync(secretPath, "utf8").trim() : ""].filter(Boolean);
-  const problems = checkBundle({ distDir: join(ROOT, "web", "dist"), workerDir: join(WORKER, ".wrangler", "dry"), secrets });
-  if (problems.length > 0) fail(`bundle check failed:\n  ${problems.join("\n  ")}`);
-
-  let configPath = "wrangler.jsonc";
-  if (preview) {
-    mkdirSync(join(WORKER, ".wrangler"), { recursive: true });
-    writeFileSync(join(WORKER, ".wrangler", "preview.jsonc"), JSON.stringify({ ...config, preview_urls: true }, null, 2));
-    configPath = ".wrangler/preview.jsonc";
+  try {
+    const { rows, gzipBytes, byKind } = await buildPlaceIndex();
+    console.log(`build-place-index: ${rows} rows, ${(gzipBytes / 1024).toFixed(0)} KB gzipped -> web/public/places/taipei.json`);
+    console.log("build-place-index: " + Object.entries(byKind).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k}=${n}`).join(" "));
+  } catch (err) {
+    console.error(`build-place-index: ${err.message}`);
+    process.exit(1);
   }
-
-  const upload = wrangler("versions upload", configPath);
-  if (!upload.ok) fail("versions upload failed; nothing changed on the live site");
-  const versionId = parseVersionId(upload.output);
-  if (versionId === null) fail("could not read the version id from wrangler's output");
-
-  if (preview) {
-    console.log(`\npreview version ${versionId}: ${parsePreviewUrl(upload.output) ?? "see the wrangler output above"}`);
-    console.log("It is not live. Deploy normally to switch preview URLs off again.");
-    return;
-  }
-
-  const deploy = wrangler(`versions deploy ${versionId}@100% --yes`, configPath);
-  if (!deploy.ok) fail("versions deploy failed; the previous version is still live");
-
-  const origin = `https://${config.vars.PRODUCTION_HOST}`;
-  let result = { failures: ["not run"], warnings: [] };
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    await sleep(20_000); // let the new version reach the edge before judging it
-    result = await smoke(origin);
-    if (result.failures.length === 0) break;
-    console.warn(`smoke attempt ${attempt} failed:\n  ${result.failures.join("\n  ")}`);
-  }
-  for (const w of result.warnings) console.warn(`warning: ${w}`);
-  if (result.failures.length > 0) {
-    const rollback = wrangler('rollback --yes --message "smoke test failed"', configPath);
-    fail(rollback.ok ? "smoke test failed; rolled back to the previous version"
-      : "smoke test failed AND the rollback failed: run `npx wrangler rollback` by hand now");
-  }
-  console.log(`\ndeployed version ${versionId} to ${origin}; smoke test passed`);
 }
 
 const invoked = process.argv[1] ? resolve(process.argv[1]).toLowerCase() : "";
 if (invoked === fileURLToPath(import.meta.url).toLowerCase()) await main();
 ```
 
-- [ ] **Step 7: Add the npm scripts** to `worker/package.json` `"scripts"`:
+- [ ] **Step 4: Run the tests, then the real build** — `node --test scripts/tests/build-place-index.test.mjs` → 6 pass. Then `node scripts/build-place-index.mjs` → prints the row count and gzipped size; expected ≈ 20,000–29,000 rows and ≤ 500 KB gzipped. If it exceeds 500 KB, shorten `en` to `""` for `minor_road` rows inside `buildRows` and record the ruling in the ledger.
 
-```json
-    "deploy:check": "node ../scripts/deploy-check.mjs",
-    "deploy:release": "node ../scripts/release.mjs",
-    "deploy:preview": "node ../scripts/release.mjs --preview"
-```
+- [ ] **Step 5: Checkpoint** — `git add scripts/build-place-index.mjs scripts/tests/build-place-index.test.mjs`. Commit only if authorised: `feat(places): build an offline place index from the basemap tiles`.
 
-- [ ] **Step 8: Run** `node --test scripts/tests/*.test.mjs`. Expected: all pass.
-  Then run the check phase for real, **without** any key set: `npm run deploy:check --prefix worker`.
-  Expected: every step passes **except** the bundle check reporting `missing required file: basemap/taipei.pmtiles`
-  (the basemap is rebuilt in Task 13). Any other failure is a defect to fix now.
-  Also confirm `npm run deploy:release --prefix worker` stops immediately with
-  "the deploy key is not set in this shell" — it must never reach `wrangler`.
-
-- [ ] **Step 9: Checkpoint** — `git add scripts/deploy-check.mjs scripts/release.mjs scripts/tests/release.test.mjs worker/package.json`
-
----
-
-### Task 12: Documentation (§12)
+### Task 5: Gate, smoke test, build hook, ignore rule, docs
 
 **Files:**
-- Create: `docs/deploy.md`
-- Modify: `README.md`, `CLAUDE.md`, `docs/state-of-play.md`, `docker/README.md`, `docs/pwa.md`, `web/README.md`, `docs/basemap.md`
+- Modify: `scripts/check-deploy-bundle.mjs:17-32` (`ALLOWED`, `REQUIRED`), `scripts/tests/check-deploy-bundle.test.mjs`
+- Modify: `scripts/smoke-live.mjs:18-21` (`MUST_SERVE`), `scripts/tests/smoke-live.test.mjs`
+- Modify: `scripts/build-basemap.mjs` (end of file), `.gitignore`, `docs/basemap.md`
 
-**Interfaces:** consumes the names, commands and file paths from Tasks 1–11 exactly; any command a
-document shows must be one a task actually built or verified.
+- [ ] **Step 1: Failing tests.** In `check-deploy-bundle.test.mjs` `beforeEach`, add `put("places/taipei.json", '{"v":1,"rows":[]}');` and a test:
 
-- [ ] **Step 1: `docs/deploy.md`** with these sections, in this order:
-  1. **What is deployed where** — one paragraph and the §3 diagram: app and basemap as static assets,
-     the forecast in one KV key, the collector's upload thread, `https://parkcast.<name>.workers.dev`.
-  2. **Rules that keep it free** — the §3.1 rules verbatim, and the budget table.
-  3. **One-time setup (you do every step that touches a credential)**, with these exact commands:
-     - Create the Cloudflare account (no card), turn on two-factor sign-in, choose a **neutral**
-       `workers.dev` subdomain (it is public and effectively permanent).
-     - GitHub: two-factor sign-in, secret-scanning push protection, then
-       `git config core.hooksPath scripts/hooks`.
-     - A short-lived **setup key** (custom token, this account only, expiry one day) with the
-       permissions Task 13 confirms, entered in a **fresh PowerShell**:
-       ```powershell
-       $s = Read-Host -AsSecureString -Prompt "Cloudflare API token"
-       $env:CLOUDFLARE_API_TOKEN = [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
-       $env:CLOUDFLARE_ACCOUNT_ID = "<account id from the dashboard>"
-       ```
-     - `cd worker`, then `npx --no-install wrangler kv namespace create ARTIFACTS` and the same with
-       the preview flag Task 11B Step 1 confirmed; the two ids go into `worker/wrangler.jsonc`.
-     - `python scripts\new-upload-secret.py`, then
-       `cmd /c "npx --no-install wrangler secret put UPLOAD_SECRET < ..\docker\secrets\parkcast_upload_secret"`
-       — through `cmd` because a PowerShell pipe appends a newline and the two copies would differ.
-     - `Remove-Item Env:CLOUDFLARE_API_TOKEN`, and revoke the setup key in the dashboard.
-     - The **deploy key**: custom token, this account only, least permissions, expiry of days.
-  4. **Everyday: test locally against live data** — in PowerShell:
-     `$env:PARKCAST_LIVE_ORIGIN = "https://parkcast.<name>.workers.dev"; npm run dev --prefix web`.
-     What the middleware guarantees (GET/HEAD only, one copy a minute, 120 upstream requests an hour,
-     localhost only). Never `--host`. Without the variable it serves `web/.dev-artifacts/`.
-  5. **Deploying** — `npm run deploy:check --prefix worker` in a normal shell (add `-- --with-python`
-     when `src/` changed); then a fresh PowerShell, enter the deploy key as above,
-     `npm run deploy:release --prefix worker`, then `Remove-Item Env:CLOUDFLARE_API_TOKEN`. What the release
-     does (re-scan, upload, promote, `wrangler triggers deploy`, smoke test three times, automatic rollback,
-     the preview-host check). `deploy:preview` for a phone test (it runs `triggers deploy` with
-     `preview_urls: true` first), and that preview URLs stay on until the next normal release's
-     `triggers deploy` switches them off.
-  6. **The collector's upload** — the log lines and what each means: `uploaded N bytes in S s`,
-     `upload not needed: stale|too-soon|...`, `upload skipped: paused|backing off|daily cap reached`,
-     `upload unauthorized; retrying in an hour`, `upload refused by the daily limit; pausing`,
-     `uploads disabled (...)`.
-  7. **Runbook** — the §6.4 table, with the exact commands.
-  8. **Security rules** — never add a payment method; never set the key in the check-phase shell;
-     never `wrangler login`; never `--host`; never commit `docker/secrets/`, `.dev.vars`, `.wrangler/`;
-     rotate on suspicion; the flooding limit the user accepted (§6.3).
+```js
+test("fails when the place index is missing, so search cannot silently lose landmarks", () => {
+  rmSync(join(dist, "places/taipei.json"));
+  assert.ok(check().some((p) => p.includes("places/taipei.json")));
+});
+```
 
-- [ ] **Step 2: Update the other documents.**
-  - `README.md`: a "Deployment" subsection pointing to `docs/deploy.md` — free on Workers + KV, tested
-    locally against live data, two-phase deploy, hardened collector. Keep "never been deployed" wording
-    until Task 13 replaces it with the live address.
-  - `CLAUDE.md`: a new load-bearing section "Deployment (2026-09-14)": the free rules; Workers KV, not R2,
-    and why; the two-phase deploy and why the check phase has no key; secrets never logged, committed or
-    in the image; `web/.dev-artifacts/` and why nothing goes under `web/public/`; base `/`; Git Bash
-    rewriting `/` into a Windows path; the upload guard's bounds; the hardened container and why it has
-    no memory limit; the prune fix (a day compaction keeps failing is never pruned); collector pauses
-    are the user's own choice, not incidents.
-  - `docs/state-of-play.md`: in "What to do next", remove "Guard the collector against people" (the
-    09-13 pause was the user's own, deliberate) and replace "Deploy the app" with the Cloudflare plan and
-    its status; note the prune bug fixed; update the test counts from a real run.
-  - `docker/README.md`: the hardened settings and why; `docker/docker-compose.dryrun.yml`; the snapshot
-    procedure now writes to `/scratch/snap` (host `D:/Projects/parkcast-scratch/snap`) instead of
-    `/tmp/snap`, so no `docker cp` is needed; the secret file and that compose will not start without it
-    once Task 13 adds it; the new upload log lines; the pause section reframed — a pause is usually the
-    user's own, and a gap is lost training data, not a fault.
-  - `docs/pwa.md`: base `/` on workers.dev instead of `/ParkCast/`; `fallback.css` precached; `/sw.js`
-    served `Cache-Control: no-cache`; `npm run preview` now serves at `/`.
-  - `web/README.md`: `web/.dev-artifacts/` replaces `public/artifacts/`; `PARKCAST_LIVE_ORIGIN` (set from PowerShell).
-  - `docs/basemap.md`: the deploy gate requires the file at 15–25 MiB, under Workers' 25 MiB per-file limit.
+In `smoke-live.test.mjs` `site()` routes add `"HEAD /places/taipei.json": () => new Response(null),` and extend the existing "fails when the map's tiles or label fonts are not served" test with a third override `"HEAD /places/taipei.json": missing` and `assert.ok(failures.some((f) => f.includes("places/taipei.json")));`.
 
-- [ ] **Step 3: Check every command and path in the changed documents** against the repository
-  (`Grep` for each script name, npm script and file path). Fix any that do not exist.
+- [ ] **Step 2: Run** `node --test scripts/tests/*.test.mjs` → the two new assertions fail.
 
-- [ ] **Step 4: Checkpoint** — `git add docs/deploy.md README.md CLAUDE.md docs/state-of-play.md docker/README.md docs/pwa.md web/README.md docs/basemap.md`
+- [ ] **Step 3: Implement.**
+  - `ALLOWED`: add `/^places\/taipei\.json$/`. `REQUIRED`: add `"places/taipei.json"`.
+  - `MUST_SERVE`: add `"/places/taipei.json"` with the comment `// The offline place index behind the search box.`
+  - `build-basemap.mjs`, after the unpack log:
+    ```js
+    const { buildPlaceIndex } = await import("./build-place-index.mjs");
+    const index = await buildPlaceIndex();
+    console.log(`build-basemap: place index ${index.rows} rows, ${(index.gzipBytes / 1024).toFixed(0)} KB gzipped -> web/public/places/taipei.json`);
+    ```
+  - `.gitignore`: under the basemap block add `web/public/places/` with the comment `# Offline place index, regenerable via scripts/build-place-index.mjs`.
+  - `docs/basemap.md`: add a `## Place index` section before "## Rebuilding it": what it holds (the four groups, the kinds kept, the clustering and qualifier rules, the ≤ 600 KB / ≥ 15,000-row gate), that `build-basemap.mjs` regenerates it, that `check-deploy-bundle` requires it and `smoke-live` HEADs it, that the service worker caches it cache-first so `sw.js` `VERSION` is bumped when it changes, and the measured size from Task 4.
+
+- [ ] **Step 4: Verify** — `node --test scripts/tests/*.test.mjs` all pass; `npm run build --prefix web` then `node scripts/check-deploy-bundle.mjs` → `deploy bundle check passed (711 files)`.
+
+- [ ] **Step 5: Checkpoint** — `git add scripts/check-deploy-bundle.mjs scripts/tests/check-deploy-bundle.test.mjs scripts/smoke-live.mjs scripts/tests/smoke-live.test.mjs scripts/build-basemap.mjs .gitignore docs/basemap.md`. Commit only if authorised: `build(places): gate, smoke and generate the place index`.
+
+## Phase C — web foundations
+
+### Task 6: The visual system in CSS (§4)
+
+**Files:**
+- Create: `web/src/styles/tokens.css`, `web/src/styles/base.css`, `web/src/styles/motion.css`, `web/src/styles/components.css`
+- Modify: `web/src/main.tsx:3` (imports), `web/index.html:19` (`theme-color`)
+- Delete: `web/src/index.css`
+- Test: `web/tests/siteHardening.test.ts` still passes (it scans the built bundle for third-party URLs; no CSS `url()` may point off-origin).
+
+Every class name below is the contract later tasks build against; do not rename. The old components (`LotRow`, `Scrubber`, `DestinationSearch`) render unstyled until they are replaced in Tasks 13–15; that is expected on this branch.
+
+- [ ] **Step 1: `tokens.css`**
+
+```css
+/* Design tokens (design spec §4.1). Light is the default; dark follows the OS. */
+:root {
+  --bg: #f4f6f8;
+  --bg-dots: rgba(15, 31, 61, 0.06);
+  --surface: #ffffff;
+  --glass: rgba(255, 255, 255, 0.82);
+  --glass-solid: rgba(255, 255, 255, 0.96);
+  --text: #0f1f3d;
+  --muted: #5b6b85;
+  --border: #e3e8f0;
+  --accent: #0fb5a5;
+  --accent-2: #22c55e;
+  --accent-soft: #dff7f3;
+  --accent-text: #ffffff;
+  --gradient-best: linear-gradient(135deg, var(--accent), var(--accent-2));
+  --gradient-navy: linear-gradient(135deg, #0f1f3d, #1c3566);
+  --warn: #f59e0b;
+  --warn-soft: #fff4dc;
+  --danger: #ef4444;
+  --unknown: #9aa3b2;
+  --unknown-soft: #eef1f5;
+  --shadow-1: 0 2px 8px rgba(15, 31, 61, 0.06);
+  --shadow-2: 0 8px 24px rgba(15, 31, 61, 0.12);
+  --shadow-sheet: 0 -10px 34px rgba(15, 31, 61, 0.16);
+  --radius-card: 16px;
+  --radius-sheet: 22px;
+  --radius-pill: 999px;
+  --panel-width: 420px;
+  --topbar-height: 60px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --font: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1630;
+    --bg-dots: rgba(255, 255, 255, 0.05);
+    --surface: #13264a;
+    --glass: rgba(19, 38, 74, 0.8);
+    --glass-solid: rgba(19, 38, 74, 0.97);
+    --text: #eef2f8;
+    --muted: #a9b8d1;
+    --border: #244579;
+    --accent: #2ee6cf;
+    --accent-2: #4ade80;
+    --accent-soft: rgba(46, 230, 207, 0.16);
+    --accent-text: #062b27;
+    --gradient-navy: linear-gradient(135deg, #2ee6cf, #4ade80);
+    --warn: #fbbf24;
+    --warn-soft: rgba(251, 191, 36, 0.16);
+    --danger: #f87171;
+    --unknown: #7c8aa5;
+    --unknown-soft: rgba(255, 255, 255, 0.08);
+    --shadow-1: 0 2px 8px rgba(0, 0, 0, 0.35);
+    --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45);
+    --shadow-sheet: 0 -10px 34px rgba(0, 0, 0, 0.45);
+  }
+}
+```
+
+- [ ] **Step 2: `base.css`**
+
+```css
+/* Resets and page-level type. Everything sized for a 390 px phone first. */
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  font: 15px/1.4 var(--font);
+  color: var(--text);
+  background: radial-gradient(var(--bg-dots) 1px, transparent 1px) 0 0 / 18px 18px, var(--bg);
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior: none;
+}
+* { box-sizing: border-box; }
+button, input { font: inherit; color: inherit; }
+button { user-select: none; -webkit-tap-highlight-color: transparent; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.num { font-variant-numeric: tabular-nums; }
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+  clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+/* Frosted glass, with a solid fallback where backdrop-filter is unsupported. */
+.glass { background: var(--glass-solid); }
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+  .glass { background: var(--glass); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
+}
+```
+
+- [ ] **Step 3: `motion.css`** (durations are read by `motion.ts` too; keep the names)
+
+```css
+:root {
+  --dur-fast: 160ms; --dur-base: 260ms; --dur-slow: 400ms; --dur-sheet: 360ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slide-down { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+@keyframes shimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }
+@keyframes breathe { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.35); opacity: 0.7; } }
+@keyframes sweep { to { transform: rotate(360deg); } }
+@keyframes ripple { from { transform: scale(0.4); opacity: 0.6; } to { transform: scale(2.2); opacity: 0; } }
+@keyframes flash { 0% { box-shadow: 0 0 0 0 rgba(15, 181, 165, 0.55); } 100% { box-shadow: 0 0 0 12px rgba(15, 181, 165, 0); } }
+@keyframes shine { from { transform: translateX(-120%) skewX(-20deg); } to { transform: translateX(220%) skewX(-20deg); } }
+@keyframes pop { from { opacity: 0; transform: translateY(4px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+.anim-rise { animation: rise var(--dur-base) var(--ease-out) both; }
+.anim-fade { animation: fade-in var(--dur-base) var(--ease-out) both; }
+.anim-slide-down { animation: slide-down 220ms var(--ease-out) both; }
+.anim-pop { animation: pop var(--dur-fast) var(--ease-out) both; }
+/* Stagger: the component sets --i on each child. */
+.anim-stagger > * { animation-delay: calc(var(--i, 0) * 40ms); }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; --dur-sheet: 0ms; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  .anim-rise, .anim-pop, .anim-slide-down { animation-name: fade-in; }
+  .anim-stagger > * { animation-delay: 0ms; }
+}
+```
+
+- [ ] **Step 4: `components.css`**
+
+```css
+/* ------------------------------------------------------------ shell */
+.app-shell { position: fixed; inset: 0; overflow: hidden; }
+.map-stage { position: absolute; inset: 0; }
+.map-stage .map-canvas { width: 100%; height: 100%; }
+.map-placeholder {
+  position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: var(--muted);
+  background: linear-gradient(110deg, var(--bg) 30%, var(--surface) 50%, var(--bg) 70%) 0 0 / 200% 100%;
+  animation: shimmer 2.4s linear infinite;
+}
+.map-unavailable { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; margin: 0; text-align: center; color: var(--muted); }
+.map-hint {
+  position: absolute; left: 50%; top: calc(var(--safe-top) + var(--topbar-height) + 12px); transform: translateX(-50%);
+  max-width: min(92vw, 420px); margin: 0; padding: 8px 14px; border-radius: var(--radius-pill);
+  font-size: 13px; color: var(--text); box-shadow: var(--shadow-2); z-index: 2; text-align: center;
+}
+
+/* ------------------------------------------------------------ top bar */
+.topbar {
+  position: absolute; left: 12px; right: 12px; top: calc(var(--safe-top) + 10px); z-index: 5;
+  display: flex; gap: 8px; align-items: flex-start;
+}
+.topbar__search { flex: 1 1 auto; min-width: 0; }
+.round-btn {
+  flex: 0 0 auto; width: 44px; height: 44px; border-radius: 50%; border: 0; display: grid; place-items: center;
+  color: var(--text); box-shadow: var(--shadow-2); position: relative; overflow: hidden;
+}
+.round-btn svg { width: 20px; height: 20px; }
+.round-btn[disabled] { opacity: 0.7; cursor: default; }
+.round-btn--locating::after {
+  content: ""; position: absolute; inset: -30%; border-radius: 50%;
+  background: conic-gradient(from 0deg, transparent 0 70%, rgba(15, 181, 165, 0.45) 100%);
+  animation: sweep 1.2s linear infinite;
+}
+.round-btn__label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.float-controls { position: absolute; right: 16px; top: calc(var(--safe-top) + 16px); z-index: 5; display: flex; gap: 8px; }
+.lang-btn { font-size: 12px; font-weight: 700; gap: 3px; }
+.lang-btn span { transition: opacity var(--dur-fast); }
+
+/* ------------------------------------------------------------ sheet and panel */
+.sheet {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 4;
+  border-radius: var(--radius-sheet) var(--radius-sheet) 0 0; box-shadow: var(--shadow-sheet);
+  display: flex; flex-direction: column; touch-action: none;
+  padding-bottom: var(--safe-bottom);
+}
+.sheet--settling { transition: height var(--dur-sheet) var(--ease-spring); }
+.sheet__grip {
+  display: block; width: 100%; padding: 10px 0 6px; border: 0; background: none; cursor: grab; touch-action: none;
+}
+.sheet__grip::before { content: ""; display: block; width: 40px; height: 4px; margin: 0 auto; border-radius: 2px; background: var(--border); transition: background var(--dur-fast), box-shadow var(--dur-fast); }
+.sheet--dragging .sheet__grip::before { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.sheet__header { padding: 0 16px 8px; }
+.sheet__body { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 0 12px 12px; touch-action: pan-y; }
+.sheet--full .sheet__body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+
+.panel {
+  position: absolute; left: 0; top: 0; bottom: 0; z-index: 4; width: var(--panel-width);
+  display: flex; flex-direction: column; box-shadow: var(--shadow-2); border-right: 1px solid var(--border);
+}
+.panel__header { padding: 16px 16px 8px; }
+.panel__body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 16px 16px; }
+
+.head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.app-name { margin: 0; font-size: 15px; font-weight: 800; letter-spacing: -0.01em; }
+.list-head { margin: 12px 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+
+/* ------------------------------------------------------------ freshness badge */
+.fresh { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--accent); border-radius: var(--radius-pill); padding: 4px 8px; }
+.fresh__dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; animation: breathe 2.4s ease-in-out infinite; }
+.fresh--warn { color: var(--warn); }
+.fresh--expired { color: var(--unknown); }
+.fresh--expired .fresh__dot { animation: none; }
+.fresh--flash { animation: flash 700ms var(--ease-out) 1; }
+
+/* ------------------------------------------------------------ search */
+.search { position: relative; }
+.search__field { position: relative; }
+.search__input {
+  width: 100%; min-height: 44px; padding: 0 44px 0 40px; border: 1px solid transparent; border-radius: var(--radius-pill);
+  box-shadow: var(--shadow-2); font-size: 15px; transition: box-shadow var(--dur-fast), border-color var(--dur-fast);
+}
+.search__input:focus { border-color: var(--accent); }
+.search__icon { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); width: 18px; height: 18px; color: var(--accent); pointer-events: none; }
+.search__clear { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); width: 34px; height: 34px; border: 0; border-radius: 50%; background: transparent; color: var(--muted); display: grid; place-items: center; }
+.search__clear svg { width: 16px; height: 16px; }
+.search__results {
+  position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 6; max-height: 50vh; overflow-y: auto;
+  margin: 0; padding: 6px; list-style: none; border-radius: var(--radius-card); box-shadow: var(--shadow-2); border: 1px solid var(--border);
+}
+.search__group { margin: 6px 8px 2px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+.search__option { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 8px; border-radius: 12px; cursor: pointer; }
+.search__option[aria-selected="true"] { background: var(--accent-soft); }
+.search__option-icon { width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; background: var(--unknown-soft); color: var(--accent); flex: 0 0 auto; }
+.search__option-icon svg { width: 16px; height: 16px; }
+.search__option-name { font-weight: 600; overflow-wrap: anywhere; }
+.search__option-where { font-size: 12px; color: var(--muted); }
+.search__hint { margin: 6px 0 0 14px; font-size: 12px; color: var(--muted); }
+.search__empty { margin: 6px 0 0 14px; font-size: 13px; }
+.search__recent-clear { border: 0; background: none; color: var(--accent); font-size: 12px; font-weight: 600; padding: 4px 8px; }
+
+/* ------------------------------------------------------------ arrival strip */
+.arrival { margin: 4px 0 10px; }
+.arrival__readout { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
+.arrival__label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.arrival__time { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; line-height: 1; }
+.arrival__relative { font-size: 12px; color: var(--muted); }
+.arrival__strip { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 4px 2px; margin: 0 -2px; scroll-snap-type: x proximity; touch-action: pan-x; }
+.arrival__strip::-webkit-scrollbar { display: none; }
+.chip {
+  flex: 0 0 auto; min-height: 36px; padding: 0 12px; border: 0; border-radius: 12px; scroll-snap-align: center;
+  background: var(--unknown-soft); color: var(--text); font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums;
+  transition: background var(--dur-fast), color var(--dur-fast), transform var(--dur-fast), box-shadow var(--dur-fast);
+}
+.chip[aria-checked="true"] { background: var(--gradient-navy); color: var(--accent-text); box-shadow: var(--shadow-1); transform: translateY(-1px); }
+@media (prefers-color-scheme: light) { .chip[aria-checked="true"] { color: #fff; } }
+.arrival__tail { flex: 0 0 auto; align-self: center; padding: 0 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.odometer { display: inline-block; overflow: hidden; height: 1em; line-height: 1; vertical-align: bottom; }
+.odometer__digit { display: inline-block; transition: transform var(--dur-base) var(--ease-out); }
+
+/* ------------------------------------------------------------ cards */
+.lots { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.lot-card {
+  position: relative; overflow: hidden; border-radius: var(--radius-card); background: var(--surface);
+  border: 1px solid var(--border); box-shadow: var(--shadow-1);
+  transition: transform var(--dur-fast), box-shadow var(--dur-fast), border-color var(--dur-fast);
+}
+.lot-card__button { display: block; width: 100%; padding: 12px; border: 0; background: none; text-align: left; color: inherit; }
+.lot-card:active { transform: scale(0.98); }
+@media (hover: hover) { .lot-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); } }
+.lot-card--selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow-2); }
+.lot-card--best { background: linear-gradient(135deg, var(--accent-soft) 0%, var(--surface) 55%); border-color: var(--accent); }
+.lot-card--best::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--gradient-best); }
+.lot-card__head { display: flex; gap: 12px; align-items: center; }
+.lot-card__ident { flex: 1 1 auto; min-width: 0; }
+.lot-card__name { margin: 0; font-size: 16px; font-weight: 800; line-height: 1.25; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.lot-card__sub { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+.lot-card__tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.fact { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 12px; background: var(--unknown-soft); min-width: 0; }
+.fact__icon { width: 18px; height: 18px; flex: 0 0 auto; color: var(--accent); }
+.fact__icon--info { color: var(--muted); }
+.fact__value { display: block; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.fact__label { display: block; font-size: 11px; color: var(--muted); }
+
+/* ------------------------------------------------------------ ring */
+.ring { position: relative; width: 64px; height: 64px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; }
+.ring__svg { position: absolute; inset: 0; transform: rotate(-90deg); }
+.ring__track { fill: none; stroke: var(--unknown-soft); stroke-width: 6; }
+.ring__arc { fill: none; stroke: var(--ring-colour, var(--accent)); stroke-width: 6; stroke-linecap: round; transition: stroke var(--dur-base); }
+.ring__value { position: relative; font-size: 17px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1; }
+.ring__label { position: relative; font-size: 9px; font-weight: 600; color: var(--muted); margin-top: 2px; }
+.ring--unknown .ring__value { font-size: 11px; color: var(--unknown); font-weight: 700; }
+.ring--unknown .ring__arc { display: none; }
+.ring--glow { box-shadow: 0 0 0 4px var(--accent-soft), 0 6px 16px rgba(15, 181, 165, 0.25); }
+
+/* ------------------------------------------------------------ pills and popover */
+.pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: var(--radius-pill); border: 0; font-size: 11px; font-weight: 700; line-height: 1.4; background: var(--unknown-soft); color: var(--muted); position: relative; overflow: hidden; }
+.pill--best { background: var(--gradient-best); color: #fff; }
+.pill--best.anim-shine::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent); animation: shine 800ms var(--ease-out) 1; }
+.pill--high { background: var(--accent-soft); color: var(--accent); }
+.pill--medium { background: var(--warn-soft); color: var(--warn); }
+.pill--low { background: var(--unknown-soft); color: var(--muted); }
+.pill--button { cursor: pointer; }
+.popover { margin: 6px 0 0; padding: 8px 10px; border-radius: 12px; font-size: 12px; color: var(--text); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow-1); }
+
+/* ------------------------------------------------------------ notices, skeleton */
+.notice { margin: 8px 0; padding: 10px 12px; border-radius: 12px; font-size: 13px; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--accent); }
+.notice--warn { border-left-color: var(--warn); }
+.notice--error { border-left-color: var(--danger); }
+.notice button { min-height: 36px; margin-left: 8px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface); font-weight: 600; }
+.skeleton-card { height: 128px; border-radius: var(--radius-card); background: linear-gradient(110deg, var(--surface) 30%, var(--unknown-soft) 50%, var(--surface) 70%) 0 0 / 200% 100%; animation: shimmer 1.6s linear infinite; border: 1px solid var(--border); }
+.skeleton-stack { display: flex; flex-direction: column; gap: 10px; }
+
+/* ------------------------------------------------------------ map extras */
+.map-stage .maplibregl-popup-content { border-radius: 12px; box-shadow: var(--shadow-2); padding: 8px 12px; font: 13px/1.3 var(--font); color: #0f1f3d; }
+.map-stage .maplibregl-popup-content b { display: block; font-weight: 800; }
+.map-stage .maplibregl-ctrl-attrib { font-size: 11px; }
+.pin-ripple { position: absolute; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%; border: 2px solid var(--accent); animation: ripple 900ms var(--ease-out) 1 both; pointer-events: none; }
+.pin-ripple--late { animation-delay: 220ms; }
+
+@media (max-width: 360px) {
+  .facts { grid-template-columns: 1fr; }
+  .ring { width: 56px; height: 56px; }
+  .ring__value { font-size: 15px; }
+}
+```
+
+- [ ] **Step 5: Wire it up.** `web/src/main.tsx` line 3 → four imports in this order: `./styles/tokens.css`, `./styles/base.css`, `./styles/motion.css`, `./styles/components.css`. Delete `web/src/index.css`. In `web/index.html` change `theme-color` to `#0f1f3d`.
+
+- [ ] **Step 6: Verify** — `npm run build --prefix web && npm test --prefix web && npm run lint --prefix web`. Expected: green (the app renders unstyled-old plus new tokens; nothing asserts on styles).
+
+- [ ] **Step 7: Checkpoint** — `git add web/src/styles web/src/main.tsx web/index.html && git rm -q web/src/index.css`. Commit only if authorised: `feat(web): tokens, base, motion and component styles`.
+
+### Task 7: Icons and motion helpers (§4.3, §9)
+
+**Files:**
+- Create: `web/src/icons.tsx`, `web/src/motion.ts`
+- Test: `web/tests/motion.test.ts`, `web/tests/icons.test.tsx`
+
+**Interfaces (Produces):**
+- Icons: `IconProps = { size?: number; className?: string; label?: string }`; each icon renders an `<svg>` with `aria-hidden` unless `label` is given (then `role="img"` + `aria-label`). Exports: `Search, Locate, Walk, Price, Spaces, Clock, Pin, Station, Landmark, Street, Area, CarPark, Info, Chevron, Globe, Cross`.
+- `motion.ts`: `DURATION = { fast: 160, base: 260, slow: 400, sheet: 360 }`; `prefersReducedMotion(): boolean`; `tween(from, to, durationMs, onFrame, deps?): () => void` (returns cancel; `deps = { raf, cancelRaf, now }` for tests; under reduced motion or `durationMs <= 0` calls `onFrame(to)` once, synchronously); `easeOutCubic(t)`; `measureRects(entries: Iterable<[string, Element]>): Map<string, DOMRect>`; `flipMove(el: Element, previous: DOMRect | undefined, durationMs)` (animates from the old rect to the current position with `el.animate`, no-op when no previous rect, when displacement < 1 px, when `el.animate` is missing, or under reduced motion).
+
+- [ ] **Step 1: Failing tests** — `web/tests/motion.test.ts`:
+
+```ts
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { easeOutCubic, flipMove, measureRects, prefersReducedMotion, tween } from "../src/motion";
+
+function stubReducedMotion(matches: boolean) {
+  vi.stubGlobal("matchMedia", vi.fn(() => ({ matches, addEventListener() {}, removeEventListener() {} })));
+}
+
+afterEach(() => vi.unstubAllGlobals());
+
+describe("prefersReducedMotion", () => {
+  it("reads the media query, and is false where matchMedia does not exist", () => {
+    stubReducedMotion(true);
+    expect(prefersReducedMotion()).toBe(true);
+    stubReducedMotion(false);
+    expect(prefersReducedMotion()).toBe(false);
+    vi.stubGlobal("matchMedia", undefined);
+    expect(prefersReducedMotion()).toBe(false);
+  });
+});
+
+describe("tween", () => {
+  function fakeClock() {
+    let t = 0;
+    const frames: Array<(now: number) => void> = [];
+    return {
+      deps: { raf: (cb: (now: number) => void) => { frames.push(cb); return frames.length; }, cancelRaf: () => {}, now: () => t },
+      step(ms: number) { t += ms; const pending = frames.splice(0); for (const cb of pending) cb(t); },
+    };
+  }
+
+  it("reaches exactly the target and eases out", () => {
+    stubReducedMotion(false);
+    const clock = fakeClock();
+    const seen: number[] = [];
+    tween(0, 100, 100, (v) => seen.push(v), clock.deps);
+    clock.step(0); clock.step(50); clock.step(50); clock.step(50);
+    expect(seen.at(-1)).toBe(100);
+    expect(seen[1]).toBeGreaterThan(50); // ease-out: more than half way at half time
+  });
+
+  it("jumps straight to the target under reduced motion", () => {
+    stubReducedMotion(true);
+    const seen: number[] = [];
+    tween(0, 100, 100, (v) => seen.push(v));
+    expect(seen).toEqual([100]);
+  });
+
+  it("can be cancelled", () => {
+    stubReducedMotion(false);
+    const clock = fakeClock();
+    const seen: number[] = [];
+    const cancel = tween(0, 100, 100, (v) => seen.push(v), clock.deps);
+    clock.step(0); cancel(); clock.step(50);
+    expect(seen.length).toBe(1);
+  });
+
+  it("maps 0.5 to more than 0.5", () => expect(easeOutCubic(0.5)).toBeGreaterThan(0.5));
+});
+
+describe("flip", () => {
+  it("measures rects by key and animates a moved element from its old spot", () => {
+    stubReducedMotion(false);
+    const el = document.createElement("li");
+    document.body.appendChild(el);
+    const animate = vi.fn(() => ({ finished: Promise.resolve() }));
+    (el as unknown as { animate: typeof animate }).animate = animate;
+    vi.spyOn(el, "getBoundingClientRect").mockReturnValue({ left: 0, top: 100, width: 10, height: 10 } as DOMRect);
+    const before = measureRects([["a", el]]);
+    vi.spyOn(el, "getBoundingClientRect").mockReturnValue({ left: 0, top: 40, width: 10, height: 10 } as DOMRect);
+    flipMove(el, before.get("a"), 260);
+    expect(animate).toHaveBeenCalledTimes(1);
+    const [frames] = animate.mock.calls[0] as unknown as [Array<{ transform: string }>];
+    expect(frames[0]!.transform).toBe("translate(0px, 60px)");
+  });
+
+  it("does nothing for an element that did not move, or under reduced motion", () => {
+    const el = document.createElement("li");
+    const animate = vi.fn();
+    (el as unknown as { animate: typeof animate }).animate = animate;
+    vi.spyOn(el, "getBoundingClientRect").mockReturnValue({ left: 0, top: 0, width: 1, height: 1 } as DOMRect);
+    stubReducedMotion(false);
+    flipMove(el, { left: 0, top: 0 } as DOMRect, 260);
+    stubReducedMotion(true);
+    flipMove(el, { left: 0, top: 500 } as DOMRect, 260);
+    expect(animate).not.toHaveBeenCalled();
+  });
+});
+```
+
+`web/tests/icons.test.tsx`:
+
+```tsx
+import { cleanup, render } from "@testing-library/react";
+import { afterEach, describe, expect, it } from "vitest";
+import * as icons from "../src/icons";
+
+afterEach(cleanup);
+
+describe("icons", () => {
+  it("exports every icon the spec names, each an aria-hidden svg by default", () => {
+    const names = ["Search", "Locate", "Walk", "Price", "Spaces", "Clock", "Pin", "Station", "Landmark", "Street", "Area", "CarPark", "Info", "Chevron", "Globe", "Cross"] as const;
+    for (const name of names) {
+      const Icon = icons[name];
+      const { container, unmount } = render(<Icon />);
+      const svg = container.querySelector("svg");
+      expect(svg, name).not.toBeNull();
+      expect(svg).toHaveAttribute("aria-hidden", "true");
+      expect(svg?.getAttribute("viewBox")).toBe("0 0 24 24");
+      unmount();
+    }
+  });
+
+  it("becomes an image with a name when labelled", () => {
+    const { getByRole } = render(<icons.Walk label="walk" />);
+    expect(getByRole("img", { name: "walk" })).toBeInTheDocument();
+  });
+});
+```
+
+- [ ] **Step 2: Run** `npm test --prefix web -- motion icons` → fail to import.
+
+- [ ] **Step 3: Implement** — `web/src/motion.ts`:
+
+```ts
+export const DURATION = { fast: 160, base: 260, slow: 400, sheet: 360 } as const;
+
+export function prefersReducedMotion(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+export function easeOutCubic(t: number): number {
+  return 1 - (1 - t) ** 3;
+}
+
+interface TweenDeps {
+  raf: (cb: (now: number) => void) => number;
+  cancelRaf: (id: number) => void;
+  now: () => number;
+}
+
+const browserDeps = (): TweenDeps => ({
+  raf: (cb) => window.requestAnimationFrame(cb),
+  cancelRaf: (id) => window.cancelAnimationFrame(id),
+  now: () => performance.now(),
+});
+
+/** Drive `onFrame` from `from` to `to` over `durationMs`, easing out; ends exactly on `to`. */
+export function tween(
+  from: number, to: number, durationMs: number, onFrame: (value: number) => void, deps?: TweenDeps,
+): () => void {
+  if (durationMs <= 0 || prefersReducedMotion() || typeof window === "undefined") {
+    onFrame(to);
+    return () => {};
+  }
+  const d = deps ?? browserDeps();
+  const start = d.now();
+  let id = 0;
+  let cancelled = false;
+  const frame = () => {
+    if (cancelled) return;
+    const t = Math.min(1, (d.now() - start) / durationMs);
+    onFrame(t >= 1 ? to : from + (to - from) * easeOutCubic(t));
+    if (t < 1) id = d.raf(frame);
+  };
+  id = d.raf(frame);
+  return () => { cancelled = true; d.cancelRaf(id); };
+}
+
+export function measureRects(entries: Iterable<[string, Element]>): Map<string, DOMRect> {
+  const out = new Map<string, DOMRect>();
+  for (const [key, el] of entries) out.set(key, el.getBoundingClientRect());
+  return out;
+}
+
+/** FLIP: play an element from where it was to where it is now. */
+export function flipMove(el: Element, previous: DOMRect | undefined, durationMs: number): void {
+  if (previous === undefined || prefersReducedMotion()) return;
+  const animate = (el as Element & { animate?: Element["animate"] }).animate;
+  if (typeof animate !== "function") return;
+  const now = el.getBoundingClientRect();
+  const dx = previous.left - now.left;
+  const dy = previous.top - now.top;
+  if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+  animate.call(el, [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], {
+    duration: durationMs, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+  });
+}
+```
+
+`web/src/icons.tsx` (one helper, sixteen exports; every path is a plain stroke drawing on a 24-box):
+
+```tsx
+import type { SVGProps } from "react";
+
+export interface IconProps { size?: number; className?: string; label?: string }
+
+function Icon({ size = 20, className, label, children }: IconProps & { children: SVGProps<SVGSVGElement>["children"] }) {
+  const a11y = label ? { role: "img", "aria-label": label } : { "aria-hidden": true };
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}
+      strokeLinecap="round" strokeLinejoin="round" className={className} {...a11y}>
+      {children}
+    </svg>
+  );
+}
+
+export const Search = (p: IconProps) => <Icon {...p}><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></Icon>;
+export const Locate = (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r="3" /><circle cx="12" cy="12" r="8" /><path d="M12 1v3M12 20v3M1 12h3M20 12h3" /></Icon>;
+export const Walk = (p: IconProps) => <Icon {...p}><circle cx="13" cy="4" r="2" /><path d="m8 22 3-8-3-2 1-5 4-1 3 4 3 1M11 14l3 3v5" /></Icon>;
+export const Price = (p: IconProps) => <Icon {...p}><rect x="3" y="6" width="18" height="12" rx="2" /><circle cx="12" cy="12" r="2.5" /><path d="M7 12h.01M17 12h.01" /></Icon>;
+export const Spaces = (p: IconProps) => <Icon {...p}><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M9 4v16M15 4v16" /></Icon>;
+export const Clock = (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></Icon>;
+export const Pin = (p: IconProps) => <Icon {...p}><path d="M12 22s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12Z" /><circle cx="12" cy="10" r="2.5" /></Icon>;
+export const Station = (p: IconProps) => <Icon {...p}><rect x="5" y="3" width="14" height="14" rx="3" /><path d="M5 11h14M9 17l-2 4M15 17l2 4M9 7h6" /></Icon>;
+export const Landmark = (p: IconProps) => <Icon {...p}><path d="M3 21h18M5 21V10M19 21V10M9 21v-7h6v7M12 3l9 6H3l9-6Z" /></Icon>;
+export const Street = (p: IconProps) => <Icon {...p}><path d="M4 21 9 3M20 21 15 3M12 6v2M12 11v2M12 16v2" /></Icon>;
+export const Area = (p: IconProps) => <Icon {...p}><path d="M3 7l6-3 6 3 6-3v13l-6 3-6-3-6 3V7ZM9 4v13M15 7v13" /></Icon>;
+export const CarPark = (p: IconProps) => <Icon {...p}><rect x="3" y="3" width="18" height="18" rx="3" /><path d="M9 17V7h4a3 3 0 0 1 0 6H9" /></Icon>;
+export const Info = (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r="9" /><path d="M12 8h.01M11 12h1v5h1" /></Icon>;
+export const Chevron = (p: IconProps) => <Icon {...p}><path d="m6 15 6-6 6 6" /></Icon>;
+export const Globe = (p: IconProps) => <Icon {...p}><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></Icon>;
+export const Cross = (p: IconProps) => <Icon {...p}><path d="M6 6l12 12M18 6 6 18" /></Icon>;
+```
+
+- [ ] **Step 4: Verify** — `npm test --prefix web -- motion icons && npm run typecheck --prefix web && npm run lint --prefix web`.
+- [ ] **Step 5: Checkpoint** — `git add web/src/icons.tsx web/src/motion.ts web/tests/motion.test.ts web/tests/icons.test.tsx`. Commit only if authorised: `feat(web): inline icons and motion helpers`.
+
+### Task 8: Arrival as a clock time — `arrival.ts` (§5.3)
+
+**Files:**
+- Create: `web/src/arrival.ts`
+- Test: `web/tests/arrival.test.ts`
+
+**Interfaces (Produces):**
+```ts
+export const STEP_SEC = 300;                 // 5-minute wall-clock grid
+export const MIN_LEAD_SEC = 5 * 60;          // the nearest arrival offered
+export const DEFAULT_LEAD_SEC = 15 * 60;
+export const TIME_ZONE = "Asia/Taipei";
+export interface GridSpan { baseDataTs: number; stepMin: number; nHorizons: number }
+export function ceilToStep(ts: number, stepSec?: number): number;
+export function floorToStep(ts: number, stepSec?: number): number;
+export function arrivalOptions(nowSec: number, grid: GridSpan): number[];   // unix seconds, ascending, may be []
+export function defaultArrival(nowSec: number): number;
+export function clampArrival(arrivalTs: number, options: readonly number[]): number; // first when below, last when above, itself when present; unchanged when options empty
+export function horizonFromReading(arrivalTs: number, baseDataTs: number): number; // whole minutes, may exceed the grid (probabilityAt clamps)
+export function relativeMinutes(arrivalTs: number, nowSec: number): number;  // rounded
+export function formatClock(ts: number): string;                              // "18:35" in Asia/Taipei, 24-hour
+```
+
+- [ ] **Step 1: Failing tests** — `web/tests/arrival.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import {
+  arrivalOptions, ceilToStep, clampArrival, defaultArrival, floorToStep, formatClock, horizonFromReading, relativeMinutes,
+} from "../src/arrival";
+
+/** 2026-09-06 06:48:00 UTC = 14:48 Taipei, the app tests' fixed reading. */
+const BASE = 1788677280;
+const grid = { baseDataTs: BASE, stepMin: 5, nHorizons: 24 };
+
+describe("rounding to the 5-minute clock", () => {
+  it("ceils and floors onto :00/:05 boundaries", () => {
+    expect(ceilToStep(BASE)).toBe(BASE + 120);      // 14:48 -> 14:50
+    expect(floorToStep(BASE)).toBe(BASE - 180);     // 14:48 -> 14:45
+    expect(ceilToStep(BASE + 120)).toBe(BASE + 120); // already on the grid
+  });
+});
+
+describe("arrivalOptions", () => {
+  it("runs every 5 minutes from now+5 (rounded up) to the grid's last column (rounded down)", () => {
+    const now = BASE + 240; // 14:52
+    const options = arrivalOptions(now, grid);
+    expect(options[0]).toBe(BASE + 720);            // 14:57 -> 15:00
+    expect(options.at(-1)).toBe(floorToStep(BASE + 120 * 60)); // 16:48 -> 16:45
+    expect(options.every((t, i) => i === 0 || t - options[i - 1]! === 300)).toBe(true);
+  });
+
+  it("shrinks as the reading ages and empties once nothing is left", () => {
+    expect(arrivalOptions(BASE + 100 * 60, grid).length).toBeGreaterThan(0);
+    expect(arrivalOptions(BASE + 118 * 60, grid)).toEqual([]);
+  });
+});
+
+describe("defaultArrival and clampArrival", () => {
+  it("defaults to now+15 rounded up to the clock grid", () => {
+    expect(formatClock(defaultArrival(BASE + 240))).toBe("15:10"); // 14:52 + 15 = 15:07 -> 15:10
+  });
+
+  it("keeps a valid selection, snaps a passed one forward and an overrun one back", () => {
+    const options = [BASE + 720, BASE + 1020, BASE + 1320];
+    expect(clampArrival(BASE + 1020, options)).toBe(BASE + 1020);
+    expect(clampArrival(BASE + 600, options)).toBe(BASE + 720);
+    expect(clampArrival(BASE + 9999, options)).toBe(BASE + 1320);
+    expect(clampArrival(BASE + 9999, [])).toBe(BASE + 9999);
+  });
+});
+
+describe("horizons and display", () => {
+  it("measures the horizon from the reading, which is the whole staleness correction", () => {
+    expect(horizonFromReading(BASE + 22 * 60, BASE)).toBe(22);
+  });
+
+  it("reports minutes from now, rounded", () => {
+    expect(relativeMinutes(BASE + 1320, BASE + 240)).toBe(18);
+  });
+
+  it("formats in Taipei time, 24-hour, zero-padded", () => {
+    expect(formatClock(BASE)).toBe("14:48");
+    expect(formatClock(1788566400)).toBe("08:00"); // 00:00 UTC
+  });
+});
+```
+
+- [ ] **Step 2: Run** `npm test --prefix web -- arrival` → fails to import.
+
+- [ ] **Step 3: Implement** — `web/src/arrival.ts`:
+
+```ts
+export const STEP_SEC = 300;
+export const MIN_LEAD_SEC = 5 * 60;
+export const DEFAULT_LEAD_SEC = 15 * 60;
+export const TIME_ZONE = "Asia/Taipei";
+
+export interface GridSpan { baseDataTs: number; stepMin: number; nHorizons: number }
+
+export function ceilToStep(ts: number, stepSec = STEP_SEC): number {
+  return Math.ceil(ts / stepSec) * stepSec;
+}
+
+export function floorToStep(ts: number, stepSec = STEP_SEC): number {
+  return Math.floor(ts / stepSec) * stepSec;
+}
+
+/** Every clock time the strip offers: now+5 rounded up, through the grid's last column rounded down. */
+export function arrivalOptions(nowSec: number, grid: GridSpan): number[] {
+  const first = ceilToStep(nowSec + MIN_LEAD_SEC);
+  const last = floorToStep(grid.baseDataTs + grid.stepMin * grid.nHorizons * 60);
+  const out: number[] = [];
+  for (let t = first; t <= last; t += STEP_SEC) out.push(t);
+  return out;
+}
+
+export function defaultArrival(nowSec: number): number {
+  return ceilToStep(nowSec + DEFAULT_LEAD_SEC);
+}
+
+export function clampArrival(arrivalTs: number, options: readonly number[]): number {
+  if (options.length === 0) return arrivalTs;
+  const first = options[0]!;
+  const last = options[options.length - 1]!;
+  if (arrivalTs < first) return first;
+  if (arrivalTs > last) return last;
+  return arrivalTs;
+}
+
+/** Minutes between the reading behind the forecast and the arrival: the age is inside this number. */
+export function horizonFromReading(arrivalTs: number, baseDataTs: number): number {
+  return (arrivalTs - baseDataTs) / 60;
+}
+
+export function relativeMinutes(arrivalTs: number, nowSec: number): number {
+  return Math.round((arrivalTs - nowSec) / 60);
+}
+
+const clockFormat = new Intl.DateTimeFormat("en-GB", {
+  hour: "2-digit", minute: "2-digit", hour12: false, timeZone: TIME_ZONE,
+});
+
+export function formatClock(ts: number): string {
+  return clockFormat.format(new Date(ts * 1000));
+}
+```
+
+- [ ] **Step 4: Verify** — `npm test --prefix web -- arrival && npm run typecheck --prefix web`.
+- [ ] **Step 5: Checkpoint** — `git add web/src/arrival.ts web/tests/arrival.test.ts`. Commit only if authorised: `feat(web): clock-time arrival arithmetic`.
+
+### Task 9: Confidence and the new colour ramp (§4.2, §6)
+
+**Files:**
+- Create: `web/src/confidence.ts`; Test: `web/tests/confidence.test.ts`
+- Modify: `web/src/map/colour.ts`; Test: `web/tests/colour.test.ts`
+
+**Interfaces (Produces):**
+- `type Confidence = "high" | "medium" | "low"`; `HIGH_MAX_MIN = 30`, `MEDIUM_MAX_MIN = 75`; `confidenceFor(horizonFromReadingMin: number, updating: boolean, probability: number | null): Confidence | null`.
+- `colour.ts`: `PROBABILITY_RAMP: ReadonlyArray<readonly [number, string]>` = `[[0, "#e5484d"], [0.35, "#f5a524"], [0.7, "#12b5a6"], [1, "#0e9384"]]`; `UNKNOWN_COLOUR = "#9aa3b2"`; `colourFor(p)` interpolates between the stops that bracket `p`.
+
+- [ ] **Step 1: Failing tests** — `web/tests/confidence.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { HIGH_MAX_MIN, MEDIUM_MAX_MIN, confidenceFor } from "../src/confidence";
+
+describe("confidenceFor", () => {
+  it("follows the blend's persistence weight: high to 30 min, medium to 75, low beyond", () => {
+    expect(confidenceFor(5, true, 0.8)).toBe("high");
+    expect(confidenceFor(HIGH_MAX_MIN, true, 0.8)).toBe("high");
+    expect(confidenceFor(HIGH_MAX_MIN + 1, true, 0.8)).toBe("medium");
+    expect(confidenceFor(MEDIUM_MAX_MIN, true, 0.8)).toBe("medium");
+    expect(confidenceFor(MEDIUM_MAX_MIN + 1, true, 0.8)).toBe("low");
+    expect(confidenceFor(500, true, 0.8)).toBe("low");
+  });
+
+  it("has nothing to say without a forecast or for a lot that is not updating", () => {
+    expect(confidenceFor(5, true, null)).toBeNull();
+    expect(confidenceFor(5, false, 0.8)).toBeNull();
+  });
+});
+```
+
+Replace `web/tests/colour.test.ts` with:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { PROBABILITY_RAMP, UNKNOWN_COLOUR, colourFor } from "../src/map/colour";
+
+describe("colourFor", () => {
+  it("gives unknown its own grey, off the ramp and never the colour of zero", () => {
+    expect(colourFor(null)).toBe(UNKNOWN_COLOUR);
+    expect(colourFor(Number.NaN)).toBe(UNKNOWN_COLOUR);
+    expect(colourFor(0)).not.toBe(UNKNOWN_COLOUR);
+    expect(PROBABILITY_RAMP.map(([, c]) => c)).not.toContain(UNKNOWN_COLOUR);
+  });
+
+  it("hits every stop exactly and is monotone between them", () => {
+    for (const [p, hex] of PROBABILITY_RAMP) expect(colourFor(p)).toBe(hex);
+    const steps = [0, 0.2, 0.35, 0.5, 0.7, 0.85, 1].map((p) => colourFor(p));
+    expect(new Set(steps).size).toBe(steps.length);
+  });
+
+  it("runs red to teal, never green: the red-green colour-blind reading stays intact", () => {
+    expect(PROBABILITY_RAMP[0]![1]).toBe("#e5484d");
+    expect(PROBABILITY_RAMP.at(-1)![1]).toBe("#0e9384");
+  });
+
+  it("returns a valid colour for every probability, clamping outside 0..1", () => {
+    for (let p = -0.5; p <= 1.5; p += 0.05) expect(colourFor(p)).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(colourFor(2)).toBe(colourFor(1));
+  });
+});
+```
+
+- [ ] **Step 2: Run** `npm test --prefix web -- confidence colour` → confidence fails to import; the colour stop tests fail.
+
+- [ ] **Step 3: Implement** — `web/src/confidence.ts`:
+
+```ts
+export type Confidence = "high" | "medium" | "low";
+
+/** The blend halves its weight on the live reading every 30 min of horizon (config.BLEND_HALF_LIFE_MIN). */
+export const HIGH_MAX_MIN = 30;   // persistence weight >= 1/2
+export const MEDIUM_MAX_MIN = 75; // persistence weight >= ~1/6
+
+export function confidenceFor(horizonFromReadingMin: number, updating: boolean, probability: number | null): Confidence | null {
+  if (probability === null || !updating) return null;
+  if (horizonFromReadingMin <= HIGH_MAX_MIN) return "high";
+  if (horizonFromReadingMin <= MEDIUM_MAX_MIN) return "medium";
+  return "low";
+}
+```
+
+`web/src/map/colour.ts` — replace `PROBABILITY_RAMP`, `UNKNOWN_COLOUR` and `colourFor` (keep the header comment's argument; update it to say red→amber→teal and why not green):
+
+```ts
+export const PROBABILITY_RAMP = [
+  [0, "#e5484d"],    // almost certainly full
+  [0.35, "#f5a524"],
+  [0.7, "#12b5a6"],
+  [1, "#0e9384"],    // almost certainly a space
+] as const;
+
+export const UNKNOWN_COLOUR = "#9aa3b2";
+
+export function colourFor(p: number | null): string {
+  if (p === null || !Number.isFinite(p)) return UNKNOWN_COLOUR;
+  const clamped = Math.min(1, Math.max(0, p));
+  let i = 0;
+  while (i < PROBABILITY_RAMP.length - 2 && clamped > PROBABILITY_RAMP[i + 1]![0]) i++;
+  const [p0, c0] = PROBABILITY_RAMP[i]!;
+  const [p1, c1] = PROBABILITY_RAMP[i + 1]!;
+  const frac = p1 === p0 ? 0 : (clamped - p0) / (p1 - p0);
+  const lo = channels(c0);
+  const hi = channels(c1);
+  return `#${lo.map((c, k) => hex2(c + (hi[k]! - c) * frac)).join("")}`;
+}
+```
+
+(`channels` and `hex2` stay as they are.)
+
+- [ ] **Step 4: Verify** — `npm test --prefix web && npm run typecheck --prefix web` (the lotSource and mapSource tests use `colourFor` and must still pass).
+- [ ] **Step 5: Checkpoint** — `git add web/src/confidence.ts web/tests/confidence.test.ts web/src/map/colour.ts web/tests/colour.test.ts`. Commit only if authorised: `feat(web): confidence label and red-amber-teal ramp`.
+
+### Task 10: Place search logic — `places.ts` (§5.2)
+
+**Files:**
+- Create: `web/src/places.ts`
+- Test: `web/tests/places.test.ts` (absorbs the fold cases from `tests/search.test.ts`, which Task 15 deletes)
+
+**Interfaces (Produces):**
+```ts
+export type PlaceKind = "carpark" | "station" | "landmark" | "street" | "area";
+export interface Place { name: string; en: string; kind: PlaceKind; detail: string; lat: number; lon: number; qualifier: string; lotId?: string }
+export interface PlaceIndexDoc { v: number; built: number; source: string; rows: unknown[] }
+export const SEARCH_LIMIT = 10;
+export const RECENT_LIMIT = 5;
+export const RECENT_KEY = "parkcast.recent.v1";
+export function foldKey(text: string): string;                         // 臺→台, lowercase, whitespace removed
+export function kindOf(detail: string): PlaceKind;                     // raw tile kind -> group ("locality"→area, "major_road"→street, "station"→station, else landmark)
+export function prominence(detail: string): number;                    // index in PROMINENCE; unknown → 1000; "carpark" → -1
+export function parsePlaceIndex(doc: unknown): Place[];                // validates; throws on a bad document
+export function lotsAsPlaces(lots: readonly Lot[]): Place[];           // kind "carpark", detail "carpark", qualifier = district, lotId
+export function searchPlaces(places: readonly Place[], query: string, limit?: number): Place[];
+export function loadPlaceIndex(url: string, fetchImpl?: typeof fetch): Promise<Place[]>; // memoised per url; a failed load resolves [] and is retried on the next call
+export function resetPlaceIndexCache(): void;                          // tests
+export function readRecent(storage: Storage | null): Place[];
+export function pushRecent(storage: Storage | null, place: Place): Place[];
+export function clearRecent(storage: Storage | null): void;
+```
+Ordering (§5.2): tier by kind (carpark 0, station 1, landmark 2, street 3, area 4), then match position (the smaller of the name and English positions), then `prominence(detail)`, then name (`localeCompare` with `"zh-Hant"`), then lat, then lon.
+
+- [ ] **Step 1: Failing tests** — `web/tests/places.test.ts`:
+
+```ts
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  RECENT_LIMIT, SEARCH_LIMIT, clearRecent, foldKey, kindOf, loadPlaceIndex, lotsAsPlaces, parsePlaceIndex, pushRecent,
+  readRecent, resetPlaceIndexCache, searchPlaces, type Place,
+} from "../src/places";
+import type { Lot } from "../src/types";
+
+const lot = (id: string, n: string, a = "信義區"): Lot => ({ i: 0, id, n, a, y: 25.03, x: 121.56, c: 10, t: "民營停車場", p: { k: "unknown" } });
+const place = (name: string, detail: string, extra: Partial<Place> = {}): Place => ({
+  name, en: "", kind: kindOf(detail), detail, lat: 25.04, lon: 121.55, qualifier: "", ...extra,
+});
+
+describe("foldKey", () => {
+  it("folds 臺 to 台, lowercases, and ignores spaces", () => {
+    expect(foldKey("臺北車站")).toBe("台北車站");
+    expect(foldKey("USPACE 信義")).toBe("uspace信義");
+  });
+});
+
+describe("kindOf", () => {
+  it("groups raw tile kinds", () => {
+    expect(kindOf("locality")).toBe("area");
+    expect(kindOf("minor_road")).toBe("street");
+    expect(kindOf("subway_entrance")).toBe("station");
+    expect(kindOf("hospital")).toBe("landmark");
+    expect(kindOf("carpark")).toBe("carpark");
+  });
+});
+
+describe("parsePlaceIndex", () => {
+  it("reads the row tuples and refuses a document it does not understand", () => {
+    const rows = parsePlaceIndex({ v: 1, built: 1, source: "20260914", rows: [["台北101", "Taipei 101", "attraction", 25.0339, 121.5645, "信義"]] });
+    expect(rows).toEqual([{ name: "台北101", en: "Taipei 101", kind: "landmark", detail: "attraction", lat: 25.0339, lon: 121.5645, qualifier: "信義" }]);
+    expect(() => parsePlaceIndex({ v: 2, rows: [] })).toThrow();
+    expect(() => parsePlaceIndex({ v: 1, rows: [["x", "", "park", "no", 1, ""]] })).toThrow();
+    expect(() => parsePlaceIndex(null)).toThrow();
+  });
+});
+
+describe("searchPlaces", () => {
+  const roster = lotsAsPlaces([lot("TPE1", "台北101停車場"), lot("TPE2", "臺北車站停車場", "中正區")]);
+  const index = [
+    place("台北101", "attraction", { en: "Taipei 101" }),
+    place("台北101/世貿", "station"),
+    place("忠孝東路四段", "major_road", { qualifier: "大安" }),
+    place("忠孝東路四段216巷", "minor_road"),
+    place("信義區", "locality"),
+    place("台北市立圖書館", "library"),
+  ];
+  const all = [...roster, ...index];
+
+  it("returns nothing for an empty query", () => {
+    expect(searchPlaces(all, "  ")).toEqual([]);
+  });
+
+  it("ranks car parks, then stations, landmarks, streets and areas", () => {
+    const names = searchPlaces(all, "台北").map((p) => p.name);
+    expect(names.slice(0, 2)).toEqual(["台北101停車場", "臺北車站停車場"]);
+    expect(names.indexOf("台北101/世貿")).toBeLessThan(names.indexOf("台北101"));
+    expect(names.indexOf("台北101")).toBeLessThan(names.indexOf("台北市立圖書館"));
+  });
+
+  it("folds 臺 and 台 both ways and matches English names", () => {
+    expect(searchPlaces(all, "臺北101").map((p) => p.name)).toContain("台北101");
+    expect(searchPlaces(all, "taipei").map((p) => p.name)).toContain("台北101");
+  });
+
+  it("orders streets by match position, so the section comes before its lanes", () => {
+    const names = searchPlaces(all, "忠孝東路四段").map((p) => p.name);
+    expect(names).toEqual(["忠孝東路四段", "忠孝東路四段216巷"]);
+  });
+
+  it("matches a car park by its district too, after name matches", () => {
+    expect(searchPlaces(all, "中正").map((p) => p.name)).toEqual(["臺北車站停車場"]);
+  });
+
+  it("caps the list", () => {
+    const many = Array.from({ length: 30 }, (_, i) => place(`公園${i}`, "park"));
+    expect(searchPlaces(many, "公園").length).toBe(SEARCH_LIMIT);
+    expect(searchPlaces(many, "公園", 3).length).toBe(3);
+  });
+});
+
+describe("loadPlaceIndex", () => {
+  beforeEach(resetPlaceIndexCache);
+
+  it("fetches once per url and shares the promise", async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ v: 1, built: 1, source: "x", rows: [["西門町", "", "locality", 25.04, 121.5, ""]] })));
+    const a = loadPlaceIndex("/places/taipei.json", fetchImpl as unknown as typeof fetch);
+    const b = loadPlaceIndex("/places/taipei.json", fetchImpl as unknown as typeof fetch);
+    expect(await a).toEqual(await b);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect((await a)[0]!.kind).toBe("area");
+  });
+
+  it("resolves empty on failure and tries again next time", async () => {
+    const fetchImpl = vi.fn(async () => new Response("nope", { status: 503 }));
+    expect(await loadPlaceIndex("/places/taipei.json", fetchImpl as unknown as typeof fetch)).toEqual([]);
+    await loadPlaceIndex("/places/taipei.json", fetchImpl as unknown as typeof fetch);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("recent searches", () => {
+  function fakeStorage(): Storage {
+    const m = new Map<string, string>();
+    return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => void m.set(k, v), removeItem: (k) => void m.delete(k), clear: () => m.clear(), key: () => null, length: 0 } as Storage;
+  }
+
+  it("keeps the last five, newest first, without duplicates", () => {
+    const s = fakeStorage();
+    for (let i = 0; i < 7; i++) pushRecent(s, place(`p${i}`, "park"));
+    pushRecent(s, place("p6", "park"));
+    const names = readRecent(s).map((p) => p.name);
+    expect(names).toEqual(["p6", "p5", "p4", "p3", "p2"]);
+    expect(names.length).toBe(RECENT_LIMIT);
+    clearRecent(s);
+    expect(readRecent(s)).toEqual([]);
+  });
+
+  it("survives a storage that throws or is missing", () => {
+    const broken = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => {} } as unknown as Storage;
+    expect(readRecent(broken)).toEqual([]);
+    expect(() => pushRecent(broken, place("x", "park"))).not.toThrow();
+    expect(readRecent(null)).toEqual([]);
+  });
+});
+```
+
+- [ ] **Step 2: Run** `npm test --prefix web -- places` → fails to import.
+
+- [ ] **Step 3: Implement** — `web/src/places.ts`:
+
+```ts
+import type { Lot } from "./types";
+
+export type PlaceKind = "carpark" | "station" | "landmark" | "street" | "area";
+
+export interface Place {
+  name: string;
+  en: string;
+  kind: PlaceKind;
+  /** The raw kind from the tiles ("station", "minor_road", "locality"…) or "carpark". */
+  detail: string;
+  lat: number;
+  lon: number;
+  /** District for a car park, nearest locality for anything else, "" when none. */
+  qualifier: string;
+  lotId?: string;
+}
+
+export interface PlaceIndexDoc { v: number; built: number; source: string; rows: unknown[] }
+
+export const SEARCH_LIMIT = 10;
+export const RECENT_LIMIT = 5;
+export const RECENT_KEY = "parkcast.recent.v1";
+const INDEX_VERSION = 1;
+
+/** Mirrors STATION_KINDS + LANDMARK_KINDS + ROAD_KINDS + area kinds in scripts/build-place-index.mjs. */
+const PROMINENCE = [
+  "station", "subway_entrance",
+  "aerodrome", "bus_station", "ferry_terminal", "terminal", "university", "hospital", "mall",
+  "department_store", "stadium", "museum", "arts_centre", "theatre", "attraction", "park",
+  "townhall", "government", "library", "college", "school", "hotel", "place_of_worship",
+  "marketplace", "supermarket", "cinema", "sports_centre", "swimming_pool", "garden", "viewpoint",
+  "monument", "memorial", "courthouse", "police", "fire_station", "post_office",
+  "community_centre", "clinic", "parking",
+  "highway", "major_road", "minor_road",
+  "macrohood", "neighbourhood", "locality",
+];
+const STATION = new Set(["station", "subway_entrance"]);
+const STREET = new Set(["highway", "major_road", "minor_road"]);
+const AREA = new Set(["macrohood", "neighbourhood", "locality"]);
+const TIER: Record<PlaceKind, number> = { carpark: 0, station: 1, landmark: 2, street: 3, area: 4 };
+
+export function foldKey(text: string): string {
+  return text.replaceAll("臺", "台").toLowerCase().replace(/\s+/g, "");
+}
+
+export function kindOf(detail: string): PlaceKind {
+  if (detail === "carpark") return "carpark";
+  if (STATION.has(detail)) return "station";
+  if (STREET.has(detail)) return "street";
+  if (AREA.has(detail)) return "area";
+  return "landmark";
+}
+
+export function prominence(detail: string): number {
+  if (detail === "carpark") return -1;
+  const at = PROMINENCE.indexOf(detail);
+  return at < 0 ? 1000 : at;
+}
+
+function isRow(row: unknown): row is [string, string, string, number, number, string] {
+  return Array.isArray(row) && row.length === 6 && typeof row[0] === "string" && typeof row[1] === "string"
+    && typeof row[2] === "string" && Number.isFinite(row[3]) && Number.isFinite(row[4]) && typeof row[5] === "string";
+}
+
+export function parsePlaceIndex(doc: unknown): Place[] {
+  if (typeof doc !== "object" || doc === null) throw new Error("place index is not an object");
+  const d = doc as Partial<PlaceIndexDoc>;
+  if (d.v !== INDEX_VERSION || !Array.isArray(d.rows)) throw new Error(`place index v${String(d.v)} is not readable`);
+  return d.rows.map((row) => {
+    if (!isRow(row)) throw new Error("place index row is malformed");
+    const [name, en, detail, lat, lon, qualifier] = row;
+    return { name, en, kind: kindOf(detail), detail, lat, lon, qualifier };
+  });
+}
+
+export function lotsAsPlaces(lots: readonly Lot[]): Place[] {
+  return lots.map((lot) => ({ name: lot.n, en: "", kind: "carpark", detail: "carpark", lat: lot.y, lon: lot.x, qualifier: lot.a, lotId: lot.id }));
+}
+
+interface Hit { place: Place; tier: number; at: number }
+
+export function searchPlaces(places: readonly Place[], query: string, limit: number = SEARCH_LIMIT): Place[] {
+  const needle = foldKey(query);
+  if (needle === "") return [];
+  const hits: Hit[] = [];
+  for (const place of places) {
+    const inName = foldKey(place.name).indexOf(needle);
+    const inEn = place.en === "" ? -1 : foldKey(place.en).indexOf(needle);
+    const at = inName >= 0 && inEn >= 0 ? Math.min(inName, inEn) : Math.max(inName, inEn);
+    if (at >= 0) {
+      hits.push({ place, tier: TIER[place.kind], at });
+      continue;
+    }
+    // A car park also answers to its district, behind every name match.
+    if (place.kind === "carpark" && foldKey(place.qualifier).indexOf(needle) >= 0) {
+      hits.push({ place, tier: TIER.carpark, at: 1000 });
+    }
+  }
+  hits.sort((a, b) =>
+    a.tier - b.tier || a.at - b.at || prominence(a.place.detail) - prominence(b.place.detail)
+    || a.place.name.localeCompare(b.place.name, "zh-Hant") || a.place.lat - b.place.lat || a.place.lon - b.place.lon);
+  return hits.slice(0, limit).map((h) => h.place);
+}
+
+const cache = new Map<string, Promise<Place[]>>();
+
+export function resetPlaceIndexCache(): void {
+  cache.clear();
+}
+
+/** The index, fetched once per page; a failure yields [] now and a fresh attempt next time. */
+export function loadPlaceIndex(url: string, fetchImpl: typeof fetch = fetch): Promise<Place[]> {
+  const pending = cache.get(url);
+  if (pending) return pending;
+  const attempt = (async () => {
+    try {
+      const res = await fetchImpl(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return parsePlaceIndex(await res.json());
+    } catch {
+      cache.delete(url);
+      return [];
+    }
+  })();
+  cache.set(url, attempt);
+  return attempt;
+}
+
+export function readRecent(storage: Storage | null): Place[] {
+  try {
+    const raw = storage?.getItem(RECENT_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((p): p is Place => typeof p === "object" && p !== null && typeof (p as Place).name === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+export function pushRecent(storage: Storage | null, place: Place): Place[] {
+  const same = (a: Place, b: Place) => a.name === b.name && a.kind === b.kind && a.lat === b.lat && a.lon === b.lon;
+  const next = [place, ...readRecent(storage).filter((p) => !same(p, place))].slice(0, RECENT_LIMIT);
+  try {
+    storage?.setItem(RECENT_KEY, JSON.stringify(next));
+  } catch {
+    // Storage blocked or full: recents are a convenience, never a requirement.
+  }
+  return next;
+}
+
+export function clearRecent(storage: Storage | null): void {
+  try {
+    storage?.removeItem(RECENT_KEY);
+  } catch {
+    // Same as above.
+  }
+}
+```
+
+- [ ] **Step 4: Verify** — `npm test --prefix web -- places && npm run typecheck --prefix web && npm run lint --prefix web`.
+- [ ] **Step 5: Checkpoint** — `git add web/src/places.ts web/tests/places.test.ts`. Commit only if authorised: `feat(web): place search over the roster and the offline index`.
+
+### Task 11: Sheet snap logic and the layout media query (§3)
+
+**Files:**
+- Create: `web/src/layout/sheet.ts`, `web/src/layout/useMediaQuery.ts`
+- Test: `web/tests/sheet.test.ts`, `web/tests/useMediaQuery.test.tsx`
+
+**Interfaces (Produces):**
+```ts
+export type Snap = "peek" | "half" | "full";
+export const SNAPS: readonly Snap[] = ["peek", "half", "full"];
+export const FLICK_PX_PER_MS = 0.5;
+export const PEEK_MIN_PX = 240;
+export interface SnapHeights { peek: number; half: number; full: number }
+export function snapHeights(viewportH: number, topBarH: number): SnapHeights;   // peek max(240, .34vh), half .55vh, full vh − topBarH − 12
+export function nearestSnap(height: number, heights: SnapHeights): Snap;
+export function settleSnap(height: number, velocityPxPerMs: number, heights: SnapHeights, from: Snap): Snap; // velocity > 0 = sheet growing (drag up); a flick moves one step in its direction; otherwise nearest
+export function stepSnap(from: Snap, direction: "up" | "down"): Snap;
+export const DESKTOP_QUERY = "(min-width: 768px)";
+export function useMediaQuery(query: string): boolean;   // false during SSR / when matchMedia is missing; updates on change
+```
+
+- [ ] **Step 1: Failing tests** — `web/tests/sheet.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { nearestSnap, settleSnap, snapHeights, stepSnap } from "../src/layout/sheet";
+
+describe("snapHeights", () => {
+  it("derives the three heights from the viewport with a floor on peek", () => {
+    expect(snapHeights(800, 60)).toEqual({ peek: 272, half: 440, full: 728 });
+    expect(snapHeights(600, 60).peek).toBe(240);
+  });
+});
+
+describe("nearestSnap and settleSnap", () => {
+  const h = snapHeights(800, 60);
+  it("picks the closest snap point", () => {
+    expect(nearestSnap(300, h)).toBe("peek");
+    expect(nearestSnap(400, h)).toBe("half");
+    expect(nearestSnap(700, h)).toBe("full");
+  });
+  it("lets a flick move one step in its direction, whatever the position", () => {
+    expect(settleSnap(300, 0.8, h, "peek")).toBe("half");
+    expect(settleSnap(700, -0.8, h, "full")).toBe("half");
+    expect(settleSnap(700, 0.8, h, "full")).toBe("full");
+    expect(settleSnap(600, 0.1, h, "half")).toBe("half");
+  });
+  it("steps within the three points", () => {
+    expect(stepSnap("peek", "up")).toBe("half");
+    expect(stepSnap("full", "up")).toBe("full");
+    expect(stepSnap("half", "down")).toBe("peek");
+  });
+});
+```
+
+`web/tests/useMediaQuery.test.tsx`:
+
+```tsx
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DESKTOP_QUERY, useMediaQuery } from "../src/layout/useMediaQuery";
+
+function Probe() {
+  const desktop = useMediaQuery(DESKTOP_QUERY);
+  return <p>{desktop ? "desktop" : "phone"}</p>;
+}
+
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+describe("useMediaQuery", () => {
+  it("follows the query and its changes", () => {
+    let listener: ((e: { matches: boolean }) => void) | null = null;
+    const mql = { matches: false, addEventListener: (_: string, cb: typeof listener) => { listener = cb; }, removeEventListener: () => {} };
+    vi.stubGlobal("matchMedia", vi.fn(() => mql));
+    render(<Probe />);
+    expect(screen.getByText("phone")).toBeInTheDocument();
+    act(() => listener?.({ matches: true }));
+    expect(screen.getByText("desktop")).toBeInTheDocument();
+  });
+
+  it("is false where matchMedia does not exist", () => {
+    vi.stubGlobal("matchMedia", undefined);
+    render(<Probe />);
+    expect(screen.getByText("phone")).toBeInTheDocument();
+  });
+});
+```
+
+- [ ] **Step 2: Run** `npm test --prefix web -- sheet useMediaQuery` → fail to import.
+
+- [ ] **Step 3: Implement** — `web/src/layout/sheet.ts`:
+
+```ts
+export type Snap = "peek" | "half" | "full";
+export const SNAPS: readonly Snap[] = ["peek", "half", "full"];
+export const FLICK_PX_PER_MS = 0.5;
+export const PEEK_MIN_PX = 240;
+export interface SnapHeights { peek: number; half: number; full: number }
+
+export function snapHeights(viewportH: number, topBarH: number): SnapHeights {
+  return {
+    peek: Math.max(PEEK_MIN_PX, Math.round(viewportH * 0.34)),
+    half: Math.round(viewportH * 0.55),
+    full: Math.round(viewportH - topBarH - 12),
+  };
+}
+
+export function nearestSnap(height: number, heights: SnapHeights): Snap {
+  let best: Snap = "peek";
+  let bestDistance = Infinity;
+  for (const snap of SNAPS) {
+    const distance = Math.abs(heights[snap] - height);
+    if (distance < bestDistance) { best = snap; bestDistance = distance; }
+  }
+  return best;
+}
+
+export function stepSnap(from: Snap, direction: "up" | "down"): Snap {
+  const at = SNAPS.indexOf(from);
+  const next = direction === "up" ? Math.min(SNAPS.length - 1, at + 1) : Math.max(0, at - 1);
+  return SNAPS[next]!;
+}
+
+/** Where a release lands: a flick goes one step its way, otherwise the nearest point. */
+export function settleSnap(height: number, velocityPxPerMs: number, heights: SnapHeights, from: Snap): Snap {
+  if (velocityPxPerMs >= FLICK_PX_PER_MS) return stepSnap(from, "up");
+  if (velocityPxPerMs <= -FLICK_PX_PER_MS) return stepSnap(from, "down");
+  return nearestSnap(height, heights);
+}
+```
+
+`web/src/layout/useMediaQuery.ts`:
+
+```ts
+import { useEffect, useState } from "react";
+
+export const DESKTOP_QUERY = "(min-width: 768px)";
+
+function matches(query: string): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+  return window.matchMedia(query).matches;
+}
+
+export function useMediaQuery(query: string): boolean {
+  const [value, setValue] = useState(() => matches(query));
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mql = window.matchMedia(query);
+    const onChange = (event: { matches: boolean }) => setValue(event.matches);
+    setValue(mql.matches);
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, [query]);
+  return value;
+}
+```
+
+- [ ] **Step 4: Verify** — `npm test --prefix web -- sheet useMediaQuery && npm run typecheck --prefix web && npm run lint --prefix web`.
+- [ ] **Step 5: Checkpoint** — `git add web/src/layout/sheet.ts web/src/layout/useMediaQuery.ts web/tests/sheet.test.ts web/tests/useMediaQuery.test.tsx`. Commit only if authorised: `feat(web): sheet snap arithmetic and layout media query`.
+
+## Phase D — components
+
+### Task 12: Ring, confidence pill, freshness badge, skeleton, notice (§5.4, §5.5)
+
+**Files:**
+- Create: `web/src/components/ProbabilityRing.tsx`, `ConfidencePill.tsx`, `FreshnessBadge.tsx`, `Skeleton.tsx`, `Notice.tsx`
+- Modify: `web/src/i18n.ts` — add the keys used below to `Strings`, `en` and `zh`
+- Test: `web/tests/smallComponents.test.tsx`
+
+**i18n keys added in this task** (add to the interface with a one-line doc each, and to both dictionaries):
+
+| key | en | zh |
+|---|---|---|
+| `spaceLabel` | `space` | `有車位` |
+| `bestPick` | `Best pick` | `最佳選擇` |
+| `confidence` | `Confidence` | `信心` |
+| `confidenceHigh` | `High` | `高` |
+| `confidenceMedium` | `Medium` | `中` |
+| `confidenceLow` | `Low` | `低` |
+| `confidenceWhyHigh` | `Based mostly on the live reading.` | `主要依據最新讀數。` |
+| `confidenceWhyMedium` | `A mix of the live reading and the usual pattern for this time.` | `綜合最新讀數與此時段的平常狀況。` |
+| `confidenceWhyLow` | `Mostly the usual pattern for this time of week.` | `主要依據此時段每週的平常狀況。` |
+| `expired` | `expired` | `已過期` |
+| `freshnessLabel` | `Data age` | `資料時間` |
+
+**Interfaces (Produces):**
+```tsx
+ProbabilityRing({ probability: number | null; unknownText: string; label: string; best?: boolean; size?: number })
+  // <div class="ring [ring--unknown] [ring--glow]" style="--ring-colour"> with an SVG circle; data-testid="lot-probability" on the value element; tweens the arc and counts the number when `probability` changes (motion.tween, DURATION.slow)
+ConfidencePill({ level: Confidence; lang: Lang })
+  // <button class="pill pill--high|medium|low pill--button" aria-expanded> toggling a <p class="popover" role="note"> with the why-line
+FreshnessBadge({ ageMin: number | null; expired: boolean; lang: Lang })
+  // <span class="fresh [fresh--warn|fresh--expired] [fresh--flash]" data-testid="staleness">: teal under 10 min, warn from 10, expired grey with the word; flashes for 700 ms when ageMin drops (a new reading landed); text is fillTemplate(stalenessTemplate, {n}) or `${expired}` suffix
+Skeleton({ count?: number })          // <div class="skeleton-stack" aria-hidden="true"> of .skeleton-card
+Notice({ tone?: "info"|"warn"|"error"; role?: string; testId?: string; children })  // <p class="notice notice--tone anim-slide-down">
+```
+
+- [ ] **Step 1: Failing tests** — `web/tests/smallComponents.test.tsx`:
+
+```tsx
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ConfidencePill } from "../src/components/ConfidencePill";
+import { FreshnessBadge } from "../src/components/FreshnessBadge";
+import { Notice } from "../src/components/Notice";
+import { ProbabilityRing } from "../src/components/ProbabilityRing";
+import { Skeleton } from "../src/components/Skeleton";
+import { t } from "../src/i18n";
+
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+const reduced = () => vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} })));
+
+describe("ProbabilityRing", () => {
+  it("shows the percentage and the arc for a known probability", () => {
+    reduced();
+    render(<ProbabilityRing probability={0.86} unknownText="No data" label="space" />);
+    expect(screen.getByTestId("lot-probability")).toHaveTextContent("86%");
+    const arc = document.querySelector(".ring__arc") as SVGCircleElement;
+    expect(arc).not.toBeNull();
+    expect(Number(arc.getAttribute("stroke-dashoffset"))).toBeGreaterThan(0);
+  });
+
+  it("says no data with an empty grey ring for null, and never 0%", () => {
+    reduced();
+    render(<ProbabilityRing probability={null} unknownText="No data" label="space" />);
+    expect(screen.getByTestId("lot-probability")).toHaveTextContent("No data");
+    expect(screen.getByTestId("lot-probability")).not.toHaveTextContent("0%");
+    expect(document.querySelector(".ring")).toHaveClass("ring--unknown");
+  });
+
+  it("glows only for the best pick", () => {
+    reduced();
+    const { rerender } = render(<ProbabilityRing probability={0.5} unknownText="No data" label="space" best />);
+    expect(document.querySelector(".ring")).toHaveClass("ring--glow");
+    rerender(<ProbabilityRing probability={0.5} unknownText="No data" label="space" />);
+    expect(document.querySelector(".ring")).not.toHaveClass("ring--glow");
+  });
+});
+
+describe("ConfidencePill", () => {
+  it("names the level and explains itself on tap", () => {
+    render(<ConfidencePill level="medium" lang="en" />);
+    const pill = screen.getByRole("button", { name: /confidence.*medium/i });
+    expect(pill).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(pill);
+    expect(pill).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("note")).toHaveTextContent(t("en").confidenceWhyMedium);
+  });
+});
+
+describe("FreshnessBadge", () => {
+  it("reports the age, turns amber past ten minutes and grey when expired", () => {
+    const { rerender } = render(<FreshnessBadge ageMin={4} expired={false} lang="en" />);
+    const badge = screen.getByTestId("staleness");
+    expect(badge).toHaveTextContent("data from 4 min ago");
+    expect(badge).not.toHaveClass("fresh--warn");
+    rerender(<FreshnessBadge ageMin={12} expired={false} lang="en" />);
+    expect(badge).toHaveClass("fresh--warn");
+    rerender(<FreshnessBadge ageMin={130} expired lang="en" />);
+    expect(badge).toHaveClass("fresh--expired");
+    expect(badge).toHaveTextContent("expired");
+  });
+
+  it("flashes once when a fresher reading lands", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<FreshnessBadge ageMin={9} expired={false} lang="en" />);
+    rerender(<FreshnessBadge ageMin={1} expired={false} lang="en" />);
+    expect(screen.getByTestId("staleness")).toHaveClass("fresh--flash");
+    act(() => { vi.advanceTimersByTime(800); });
+    expect(screen.getByTestId("staleness")).not.toHaveClass("fresh--flash");
+    vi.useRealTimers();
+  });
+});
+
+describe("Skeleton and Notice", () => {
+  it("renders hidden placeholders and a toned notice", () => {
+    render(<><Skeleton count={3} /><Notice tone="warn" testId="n">hello</Notice></>);
+    expect(document.querySelectorAll(".skeleton-card").length).toBe(3);
+    expect(document.querySelector(".skeleton-stack")).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByTestId("n")).toHaveClass("notice--warn");
+  });
+});
+```
+
+- [ ] **Step 2: Run** `npm test --prefix web -- smallComponents` → fail to import.
+
+- [ ] **Step 3: Implement.**
+
+`ProbabilityRing.tsx`:
+
+```tsx
+import { useEffect, useRef, useState } from "react";
+import { colourFor } from "../map/colour";
+import { DURATION, tween } from "../motion";
+
+interface Props { probability: number | null; unknownText: string; label: string; best?: boolean; size?: number }
+
+const STROKE = 6;
+
+export function ProbabilityRing({ probability, unknownText, label, best = false, size = 64 }: Props) {
+  const [shown, setShown] = useState(probability ?? 0);
+  const previous = useRef(probability ?? 0);
+
+  // Tween from the last value: a change of arrival time animates the arc and counts the number.
+  useEffect(() => {
+    const target = probability ?? 0;
+    const cancel = tween(previous.current, target, DURATION.slow, setShown);
+    previous.current = target;
+    return cancel;
+  }, [probability]);
+
+  const r = (size - STROKE) / 2;
+  const circumference = 2 * Math.PI * r;
+  const dashOffset = circumference * (1 - Math.min(1, Math.max(0, shown)));
+  const unknown = probability === null;
+  const className = ["ring", unknown ? "ring--unknown" : "", best ? "ring--glow" : ""].filter(Boolean).join(" ");
+  return (
+    <div className={className} style={{ width: size, height: size, ["--ring-colour" as string]: colourFor(probability) }}>
+      <svg className="ring__svg" width={size} height={size} viewBox={`0 0 ${size} ${size}`} aria-hidden="true">
+        <circle className="ring__track" cx={size / 2} cy={size / 2} r={r} />
+        {!unknown && (
+          <circle className="ring__arc" cx={size / 2} cy={size / 2} r={r} strokeDasharray={circumference} strokeDashoffset={dashOffset} />
+        )}
+      </svg>
+      <span className="ring__value" data-testid="lot-probability">{unknown ? unknownText : `${Math.round(shown * 100)}%`}</span>
+      {!unknown && <span className="ring__label">{label}</span>}
+    </div>
+  );
+}
+```
+
+`ConfidencePill.tsx`:
+
+```tsx
+import { useId, useState } from "react";
+import type { Confidence } from "../confidence";
+import { t, type Lang } from "../i18n";
+
+export function ConfidencePill({ level, lang }: { level: Confidence; lang: Lang }) {
+  const s = t(lang);
+  const [open, setOpen] = useState(false);
+  const noteId = useId();
+  const name = { high: s.confidenceHigh, medium: s.confidenceMedium, low: s.confidenceLow }[level];
+  const why = { high: s.confidenceWhyHigh, medium: s.confidenceWhyMedium, low: s.confidenceWhyLow }[level];
+  return (
+    <>
+      <button type="button" className={`pill pill--${level} pill--button`} aria-expanded={open} aria-controls={noteId} onClick={() => setOpen((o) => !o)}>
+        {s.confidence} · {name}
+      </button>
+      {open && <p id={noteId} role="note" className="popover anim-pop">{why}</p>}
+    </>
+  );
+}
+```
+
+`FreshnessBadge.tsx`:
+
+```tsx
+import { useEffect, useRef, useState } from "react";
+import { fillTemplate, t, type Lang } from "../i18n";
+
+const WARN_FROM_MIN = 10;
+const FLASH_MS = 700;
+
+export function FreshnessBadge({ ageMin, expired, lang }: { ageMin: number | null; expired: boolean; lang: Lang }) {
+  const s = t(lang);
+  const [flash, setFlash] = useState(false);
+  const last = useRef(ageMin);
+  useEffect(() => {
+    if (ageMin !== null && last.current !== null && ageMin < last.current) {
+      setFlash(true);
+      const id = setTimeout(() => setFlash(false), FLASH_MS);
+      last.current = ageMin;
+      return () => clearTimeout(id);
+    }
+    last.current = ageMin;
+    return undefined;
+  }, [ageMin]);
+  if (ageMin === null) return null;
+  const tone = expired ? "fresh--expired" : ageMin >= WARN_FROM_MIN ? "fresh--warn" : "";
+  const text = fillTemplate(s.stalenessTemplate, { n: ageMin }) + (expired ? ` · ${s.expired}` : "");
+  return (
+    <span className={["fresh", tone, flash ? "fresh--flash" : ""].filter(Boolean).join(" ")} data-testid="staleness" aria-label={`${s.freshnessLabel}: ${text}`}>
+      <i className="fresh__dot" aria-hidden="true" />
+      {text}
+    </span>
+  );
+}
+```
+
+`Skeleton.tsx` and `Notice.tsx`:
+
+```tsx
+export function Skeleton({ count = 3 }: { count?: number }) {
+  return (
+    <div className="skeleton-stack" aria-hidden="true">
+      {Array.from({ length: count }, (_, i) => <div key={i} className="skeleton-card" />)}
+    </div>
+  );
+}
+```
+
+```tsx
+import type { ReactNode } from "react";
+
+interface Props { tone?: "info" | "warn" | "error"; role?: string; testId?: string; children: ReactNode }
+
+export function Notice({ tone = "info", role, testId, children }: Props) {
+  return (
+    <p className={`notice notice--${tone} anim-slide-down`} role={role} data-testid={testId}>{children}</p>
+  );
+}
+```
+
+- [ ] **Step 4: Verify** — `npm test --prefix web && npm run typecheck --prefix web && npm run lint --prefix web` (adding `Strings` keys breaks nothing else because both dictionaries are updated).
+- [ ] **Step 5: Checkpoint** — `git add web/src/components/ProbabilityRing.tsx web/src/components/ConfidencePill.tsx web/src/components/FreshnessBadge.tsx web/src/components/Skeleton.tsx web/src/components/Notice.tsx web/src/i18n.ts web/tests/smallComponents.test.tsx`. Commit only if authorised: `feat(web): ring, confidence pill, freshness badge, skeleton, notice`.
+
+### Task 13: The card and the list (§5.4, §5.5, §9 #2–4)
+
+**Files:**
+- Create: `web/src/components/LotCard.tsx`; rewrite `web/src/components/LotList.tsx`
+- Delete: `web/src/components/LotRow.tsx`
+- Modify: `web/src/i18n.ts` — add `walkTile` ("Walk" / "步行"), `arrivalTile` ("Arrival" / "預計抵達"), `spacesNowTemplate` ("{f} / {c} free · {n} min ago" / "現在 {f} / {c} 位 · {n} 分鐘前"), `spacesNowNoCapacityTemplate` ("{f} free · {n} min ago" / "現在 {f} 位 · {n} 分鐘前"), `spacesNowLabel` ("Observed spaces" / "觀測空位"), `selectCard` ("Show on map" / "在地圖上顯示")
+- Test: `web/tests/lotCard.test.tsx`
+
+**Interfaces (Produces):**
+```tsx
+interface LotCardProps {
+  row: Ranked; lang: Lang; baseDataTs: number; ageMin: number;
+  arrivalTs: number; horizonFromReadingMin: number;
+  best: boolean; selected: boolean; onSelect: (id: string) => void; index: number;
+}
+LotCard  // <li class="lot-card [lot-card--best] [lot-card--selected] anim-rise" style="--i: index" data-testid="lot-row" data-lot-id>
+         //   <button class="lot-card__button" aria-pressed={selected} aria-label={`${row.lot.n} — ${s.selectCard}`}> … </button>
+interface LotListProps { rows: readonly Ranked[]; lang: Lang; baseDataTs: number; ageMin: number; arrivalTs: number; horizonFromReadingMin: number; bestId: string | null; selectedId: string | null; onSelect: (id: string) => void }
+LotList  // <ol class="lots anim-stagger" data-testid="lot-list">; FLIP on reorder via measureRects/flipMove keyed by row id
+```
+
+Card contents, in order: `ProbabilityRing` (unknown text = `notUpdating` + hours when `notUpdatingHours` is non-null, else `noData`), name (`lang="zh-Hant"`, `data-testid="lot-name"`), sub-line `district · type`, tags (`bestPick` pill when `best`, `ConfidencePill` when `confidenceFor(...)` is non-null), then the facts grid: walk (`Walk` icon; value `${walkMin} ${minutesUnit}`; label `formatDistance`), price (`Price` icon; value/label from `formatPrice` split at the first space — value is the amount, label the unit — or the whole `priceUnknown` string as value), observed spaces (`Spaces` icon, only when `row.lot.f !== undefined && row.lot.f !== null`; value from `spacesNowTemplate`/`spacesNowNoCapacityTemplate` depending on `row.lot.c`, label `spacesNowLabel`; `data-testid="lot-spaces"`), arrival (`Clock` icon, value `formatClock(arrivalTs)`, label `arrivalTile`). The whole card is the `<li>`; the `<button>` wraps the content so the card is one tap target.
+
+- [ ] **Step 1: Failing tests** — `web/tests/lotCard.test.tsx`:
+
+```tsx
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LotCard } from "../src/components/LotCard";
+import { LotList } from "../src/components/LotList";
+import { t } from "../src/i18n";
+import type { Ranked } from "../src/rank";
+import type { Lot } from "../src/types";
+
+const BASE = 1788677280;
+const lot = (over: Partial<Lot> = {}): Lot => ({ i: 0, id: "TPE1", n: "台北101停車場", a: "信義區", y: 25.03, x: 121.56, c: 400, t: "民營停車場", p: { k: "exact", lo: 60, hi: 60 }, f: 38, ...over });
+const row = (over: Partial<Ranked> = {}, lotOver: Partial<Lot> = {}): Ranked => ({
+  lot: lot(lotOver), id: lotOver.id ?? "TPE1", index: 0, probability: 0.86, hourly: 60, perEntry: null, priceKnown: true, meters: 320, walkMin: 4, cost: 100, ...over,
+});
+const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, arrivalTs: BASE + 22 * 60, horizonFromReadingMin: 22, onSelect: vi.fn(), index: 0 };
+
+beforeEach(() => vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} }))));
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+describe("LotCard", () => {
+  it("shows P, walk, price, the observed count with its age, and the arrival time as separate facts", () => {
+    render(<ol><LotCard row={row()} {...props} best selected={false} /></ol>);
+    const card = screen.getByTestId("lot-row");
+    expect(within(card).getByTestId("lot-probability")).toHaveTextContent("86%");
+    expect(within(card).getByTestId("lot-walk")).toHaveTextContent("4 min");
+    expect(within(card).getByTestId("lot-walk")).toHaveTextContent("320 m");
+    expect(within(card).getByTestId("lot-price")).toHaveTextContent("NT$60");
+    expect(within(card).getByTestId("lot-spaces")).toHaveTextContent("38 / 400 free · 4 min ago");
+    expect(within(card).getByTestId("lot-arrival")).toHaveTextContent("15:10");
+    expect(within(card).getByText(t("en").bestPick)).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: /confidence.*high/i })).toBeInTheDocument();
+    expect(card).toHaveClass("lot-card--best");
+    expect(card.textContent).not.toMatch(/cost|NT\$100/);
+  });
+
+  it("omits the count tile without an observation, and shows the count alone without a capacity", () => {
+    const { rerender } = render(<ol><LotCard row={row({}, { f: undefined })} {...props} best={false} selected={false} /></ol>);
+    expect(screen.queryByTestId("lot-spaces")).toBeNull();
+    rerender(<ol><LotCard row={row({}, { f: 7, c: null })} {...props} best={false} selected={false} /></ol>);
+    expect(screen.getByTestId("lot-spaces")).toHaveTextContent("7 free · 4 min ago");
+  });
+
+  it("says no data for a missing forecast, with no confidence and never 0%", () => {
+    render(<ol><LotCard row={row({ probability: null, cost: null })} {...props} best={false} selected={false} /></ol>);
+    expect(screen.getByTestId("lot-probability")).toHaveTextContent(t("en").noData);
+    expect(screen.getByTestId("lot-probability")).not.toHaveTextContent("0%");
+    expect(screen.queryByRole("button", { name: /confidence/i })).toBeNull();
+  });
+
+  it("says a lot is not updating, and for how long", () => {
+    render(<ol><LotCard row={row({ probability: null, cost: null }, { u: BASE - 30 * 3600 })} {...props} best={false} selected={false} /></ol>);
+    expect(screen.getByTestId("lot-probability")).toHaveTextContent(t("en").notUpdating);
+    expect(screen.getByTestId("lot-row")).toHaveTextContent("No change in 30 h");
+  });
+
+  it("shows an unparsed fare as words, a per-entry fare per entry, and a range as a range", () => {
+    const { rerender } = render(<ol><LotCard row={row({ priceKnown: false, hourly: null }, { p: { k: "unknown" } })} {...props} best={false} selected={false} /></ol>);
+    expect(screen.getByTestId("lot-price")).toHaveTextContent(t("en").priceUnknown);
+    expect(screen.getByTestId("lot-price").textContent).not.toMatch(/\d/);
+    rerender(<ol><LotCard row={row({ hourly: null, perEntry: 50 }, { p: { k: "entry", lo: 50, hi: 50 } })} {...props} best={false} selected={false} /></ol>);
+    expect(screen.getByTestId("lot-price")).toHaveTextContent("NT$50");
+    expect(screen.getByTestId("lot-price")).toHaveTextContent(t("en").perEntry);
+    rerender(<ol><LotCard row={row({ hourly: 30 }, { p: { k: "range", lo: 20, hi: 40 } })} {...props} best={false} selected={false} /></ol>);
+    expect(screen.getByTestId("lot-price")).toHaveTextContent("NT$20–40");
+  });
+
+  it("keeps the name Chinese under English and selects on tap", () => {
+    const onSelect = vi.fn();
+    render(<ol><LotCard row={row()} {...props} onSelect={onSelect} best={false} selected /></ol>);
+    expect(screen.getByTestId("lot-name")).toHaveTextContent("台北101停車場");
+    expect(screen.getByTestId("lot-name")).toHaveAttribute("lang", "zh-Hant");
+    fireEvent.click(screen.getByRole("button", { name: /台北101停車場/ }));
+    expect(onSelect).toHaveBeenCalledWith("TPE1");
+    expect(screen.getByTestId("lot-row")).toHaveClass("lot-card--selected");
+  });
+});
+
+describe("LotList", () => {
+  it("is an ordered list keyed by lot, with exactly one best pick", () => {
+    const rows = [row(), row({ id: "TPE2", probability: 0.5 }, { id: "TPE2", n: "二號停車場" })];
+    render(<LotList rows={rows} {...props} bestId="TPE1" selectedId={null} />);
+    const list = screen.getByTestId("lot-list");
+    expect(list.tagName).toBe("OL");
+    expect(within(list).getAllByTestId("lot-row").length).toBe(2);
+    expect(within(list).getAllByText(t("en").bestPick).length).toBe(1);
+  });
+});
+```
+
+- [ ] **Step 2: Run** `npm test --prefix web -- lotCard` → fails to import.
+
+- [ ] **Step 3: Implement.** `LotCard.tsx`:
+
+```tsx
+import { confidenceFor } from "../confidence";
+import { formatClock } from "../arrival";
+import { formatDistance, formatPrice, notUpdatingHours } from "../format";
+import { Clock, Price, Spaces, Walk } from "../icons";
+import { districtName, fillTemplate, lotTypeName, t, type Lang } from "../i18n";
+import type { Ranked } from "../rank";
+import { ConfidencePill } from "./ConfidencePill";
+import { ProbabilityRing } from "./ProbabilityRing";
+
+export interface LotCardProps {
+  row: Ranked; lang: Lang; baseDataTs: number; ageMin: number; arrivalTs: number; horizonFromReadingMin: number;
+  best: boolean; selected: boolean; onSelect: (id: string) => void; index: number;
+}
+
+/** "NT$60 per hour" -> ["NT$60", "per hour"]; a wordy price stays whole. */
+function splitPrice(text: string): [string, string] {
+  const at = text.indexOf(" ");
+  if (at < 0 || !/\d/.test(text)) return [text, ""];
+  return [text.slice(0, at), text.slice(at + 1)];
+}
+
+export function LotCard({ row, lang, baseDataTs, ageMin, arrivalTs, horizonFromReadingMin, best, selected, onSelect, index }: LotCardProps) {
+  const s = t(lang);
+  const stalled = notUpdatingHours(row, baseDataTs);
+  const unknownText = stalled === null ? s.noData : s.notUpdating;
+  const level = confidenceFor(horizonFromReadingMin, row.lot.u === undefined, row.probability);
+  const [priceValue, priceLabel] = splitPrice(formatPrice(row, s));
+  const f = row.lot.f;
+  const spaces = typeof f === "number"
+    ? fillTemplate(row.lot.c === null ? s.spacesNowNoCapacityTemplate : s.spacesNowTemplate, { f, c: row.lot.c ?? "", n: ageMin })
+    : null;
+  const className = ["lot-card", best ? "lot-card--best" : "", selected ? "lot-card--selected" : "", "anim-rise"].filter(Boolean).join(" ");
+  return (
+    <li className={className} style={{ ["--i" as string]: index }} data-testid="lot-row" data-lot-id={row.id}>
+      <button type="button" className="lot-card__button" aria-pressed={selected} aria-label={`${row.lot.n} — ${s.selectCard}`} onClick={() => onSelect(row.id)}>
+        <div className="lot-card__head">
+          <ProbabilityRing probability={row.probability} unknownText={unknownText} label={s.spaceLabel} best={best} />
+          <div className="lot-card__ident">
+            <h3 className="lot-card__name" data-testid="lot-name" lang="zh-Hant">{row.lot.n}</h3>
+            <p className="lot-card__sub">
+              {districtName(row.lot.a, lang)} · {lotTypeName(row.lot.t, lang)}
+              {stalled !== null && <> · {fillTemplate(s.unchangedForTemplate, { n: stalled })}</>}
+            </p>
+            {(best || level !== null) && (
+              <div className="lot-card__tags">
+                {best && <span className="pill pill--best anim-shine">★ {s.bestPick}</span>}
+                {level !== null && <ConfidencePill level={level} lang={lang} />}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="facts">
+          <div className="fact" data-testid="lot-walk">
+            <Walk className="fact__icon" /><span><b className="fact__value">{row.walkMin} {s.minutesUnit}</b><span className="fact__label">{s.walkTile} · {formatDistance(row.meters, s)}</span></span>
+          </div>
+          <div className="fact" data-testid="lot-price">
+            <Price className="fact__icon" /><span><b className="fact__value">{priceValue}</b><span className="fact__label">{priceLabel}</span></span>
+          </div>
+          {spaces !== null && (
+            <div className="fact" data-testid="lot-spaces">
+              <Spaces className="fact__icon" /><span><b className="fact__value">{spaces}</b><span className="fact__label">{s.spacesNowLabel}</span></span>
+            </div>
+          )}
+          <div className="fact" data-testid="lot-arrival">
+            <Clock className="fact__icon fact__icon--info" /><span><b className="fact__value">{formatClock(arrivalTs)}</b><span className="fact__label">{s.arrivalTile}</span></span>
+          </div>
+        </div>
+      </button>
+    </li>
+  );
+}
+```
+
+`LotList.tsx`:
+
+```tsx
+import { useLayoutEffect, useRef } from "react";
+import type { Lang } from "../i18n";
+import { DURATION, flipMove, measureRects } from "../motion";
+import type { Ranked } from "../rank";
+import { LotCard } from "./LotCard";
+
+export interface LotListProps {
+  rows: readonly Ranked[]; lang: Lang; baseDataTs: number; ageMin: number; arrivalTs: number; horizonFromReadingMin: number;
+  bestId: string | null; selectedId: string | null; onSelect: (id: string) => void;
+}
+
+export function LotList({ rows, lang, baseDataTs, ageMin, arrivalTs, horizonFromReadingMin, bestId, selectedId, onSelect }: LotListProps) {
+  const listRef = useRef<HTMLOListElement>(null);
+  const previous = useRef<Map<string, DOMRect>>(new Map());
+
+  // FLIP: measure before React commits the new order (the ref holds last commit's rects), play after.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (list === null) return;
+    const items = [...list.querySelectorAll<HTMLElement>("[data-lot-id]")].map((el): [string, HTMLElement] => [el.dataset["lotId"] ?? "", el]);
+    for (const [id, el] of items) flipMove(el, previous.current.get(id), DURATION.base);
+    previous.current = measureRects(items);
+  });
+
+  return (
+    <ol className="lots anim-stagger" data-testid="lot-list" ref={listRef}>
+      {rows.map((row, index) => (
+        <LotCard key={row.id} row={row} lang={lang} baseDataTs={baseDataTs} ageMin={ageMin} arrivalTs={arrivalTs}
+          horizonFromReadingMin={horizonFromReadingMin} best={row.id === bestId} selected={row.id === selectedId} onSelect={onSelect} index={Math.min(index, 7)} />
+      ))}
+    </ol>
+  );
+}
+```
+
+Delete `LotRow.tsx`. `App.tsx` still imports `LotList` with the old props at this point and will not typecheck until Task 18 — **that is expected; run only the new test file and `npm run lint` in this task**, and record in the report that typecheck is deferred to Task 18. (Ruling: the app is rewired once, in Task 18, rather than patched three times.)
+
+- [ ] **Step 4: Verify** — `npm test --prefix web -- lotCard smallComponents && npm run lint --prefix web`.
+- [ ] **Step 5: Checkpoint** — `git add web/src/components/LotCard.tsx web/src/components/LotList.tsx web/src/i18n.ts web/tests/lotCard.test.tsx && git rm -q web/src/components/LotRow.tsx`. Commit only if authorised: `feat(web): the parking card and FLIP list`.
+
+### Task 14: The arrival strip (§5.3, §9 #10)
+
+**Files:**
+- Create: `web/src/components/ArrivalStrip.tsx`
+- Delete: `web/src/components/Scrubber.tsx`, `web/tests/scrubber.test.tsx`
+- Modify: `web/src/i18n.ts` — add `arrivalLabel` ("Arrive at" / "抵達"), `inMinutesTemplate` ("in {n} min" / "{n} 分鐘後"), `noForecastBeyond` ("no forecast beyond this yet" / "之後尚無預測"), `arrivalGroupLabel` ("Arrival time" / "抵達時間")
+- Test: `web/tests/arrivalStrip.test.tsx`
+
+**Interfaces (Produces):**
+```tsx
+interface ArrivalStripProps { options: readonly number[]; value: number; nowSec: number; onChange: (arrivalTs: number) => void; expired: boolean; lang: Lang }
+// <div class="arrival"> readout (<span class="arrival__time" data-testid="arrival-time">18:35</span>, relative text) + <div role="radiogroup" aria-label class="arrival__strip"> of <button role="radio" aria-checked class="chip" data-ts>; arrow keys move the selection; a pointer drag across the strip sweeps it; when `expired` or options is empty the strip renders the tail text only.
+```
+
+- [ ] **Step 1: Failing tests** — `web/tests/arrivalStrip.test.tsx`:
+
+```tsx
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { formatClock } from "../src/arrival";
+import { ArrivalStrip } from "../src/components/ArrivalStrip";
+import { t } from "../src/i18n";
+
+const BASE = 1788677280;               // 14:48 Taipei
+const NOW = BASE + 240;                 // 14:52
+const options = [BASE + 720, BASE + 1020, BASE + 1320, BASE + 1620]; // 15:00 15:05 15:10 15:15
+
+afterEach(cleanup);
+
+describe("ArrivalStrip", () => {
+  it("offers each option as a clock-time radio and shows the selection with its lead time", () => {
+    render(<ArrivalStrip options={options} value={BASE + 1320} nowSec={NOW} onChange={() => {}} expired={false} lang="en" />);
+    const radios = screen.getAllByRole("radio");
+    expect(radios.map((r) => r.textContent)).toEqual(["15:00", "15:05", "15:10", "15:15"]);
+    expect(screen.getByRole("radio", { name: "15:10" })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("arrival-time")).toHaveTextContent("15:10");
+    expect(screen.getByText("in 18 min")).toBeInTheDocument();
+    expect(screen.getByRole("radiogroup")).toHaveAccessibleName(t("en").arrivalGroupLabel);
+  });
+
+  it("reports the chosen unix time on click and on arrow keys", () => {
+    const onChange = vi.fn();
+    render(<ArrivalStrip options={options} value={BASE + 1020} nowSec={NOW} onChange={onChange} expired={false} lang="en" />);
+    fireEvent.click(screen.getByRole("radio", { name: "15:15" }));
+    expect(onChange).toHaveBeenLastCalledWith(BASE + 1620);
+    fireEvent.keyDown(screen.getByRole("radio", { name: "15:05" }), { key: "ArrowRight" });
+    expect(onChange).toHaveBeenLastCalledWith(BASE + 1320);
+    fireEvent.keyDown(screen.getByRole("radio", { name: "15:05" }), { key: "ArrowLeft" });
+    expect(onChange).toHaveBeenLastCalledWith(BASE + 720);
+  });
+
+  it("ends with the honest tail and renders no chips once the forecast has expired", () => {
+    const { rerender } = render(<ArrivalStrip options={options} value={options[0]!} nowSec={NOW} onChange={() => {}} expired={false} lang="zh" />);
+    expect(screen.getByText(t("zh").noForecastBeyond)).toBeInTheDocument();
+    rerender(<ArrivalStrip options={options} value={options[0]!} nowSec={NOW} onChange={() => {}} expired lang="zh" />);
+    expect(screen.queryAllByRole("radio")).toEqual([]);
+    expect(screen.getByText(t("zh").noForecastBeyond)).toBeInTheDocument();
+  });
+
+  it("formats the selected time exactly as the card will", () => {
+    render(<ArrivalStrip options={options} value={BASE + 1620} nowSec={NOW} onChange={() => {}} expired={false} lang="en" />);
+    expect(screen.getByTestId("arrival-time")).toHaveTextContent(formatClock(BASE + 1620));
+  });
+});
+```
+
+- [ ] **Step 2: Run** `npm test --prefix web -- arrivalStrip` → fails to import.
+
+- [ ] **Step 3: Implement** — `ArrivalStrip.tsx`:
+
+```tsx
+import { useEffect, useId, useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { formatClock, relativeMinutes } from "../arrival";
+import { fillTemplate, t, type Lang } from "../i18n";
+
+export interface ArrivalStripProps {
+  options: readonly number[]; value: number; nowSec: number; onChange: (arrivalTs: number) => void; expired: boolean; lang: Lang;
+}
+
+export function ArrivalStrip({ options, value, nowSec, onChange, expired, lang }: ArrivalStripProps) {
+  const s = t(lang);
+  const groupId = useId();
+  const stripRef = useRef<HTMLDivElement>(null);
+  const sweeping = useRef(false);
+  const show = !expired && options.length > 0;
+
+  // Keep the selected chip in view when the selection moves (arrow keys, a refresh).
+  useEffect(() => {
+    stripRef.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.scrollIntoView?.({ block: "nearest", inline: "center" });
+  }, [value]);
+
+  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const delta = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 0;
+    if (delta === 0) return;
+    event.preventDefault();
+    const next = options[Math.min(options.length - 1, Math.max(0, index + delta))];
+    if (next !== undefined) onChange(next);
+  }
+
+  // A sweep: press anywhere on the strip and drag; the chip under the pointer becomes the selection.
+  function chipUnder(event: PointerEvent<HTMLDivElement>): number | undefined {
+    const el = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-ts]");
+    return el ? Number(el.dataset["ts"]) : undefined;
+  }
+  function onPointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    sweeping.current = true;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+  function onPointerMove(event: PointerEvent<HTMLDivElement>) {
+    if (!sweeping.current) return;
+    const ts = chipUnder(event);
+    if (ts !== undefined && ts !== value) onChange(ts);
+  }
+  function onPointerUp() { sweeping.current = false; }
+
+  return (
+    <div className="arrival">
+      <div className="arrival__readout">
+        <span className="arrival__label">{s.arrivalLabel}</span>
+        <span className="arrival__time num" data-testid="arrival-time">{show ? formatClock(value) : "—"}</span>
+        {show && <span className="arrival__relative">{fillTemplate(s.inMinutesTemplate, { n: relativeMinutes(value, nowSec) })}</span>}
+      </div>
+      <div className="arrival__strip" role="radiogroup" aria-label={s.arrivalGroupLabel} id={groupId} ref={stripRef}
+        onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
+        {show && options.map((ts, index) => (
+          <button key={ts} type="button" role="radio" aria-checked={ts === value} className="chip" data-ts={ts}
+            tabIndex={ts === value ? 0 : -1} onClick={() => onChange(ts)} onKeyDown={(e) => onKeyDown(e, index)}>
+            {formatClock(ts)}
+          </button>
+        ))}
+        <span className="arrival__tail">{s.noForecastBeyond}</span>
+      </div>
+    </div>
+  );
+}
+```
+
+(The "digits roll" animation of §9 #10 is the `.chip` highlight transition plus `--dur-base` on the readout; an odometer is optional polish and may be added in Task 19 if time allows — record either way.)
+
+- [ ] **Step 4: Verify** — `npm test --prefix web -- arrivalStrip && npm run lint --prefix web`.
+- [ ] **Step 5: Checkpoint** — `git add web/src/components/ArrivalStrip.tsx web/src/i18n.ts web/tests/arrivalStrip.test.tsx && git rm -q web/src/components/Scrubber.tsx web/tests/scrubber.test.tsx`. Commit only if authorised: `feat(web): clock-time arrival strip`.
+
+### Task 15: Place search component (§5.2, §9 #11)
+
+**Files:**
+- Create: `web/src/components/PlaceSearch.tsx`
+- Delete: `web/src/components/DestinationSearch.tsx`, `web/src/search.ts`, `web/tests/search.test.ts`
+- Modify: `web/src/i18n.ts` — replace `searchLabel` ("Where are you going?" / "要去哪裡？"), `searchPlaceholder` ("e.g. 台北101, 忠孝東路四段216巷, 西門町" / "例如：台北101、忠孝東路四段216巷、西門町"), `searchHint` ("Finds car parks, landmarks, MRT stations, streets down to the lane, and neighbourhoods — not house numbers." / "可搜尋停車場、地標、捷運站、路名與巷弄、以及地區，但不含門牌號碼。"), `searchResultsLabel` ("Matching places" / "符合的地點"), `searchResultsTemplate` ("{n} matching places" / "{n} 個符合的地點"), `searchNoMatch` ("Nothing matches that. Try a landmark, a street, or tap the map." / "沒有符合的地點。可改試地標、路名，或直接點選地圖。"); add `loadingPlaces` ("loading places…" / "載入地點中…"), `recentSearches` ("Recent" / "最近搜尋"), `clearRecent` ("Clear" / "清除"), `groupCarParks` ("Car parks" / "停車場"), `groupStations` ("Stations" / "捷運與車站"), `groupLandmarks` ("Landmarks" / "地標"), `groupStreets` ("Streets & lanes" / "路名與巷弄"), `groupAreas` ("Areas" / "地區"), `clearSearch` ("Clear search" / "清除搜尋")
+- Test: `web/tests/placeSearch.test.tsx`
+
+**Interfaces (Produces):**
+```tsx
+interface PlaceSearchProps { lots: readonly Lot[]; indexUrl: string; onSelect: (place: Place) => void; lang: Lang; storage?: Storage | null /* defaults to window.localStorage, guarded */ }
+// ARIA combobox as DestinationSearch had it (role="combobox", aria-expanded, aria-controls, aria-activedescendant, listbox/option, Escape, arrows, Enter, blur-outside dismiss, onMouseDown preventDefault on options).
+// Results grouped: <li role="presentation" class="search__group"> heading before each kind's first option; option shows the kind icon, name, qualifier.
+// Focus with an empty box shows recent searches (heading `recentSearches`, a `clearRecent` button) when any exist.
+// On first focus calls loadPlaceIndex(indexUrl); while pending and the query is non-empty, a `loadingPlaces` line is shown under the results. Index rows are merged with lotsAsPlaces(lots).
+// Choosing: setQuery(place.name), dismiss, pushRecent, onSelect(place). data-testid="search-results", options data-testid="search-option" with data-kind and, for car parks, data-lot-id.
+```
+
+- [ ] **Step 1: Failing tests** — `web/tests/placeSearch.test.tsx`:
+
+```tsx
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PlaceSearch } from "../src/components/PlaceSearch";
+import { t } from "../src/i18n";
+import { resetPlaceIndexCache } from "../src/places";
+import type { Lot } from "../src/types";
+
+const lot = (id: string, n: string, a = "信義區"): Lot => ({ i: 0, id, n, a, y: 25.03, x: 121.56, c: 10, t: "民營停車場", p: { k: "unknown" } });
+const LOTS = [lot("TPE1", "台北101停車場"), lot("TPE2", "臺北車站停車場", "中正區")];
+const INDEX = { v: 1, built: 1, source: "x", rows: [["台北101", "Taipei 101", "attraction", 25.0339, 121.5645, "信義"], ["忠孝東路四段216巷", "", "minor_road", 25.04, 121.55, "大安"], ["西門町", "", "locality", 25.04, 121.5, ""]] };
+
+function storage(): Storage {
+  const m = new Map<string, string>();
+  return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => void m.set(k, v), removeItem: (k) => void m.delete(k), clear: () => m.clear(), key: () => null, length: 0 } as Storage;
+}
+
+beforeEach(() => {
+  resetPlaceIndexCache();
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(INDEX))));
+});
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+describe("PlaceSearch", () => {
+  it("finds car parks at once and landmarks, streets and areas once the index has loaded, grouped", async () => {
+    const onSelect = vi.fn();
+    render(<PlaceSearch lots={LOTS} indexUrl="/places/taipei.json" onSelect={onSelect} lang="en" storage={storage()} />);
+    const box = screen.getByRole("combobox", { name: t("en").searchLabel });
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: "台北" } });
+    expect(screen.getByText("台北101停車場")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("台北101")).toBeInTheDocument());
+    const list = screen.getByTestId("search-results");
+    const headings = within(list).getAllByRole("presentation").map((h) => h.textContent);
+    expect(headings).toEqual([t("en").groupCarParks, t("en").groupLandmarks]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects a street with the keyboard and remembers it", async () => {
+    const onSelect = vi.fn();
+    const store = storage();
+    render(<PlaceSearch lots={LOTS} indexUrl="/places/taipei.json" onSelect={onSelect} lang="en" storage={store} />);
+    const box = screen.getByRole("combobox");
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: "忠孝東路" } });
+    await screen.findByText("忠孝東路四段216巷");
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ name: "忠孝東路四段216巷", kind: "street", qualifier: "大安" }));
+    expect((box as HTMLInputElement).value).toBe("忠孝東路四段216巷");
+    expect(screen.getByTestId("search-results")).not.toBeVisible();
+    fireEvent.change(box, { target: { value: "" } });
+    fireEvent.focus(box);
+    expect(screen.getByText(t("en").recentSearches)).toBeInTheDocument();
+    expect(screen.getByText("忠孝東路四段216巷")).toBeInTheDocument();
+  });
+
+  it("still searches the roster when the index cannot be loaded, and says nothing matched otherwise", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 503 })));
+    render(<PlaceSearch lots={LOTS} indexUrl="/places/taipei.json" onSelect={() => {}} lang="en" storage={storage()} />);
+    const box = screen.getByRole("combobox");
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: "臺北車站" } });
+    expect(screen.getByText("臺北車站停車場")).toBeInTheDocument();
+    fireEvent.change(box, { target: { value: "月球" } });
+    await waitFor(() => expect(screen.getByTestId("search-no-match")).toBeInTheDocument());
+  });
+
+  it("hands a chosen car park back with its lot id", () => {
+    const onSelect = vi.fn();
+    render(<PlaceSearch lots={LOTS} indexUrl="/places/taipei.json" onSelect={onSelect} lang="zh" storage={storage()} />);
+    const box = screen.getByRole("combobox");
+    fireEvent.change(box, { target: { value: "101" } });
+    fireEvent.click(screen.getByText("台北101停車場"));
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ kind: "carpark", lotId: "TPE1" }));
+  });
+});
+```
+
+- [ ] **Step 2: Run** `npm test --prefix web -- placeSearch` → fails to import.
+
+- [ ] **Step 3: Implement** — `PlaceSearch.tsx`:
+
+```tsx
+import { useEffect, useId, useMemo, useState, type KeyboardEvent } from "react";
+import { Area, CarPark, Cross, Landmark, Search, Station, Street } from "../icons";
+import { fillTemplate, t, type Lang } from "../i18n";
+import { clearRecent, loadPlaceIndex, lotsAsPlaces, pushRecent, readRecent, searchPlaces, type Place, type PlaceKind } from "../places";
+import type { Lot } from "../types";
+
+export interface PlaceSearchProps { lots: readonly Lot[]; indexUrl: string; onSelect: (place: Place) => void; lang: Lang; storage?: Storage | null }
+
+const ICONS: Record<PlaceKind, (p: { className?: string }) => JSX.Element> = { carpark: CarPark, station: Station, landmark: Landmark, street: Street, area: Area };
+
+function defaultStorage(): Storage | null {
+  try { return typeof window === "undefined" ? null : window.localStorage; } catch { return null; }
+}
+
+export function PlaceSearch({ lots, indexUrl, onSelect, lang, storage }: PlaceSearchProps) {
+  const s = t(lang);
+  const id = useId();
+  const listId = `${id}-results`;
+  const hintId = `${id}-hint`;
+  const optionId = (i: number) => `${id}-option-${i}`;
+  const store = storage === undefined ? defaultStorage() : storage;
+
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const [dismissed, setDismissed] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [index, setIndex] = useState<Place[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [recent, setRecent] = useState<Place[]>(() => readRecent(store));
+
+  const roster = useMemo(() => lotsAsPlaces(lots), [lots]);
+  const all = useMemo(() => (index ? [...roster, ...index] : roster), [roster, index]);
+  const groupName: Record<PlaceKind, string> = { carpark: s.groupCarParks, station: s.groupStations, landmark: s.groupLandmarks, street: s.groupStreets, area: s.groupAreas };
+
+  // The index is fetched on the first focus, never at page load.
+  useEffect(() => {
+    if (!focused || index !== null || loading) return;
+    setLoading(true);
+    let cancelled = false;
+    loadPlaceIndex(indexUrl).then((rows) => { if (!cancelled) { setIndex(rows); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, [focused, index, loading, indexUrl]);
+
+  const hasQuery = query.trim() !== "";
+  const results = useMemo(() => searchPlaces(all, query), [all, query]);
+  const showRecent = focused && !hasQuery && !dismissed && recent.length > 0;
+  const options = showRecent ? recent : results;
+  const open = !dismissed && (showRecent || (hasQuery && results.length > 0));
+  const noMatch = hasQuery && !dismissed && results.length === 0 && !loading;
+
+  useEffect(() => {
+    if (!open) return;
+    document.getElementById(optionId(active))?.scrollIntoView?.({ block: "nearest" });
+  }, [active, open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function choose(place: Place) {
+    setQuery(place.name);
+    setDismissed(true);
+    setRecent(pushRecent(store, place));
+    onSelect(place);
+  }
+
+  function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Escape") { event.preventDefault(); setDismissed(true); return; }
+    if (!open) {
+      if (event.key === "ArrowDown" && options.length > 0) { event.preventDefault(); setDismissed(false); }
+      return;
+    }
+    if (event.key === "ArrowDown") { event.preventDefault(); setActive((i) => (i + 1) % options.length); }
+    else if (event.key === "ArrowUp") { event.preventDefault(); setActive((i) => (i + options.length - 1) % options.length); }
+    else if (event.key === "Enter") { event.preventDefault(); const chosen = options[active]; if (chosen) choose(chosen); }
+  }
+
+  let lastKind: PlaceKind | null = null;
+  return (
+    <div className="search" onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) { setDismissed(true); setFocused(false); } }}>
+      <label className="visually-hidden" htmlFor={id}>{s.searchLabel}</label>
+      <div className="search__field">
+        <Search className="search__icon" />
+        <input id={id} type="search" role="combobox" className="search__input glass" value={query} placeholder={s.searchPlaceholder} autoComplete="off"
+          aria-expanded={open} aria-controls={listId} aria-autocomplete="list" aria-describedby={hintId} aria-activedescendant={open ? optionId(active) : undefined}
+          onFocus={() => { setFocused(true); setDismissed(false); }}
+          onChange={(e) => { setQuery(e.target.value); setActive(0); setDismissed(false); }}
+          onKeyDown={onKeyDown} />
+        {query !== "" && (
+          <button type="button" className="search__clear" aria-label={s.clearSearch} onMouseDown={(e) => e.preventDefault()} onClick={() => { setQuery(""); setDismissed(false); }}>
+            <Cross />
+          </button>
+        )}
+        <ul id={listId} role="listbox" aria-label={showRecent ? s.recentSearches : s.searchResultsLabel} className="search__results glass anim-pop" hidden={!open} data-testid="search-results">
+          {open && showRecent && (
+            <li role="presentation" className="search__group">
+              {s.recentSearches}
+              <button type="button" className="search__recent-clear" onMouseDown={(e) => e.preventDefault()} onClick={() => { clearRecent(store); setRecent([]); }}>{s.clearRecent}</button>
+            </li>
+          )}
+          {open && options.map((place, i) => {
+            const Icon = ICONS[place.kind];
+            const heading = !showRecent && place.kind !== lastKind ? <li key={`g-${place.kind}`} role="presentation" className="search__group">{groupName[place.kind]}</li> : null;
+            lastKind = place.kind;
+            return (
+              <>
+                {heading}
+                <li key={`${place.kind}-${place.name}-${place.lat}-${place.lon}`} id={optionId(i)} role="option" aria-selected={i === active} className="search__option"
+                  data-testid="search-option" data-kind={place.kind} data-lot-id={place.lotId}
+                  onMouseDown={(e) => e.preventDefault()} onMouseEnter={() => setActive(i)} onClick={() => choose(place)}>
+                  <span className="search__option-icon"><Icon /></span>
+                  <span>
+                    <span className="search__option-name" lang="zh-Hant">{place.name}</span>
+                    {(place.qualifier || place.en) && <span className="search__option-where"> · {place.qualifier || place.en}</span>}
+                  </span>
+                </li>
+              </>
+            );
+          })}
+        </ul>
+      </div>
+      <p className="search__hint" id={hintId}>{s.searchHint}</p>
+      {loading && hasQuery && <p className="search__hint" role="status">{s.loadingPlaces}</p>}
+      {noMatch && <p className="search__empty" role="status" data-testid="search-no-match">{s.searchNoMatch}</p>}
+      {open && !showRecent && <p className="visually-hidden" role="status">{fillTemplate(s.searchResultsTemplate, { n: results.length })}</p>}
+    </div>
+  );
+}
+```
+
+(Use `Fragment` with a key instead of the bare `<>` inside the map if the linter objects to keyless fragments: `<Fragment key={…}>`.) The `JSX.Element` type: import `type { JSX } from "react"` if not global under this TS config.
+
+- [ ] **Step 4: Verify** — `npm test --prefix web -- placeSearch places && npm run lint --prefix web`.
+- [ ] **Step 5: Checkpoint** — `git add web/src/components/PlaceSearch.tsx web/src/i18n.ts web/tests/placeSearch.test.tsx && git rm -q web/src/components/DestinationSearch.tsx web/src/search.ts web/tests/search.test.ts`. Commit only if authorised: `feat(web): place search with grouped results and recents`.
+
+### Task 16: Shell, bottom sheet, side panel, top bar, locate and language buttons, geolocation hook (§3, §5.1, §9 #1, #9, #15)
+
+**Files:**
+- Create: `web/src/layout/BottomSheet.tsx`, `web/src/layout/SidePanel.tsx`, `web/src/layout/Shell.tsx`, `web/src/components/TopBar.tsx`, `web/src/components/LocateButton.tsx`, `web/src/useGeolocation.ts`
+- Rewrite: `web/src/components/LangToggle.tsx`
+- Modify: `web/src/i18n.ts` — add `expandList` ("Expand the list" / "展開清單"), `collapseList` ("Collapse the list" / "收合清單")
+- Test: `web/tests/bottomSheet.test.tsx`, `web/tests/useGeolocation.test.tsx`
+
+**Interfaces (Produces):**
+```tsx
+// useGeolocation.ts
+type GeoState = "idle" | "locating" | "ready" | "unavailable";
+export const GEO_TIMEOUT_MS = 10_000; export const GEO_WATCHDOG_MS = 12_000;
+export function useGeolocation(onFix: (at: LatLon) => void): { geo: GeoState; request: () => void; abandon: () => void; clearFailure: () => void }
+  // the exact state machine App.tsx has today (requestLocation + abandonGeoRef + watchdog), extracted; `abandon` settles a pending request to "idle"; `clearFailure` turns "unavailable" into "idle".
+
+// BottomSheet.tsx
+interface BottomSheetProps { snap: Snap; onSnapChange: (snap: Snap) => void; topBarHeight?: number; header: ReactNode; children: ReactNode; lang: Lang }
+  // <section class="sheet glass [sheet--full] [sheet--dragging] [sheet--settling]" style={{height}} data-testid="sheet" data-snap={snap}>
+  //   <button class="sheet__grip" aria-label={expandList|collapseList} aria-expanded={snap === "full"} onClick → stepSnap peek↔full />
+  //   <div class="sheet__header">{header}</div><div class="sheet__body">{children}</div>
+  // Pointer drag on grip/header: track dy and velocity (last 80 ms), set height live (class sheet--dragging), on release settleSnap(...). Heights from snapHeights(window.innerHeight, topBarHeight), recomputed on resize. When snap !== "full" the body is not scrollable; a downward drag starting on the body at scrollTop 0 while full collapses (settleSnap from the drag).
+
+// SidePanel.tsx: <aside class="panel glass"><div class="panel__header">{header}</div><div class="panel__body">{children}</div></aside>
+
+// Shell.tsx
+interface ShellProps { map: ReactNode; topBar: ReactNode /* phone only */; floatControls: ReactNode /* desktop only */; header: ReactNode; children: ReactNode; snap: Snap; onSnapChange: (s: Snap) => void; lang: Lang; overlay?: ReactNode /* e.g. the map hint */ }
+export function Shell(props): JSX.Element   // <div class="app-shell"><div class="map-stage">{map}</div>{overlay}{isDesktop ? <>{floatControls}<SidePanel …/></> : <>{topBar}<BottomSheet …/></>}</div>
+export function useIsDesktop(): boolean     // useMediaQuery(DESKTOP_QUERY)
+
+// TopBar.tsx: <div class="topbar"><div class="topbar__search">{search}</div>{locate}{lang}</div>
+// LocateButton.tsx: <button class="round-btn glass [round-btn--locating]" aria-busy disabled={locating} aria-label={useMyLocation|locating|locationUnavailable}><Locate/></button>
+// LangToggle.tsx: <button class="round-btn glass lang-btn" aria-label …><Globe/><span>{other === "zh" ? "中" : "EN"}</span></button>  (same semantics as today: shows the other language)
+```
+
+- [ ] **Step 1: Failing tests** — `web/tests/bottomSheet.test.tsx`:
+
+```tsx
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { BottomSheet } from "../src/layout/BottomSheet";
+import { t } from "../src/i18n";
+
+afterEach(cleanup);
+
+describe("BottomSheet", () => {
+  it("exposes a real button that expands and collapses it", () => {
+    const onSnapChange = vi.fn();
+    render(<BottomSheet snap="peek" onSnapChange={onSnapChange} header={<b>h</b>} lang="en">body</BottomSheet>);
+    const grip = screen.getByRole("button", { name: t("en").expandList });
+    expect(grip).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(grip);
+    expect(onSnapChange).toHaveBeenCalledWith("full");
+  });
+
+  it("marks the full state so the body can scroll, and settles a drag to the nearest point", () => {
+    const onSnapChange = vi.fn();
+    Object.defineProperty(window, "innerHeight", { value: 800, configurable: true });
+    const { rerender } = render(<BottomSheet snap="full" onSnapChange={onSnapChange} header={<b>h</b>} lang="en">body</BottomSheet>);
+    expect(screen.getByTestId("sheet")).toHaveClass("sheet--full");
+    rerender(<BottomSheet snap="half" onSnapChange={onSnapChange} header={<b>h</b>} lang="en">body</BottomSheet>);
+    const grip = screen.getByRole("button", { name: t("en").expandList });
+    fireEvent.pointerDown(grip, { clientY: 400, pointerId: 1 });
+    fireEvent.pointerMove(grip, { clientY: 600, pointerId: 1 });   // dragged down 200 px, slowly
+    fireEvent.pointerUp(grip, { clientY: 600, pointerId: 1 });
+    expect(onSnapChange).toHaveBeenLastCalledWith("peek");
+  });
+});
+```
+
+`web/tests/useGeolocation.test.tsx`:
+
+```tsx
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { GEO_WATCHDOG_MS, useGeolocation } from "../src/useGeolocation";
+
+function Probe({ onFix }: { onFix: (at: { lat: number; lon: number }) => void }) {
+  const { geo, request, abandon } = useGeolocation(onFix);
+  return <><p>{geo}</p><button onClick={request}>go</button><button onClick={abandon}>abandon</button></>;
+}
+
+afterEach(() => { cleanup(); vi.useRealTimers(); Reflect.deleteProperty(navigator, "geolocation"); });
+
+describe("useGeolocation", () => {
+  it("reports a fix and lands on ready", () => {
+    Object.defineProperty(navigator, "geolocation", { value: { getCurrentPosition: (ok: (p: unknown) => void) => ok({ coords: { latitude: 25, longitude: 121.5 } }) }, configurable: true });
+    const onFix = vi.fn();
+    render(<Probe onFix={onFix} />);
+    fireEvent.click(screen.getByText("go"));
+    expect(onFix).toHaveBeenCalledWith({ lat: 25, lon: 121.5 });
+    expect(screen.getByText("ready")).toBeInTheDocument();
+  });
+
+  it("is unavailable on denial, without the API, and on a prompt nobody answers", () => {
+    vi.useFakeTimers();
+    Object.defineProperty(navigator, "geolocation", { value: { getCurrentPosition: () => {} }, configurable: true });
+    render(<Probe onFix={() => {}} />);
+    fireEvent.click(screen.getByText("go"));
+    expect(screen.getByText("locating")).toBeInTheDocument();
+    act(() => { vi.advanceTimersByTime(GEO_WATCHDOG_MS + 1); });
+    expect(screen.getByText("unavailable")).toBeInTheDocument();
+  });
+
+  it("can be abandoned by a better answer, and then ignores the late fix", () => {
+    let deliver: ((p: unknown) => void) | null = null;
+    Object.defineProperty(navigator, "geolocation", { value: { getCurrentPosition: (ok: (p: unknown) => void) => { deliver = ok; } }, configurable: true });
+    const onFix = vi.fn();
+    render(<Probe onFix={onFix} />);
+    fireEvent.click(screen.getByText("go"));
+    fireEvent.click(screen.getByText("abandon"));
+    expect(screen.getByText("idle")).toBeInTheDocument();
+    act(() => deliver?.({ coords: { latitude: 1, longitude: 1 } }));
+    expect(onFix).not.toHaveBeenCalled();
+  });
+});
+```
+
+- [ ] **Step 2: Run** `npm test --prefix web -- bottomSheet useGeolocation` → fail to import.
+
+- [ ] **Step 3: Implement.**
+
+`useGeolocation.ts` (behaviour lifted verbatim from `App.tsx` lines 473–525; keep its comments):
+
+```ts
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { LatLon } from "./geo";
+
+export type GeoState = "idle" | "locating" | "ready" | "unavailable";
+export const GEO_TIMEOUT_MS = 10_000;
+export const GEO_WATCHDOG_MS = 12_000;
+
+export function useGeolocation(onFix: (at: LatLon) => void) {
+  const [geo, setGeo] = useState<GeoState>("idle");
+  const watchdog = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abandonRef = useRef<(() => void) | null>(null);
+  const onFixRef = useRef(onFix);
+  useEffect(() => { onFixRef.current = onFix; }, [onFix]);
+  useEffect(() => () => { if (watchdog.current !== null) clearTimeout(watchdog.current); }, []);
+
+  const request = useCallback(() => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) { setGeo("unavailable"); return; }
+    setGeo("locating");
+    let settled = false;
+    const settle = (finish: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (watchdog.current !== null) clearTimeout(watchdog.current);
+      watchdog.current = null;
+      abandonRef.current = null;
+      finish();
+    };
+    watchdog.current = setTimeout(() => settle(() => setGeo("unavailable")), GEO_WATCHDOG_MS);
+    abandonRef.current = () => settle(() => setGeo("idle"));
+    try {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => settle(() => { onFixRef.current({ lat: pos.coords.latitude, lon: pos.coords.longitude }); setGeo("ready"); }),
+        () => settle(() => setGeo("unavailable")),
+        { enableHighAccuracy: true, timeout: GEO_TIMEOUT_MS, maximumAge: 60_000 },
+      );
+    } catch {
+      settle(() => setGeo("unavailable"));
+    }
+  }, []);
+
+  const abandon = useCallback(() => { abandonRef.current?.(); }, []);
+  const clearFailure = useCallback(() => { setGeo((g) => (g === "unavailable" ? "idle" : g)); }, []);
+  return { geo, request, abandon, clearFailure };
+}
+```
+
+`BottomSheet.tsx`:
+
+```tsx
+import { useCallback, useEffect, useRef, useState, type PointerEvent, type ReactNode } from "react";
+import { t, type Lang } from "../i18n";
+import { settleSnap, snapHeights, stepSnap, type Snap, type SnapHeights } from "./sheet";
+
+export interface BottomSheetProps { snap: Snap; onSnapChange: (snap: Snap) => void; topBarHeight?: number; header: ReactNode; children: ReactNode; lang: Lang }
+
+const VELOCITY_WINDOW_MS = 80;
+
+export function BottomSheet({ snap, onSnapChange, topBarHeight = 60, header, children, lang }: BottomSheetProps) {
+  const s = t(lang);
+  const [heights, setHeights] = useState<SnapHeights>(() => snapHeights(typeof window === "undefined" ? 800 : window.innerHeight, topBarHeight));
+  const [dragHeight, setDragHeight] = useState<number | null>(null);
+  const drag = useRef<{ startY: number; startHeight: number; samples: Array<[number, number]> } | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const onResize = () => setHeights(snapHeights(window.innerHeight, topBarHeight));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [topBarHeight]);
+
+  const begin = useCallback((event: PointerEvent<HTMLElement>) => {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    drag.current = { startY: event.clientY, startHeight: heights[snap], samples: [[performance.now(), event.clientY]] };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }, [heights, snap]);
+
+  const move = useCallback((event: PointerEvent<HTMLElement>) => {
+    const d = drag.current;
+    if (d === null) return;
+    const now = performance.now();
+    d.samples.push([now, event.clientY]);
+    while (d.samples.length > 2 && now - d.samples[0]![0] > VELOCITY_WINDOW_MS) d.samples.shift();
+    setDragHeight(Math.min(heights.full, Math.max(heights.peek * 0.6, d.startHeight + (d.startY - event.clientY))));
+  }, [heights]);
+
+  const end = useCallback(() => {
+    const d = drag.current;
+    if (d === null) return;
+    drag.current = null;
+    const [t0, y0] = d.samples[0]!;
+    const [t1, y1] = d.samples[d.samples.length - 1]!;
+    const velocity = t1 > t0 ? (y0 - y1) / (t1 - t0) : 0; // up = sheet growing = positive
+    const height = dragHeight ?? heights[snap];
+    setDragHeight(null);
+    onSnapChange(settleSnap(height, velocity, heights, snap));
+  }, [dragHeight, heights, snap, onSnapChange]);
+
+  // A downward drag at the top of a full, scrolled-to-top list collapses the sheet.
+  const bodyDown = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (snap !== "full" || (bodyRef.current?.scrollTop ?? 0) > 0) return;
+    begin(event);
+  }, [snap, begin]);
+
+  const height = dragHeight ?? heights[snap];
+  const className = ["sheet", "glass", snap === "full" && dragHeight === null ? "sheet--full" : "", dragHeight !== null ? "sheet--dragging" : "sheet--settling"].filter(Boolean).join(" ");
+  const toggle = () => onSnapChange(snap === "full" ? "peek" : stepSnap("half", "up"));
+  return (
+    <section className={className} style={{ height }} data-testid="sheet" data-snap={snap}>
+      <button type="button" className="sheet__grip" aria-expanded={snap === "full"} aria-label={snap === "full" ? s.collapseList : s.expandList}
+        onClick={toggle} onPointerDown={begin} onPointerMove={move} onPointerUp={end} onPointerCancel={end} />
+      <div className="sheet__header" onPointerDown={begin} onPointerMove={move} onPointerUp={end} onPointerCancel={end}>{header}</div>
+      <div className="sheet__body" ref={bodyRef} onPointerDown={bodyDown} onPointerMove={move} onPointerUp={end} onPointerCancel={end}>{children}</div>
+    </section>
+  );
+}
+```
+
+Note for the drag test above: the click handler must not fire after a drag; guard `toggle` with a `moved` flag set in `move` when |dy| > 6 px and cleared in `begin`.
+
+`SidePanel.tsx`, `Shell.tsx`, `TopBar.tsx`, `LocateButton.tsx`, `LangToggle.tsx`:
+
+```tsx
+// SidePanel.tsx
+import type { ReactNode } from "react";
+export function SidePanel({ header, children }: { header: ReactNode; children: ReactNode }) {
+  return <aside className="panel glass" data-testid="panel"><div className="panel__header">{header}</div><div className="panel__body">{children}</div></aside>;
+}
+```
+
+```tsx
+// Shell.tsx
+import type { ReactNode } from "react";
+import type { Lang } from "../i18n";
+import { BottomSheet } from "./BottomSheet";
+import { SidePanel } from "./SidePanel";
+import type { Snap } from "./sheet";
+import { DESKTOP_QUERY, useMediaQuery } from "./useMediaQuery";
+
+export const useIsDesktop = () => useMediaQuery(DESKTOP_QUERY);
+
+export interface ShellProps { map: ReactNode; topBar: ReactNode; floatControls: ReactNode; header: ReactNode; children: ReactNode; snap: Snap; onSnapChange: (s: Snap) => void; lang: Lang; overlay?: ReactNode }
+
+export function Shell({ map, topBar, floatControls, header, children, snap, onSnapChange, lang, overlay }: ShellProps) {
+  const desktop = useIsDesktop();
+  return (
+    <div className="app-shell" data-layout={desktop ? "desktop" : "phone"}>
+      <div className="map-stage">{map}</div>
+      {overlay}
+      {desktop ? (
+        <><div className="float-controls">{floatControls}</div><SidePanel header={header}>{children}</SidePanel></>
+      ) : (
+        <>{topBar}<BottomSheet snap={snap} onSnapChange={onSnapChange} header={header} lang={lang}>{children}</BottomSheet></>
+      )}
+    </div>
+  );
+}
+```
+
+```tsx
+// TopBar.tsx
+import type { ReactNode } from "react";
+export function TopBar({ search, locate, lang }: { search: ReactNode; locate: ReactNode; lang: ReactNode }) {
+  return <div className="topbar"><div className="topbar__search">{search}</div>{locate}{lang}</div>;
+}
+```
+
+```tsx
+// LocateButton.tsx
+import { Locate } from "../icons";
+import { t, type Lang } from "../i18n";
+import type { GeoState } from "../useGeolocation";
+export function LocateButton({ geo, onClick, lang }: { geo: GeoState; onClick: () => void; lang: Lang }) {
+  const s = t(lang);
+  const label = geo === "locating" ? s.locating : geo === "unavailable" ? s.locationUnavailable : s.useMyLocation;
+  return (
+    <button type="button" className={`round-btn glass${geo === "locating" ? " round-btn--locating" : ""}`} onClick={onClick} disabled={geo === "locating"} aria-busy={geo === "locating"} aria-label={label} title={label}>
+      <Locate />
+    </button>
+  );
+}
+```
+
+```tsx
+// LangToggle.tsx
+import { Globe } from "../icons";
+import type { Lang } from "../i18n";
+export function LangToggle({ lang, onChange }: { lang: Lang; onChange: (lang: Lang) => void }) {
+  const other: Lang = lang === "en" ? "zh" : "en";
+  return (
+    <button type="button" className="round-btn glass lang-btn" onClick={() => onChange(other)} aria-label={lang === "en" ? "切換為中文" : "Switch to English"}>
+      <Globe size={16} /><span key={other}>{other === "zh" ? "中" : "EN"}</span>
+    </button>
+  );
+}
+```
+
+- [ ] **Step 4: Verify** — `npm test --prefix web -- bottomSheet useGeolocation && npm run lint --prefix web`.
+- [ ] **Step 5: Checkpoint** — `git add web/src/layout web/src/components/TopBar.tsx web/src/components/LocateButton.tsx web/src/components/LangToggle.tsx web/src/useGeolocation.ts web/src/i18n.ts web/tests/bottomSheet.test.tsx web/tests/useGeolocation.test.tsx`. Commit only if authorised: `feat(web): shell with bottom sheet and side panel`.
+
+### Task 17: The map: selection, popup, transitions, padding (§5.6, §9 #5–8)
+
+**Files:**
+- Modify: `web/src/map/MapView.tsx`, `web/src/map/lotSource.ts`
+- Test: `web/tests/mapSource.test.tsx` (extend), `web/tests/lotSource.test.ts`
+
+**Interfaces (Produces):**
+```tsx
+export interface MapViewProps {
+  lots: readonly MapLot[]; destination: LatLon | null; onPick?: (at: LatLon) => void; lang: Lang;
+  selectedId: string | null; bestId: string | null; onSelectLot?: (id: string) => void;
+  centerRequest: { lat: number; lon: number; nonce: number } | null;   // easeTo when nonce changes
+  padding: { top: number; right: number; bottom: number; left: number };  // map.setPadding on change
+}
+// lotSource: LotProperties gains `selected: boolean` and `best: boolean`; toFeatureCollection(rows, { selectedId, bestId }) sets them.
+// Layers: LOTS_LAYER (circles, colour-transition 300ms) + LOTS_HALO_LAYER ("lots-halo", a circle layer filtered to selected||best, stroke accent, radius +6, opacity .35) + DESTINATION_LAYER.
+// Clicking a lot feature: onSelectLot(id) and a Popup (`<b>name</b>`, `${Math.round(p*100)}%` or noData) at the dot; clicking empty map: onPick. Clicking a card (centerRequest) eases the map there; the best dot's halo pulses via `circle-radius-transition` toggled on an interval only when !prefersReducedMotion().
+```
+
+- [ ] **Step 1: Failing tests.** In `web/tests/lotSource.test.ts` add:
+
+```ts
+it("marks the selected and best lots on their features", () => {
+  const rows = [toMapLot(LOTS[0]!, 0.5), toMapLot(LOTS[1]!, 0.9)];
+  const fc = toFeatureCollection(rows, { selectedId: LOTS[0]!.id, bestId: LOTS[1]!.id });
+  expect(fc.features[0]!.properties.selected).toBe(true);
+  expect(fc.features[0]!.properties.best).toBe(false);
+  expect(fc.features[1]!.properties.best).toBe(true);
+});
+```
+
+(Use that file's own `LOTS`/`toMapLot` fixtures.) In `web/tests/mapSource.test.tsx`, extend `FakeMap` with `setPadding: vi.fn()`, `addLayer` recording specs in a `layerSpecs` map, `getCanvas: () => ({ style: {} })`, `queryRenderedFeatures: () => []`, and add:
+
+```tsx
+it("adds a halo layer for the selected and best lots and applies the padding it is given", async () => {
+  // render <MapView … selectedId="TPE_A" bestId="TPE_C" centerRequest={null} padding={{top:0,right:0,bottom:300,left:0}} />
+  // expect(shared.map.layerSpecs.has("lots-halo")).toBe(true);
+  // expect(shared.map.setPadding).toHaveBeenCalledWith({ top: 0, right: 0, bottom: 300, left: 0 });
+  // const data = shared.map.getSource("lots").data; expect(data.features.find(f => f.id === "TPE_A").properties.selected).toBe(true);
+});
+
+it("eases to a centre request and selects the tapped lot", async () => {
+  // rerender with centerRequest={{lat: 25.03, lon: 121.56, nonce: 1}} → expect(easeTo).toHaveBeenCalledWith(expect.objectContaining({ center: [121.56, 25.03] }))
+  // simulate the registered "click" handler on LOTS_LAYER with { features: [{ properties: { id: "TPE_C" } }], lngLat: {...} } → onSelectLot called with "TPE_C"
+});
+```
+
+Write those two with the file's fixture conventions (the `on` fake must record handlers by event name and layer so the test can invoke them).
+
+- [ ] **Step 2: Run** `npm test --prefix web -- lotSource mapSource` → fails.
+
+- [ ] **Step 3: Implement.** `lotSource.ts`: add `selected`/`best` to `LotProperties`; `toFeatureCollection(rows, marks: { selectedId?: string | null; bestId?: string | null } = {})` sets `selected: row.id === marks.selectedId`, `best: row.id === marks.bestId`.
+
+`MapView.tsx` changes (keep the module's current comments and structure):
+- Import `Popup` from `maplibre-gl` (type-only import stays for `GeoJSONSource`, `MapMouseEvent`); import `prefersReducedMotion` from `../motion`; import `colourFor`.
+- Props as above. `features = useMemo(() => toFeatureCollection(lots, { selectedId, bestId }), [lots, selectedId, bestId])`.
+- In the layer effect, after `LOTS_LAYER` add:
+  ```ts
+  map.addLayer({ id: LOTS_HALO_LAYER, type: "circle", source: LOTS_SOURCE, filter: ["any", ["get", "selected"], ["get", "best"]],
+    paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 8, 13, 12, 16, 18], "circle-color": "rgba(0,0,0,0)", "circle-stroke-width": 3, "circle-stroke-color": "#0fb5a5", "circle-stroke-opacity": 0.55 } }, LOTS_LAYER);
+  map.setPaintProperty(LOTS_LAYER, "circle-color-transition", { duration: 300 });
+  ```
+  and remove it in the cleanup with the others.
+- Pulse (best pick): an interval every 1000 ms while `bestId !== null && !prefersReducedMotion()` toggling `circle-stroke-opacity` between 0.55 and 0.2 with `circle-stroke-opacity-transition` 900 ms — set on the halo layer; cleared on unmount.
+- `useEffect(() => { map?.setPadding(padding); }, [map, padding.top, padding.right, padding.bottom, padding.left])`.
+- `useEffect(() => { if (map && centerRequest) map.easeTo({ center: [centerRequest.lon, centerRequest.lat], duration: prefersReducedMotion() ? 0 : 600 }); }, [map, centerRequest?.nonce])`.
+- Click handling: register `map.on("click", LOTS_LAYER, handler)` for dots — `handler` reads `event.features?.[0]?.properties` (`id`, `name`, `probability`), calls `onSelectLot?.(id)`, opens one shared `Popup({ closeButton: false, offset: 12 })` at the feature's coordinates with `<b>${name}</b><span>${probability === null ? s.noData : Math.round(probability * 100) + "%"}</span>` (escape the name with a text node, not innerHTML: build the DOM with `document.createElement`), and calls `event.originalEvent.stopPropagation()`; and `map.on("click", mapHandler)` for empty map which, unless `event.defaultPrevented`, calls `onPickRef.current?.(...)` as today. Use `map.queryRenderedFeatures(event.point, { layers: [LOTS_LAYER] }).length === 0` inside `mapHandler` to decide it was empty map (this is what makes the two handlers not both fire).
+- Destination pin ripple (§9 #8): on a destination change, when not reduced motion, add a `Marker`-free ripple by appending two `<div class="pin-ripple">`/`pin-ripple--late` elements positioned with `map.project([lon, lat])` inside the map container for 1.2 s, removed after; skip in jsdom (`typeof map.project !== "function"` in the fake → guard).
+- Hover (desktop): `map.on("mouseenter", LOTS_LAYER, () => map.getCanvas().style.cursor = "pointer")` and `mouseleave` resets.
+
+- [ ] **Step 4: Verify** — `npm test --prefix web -- lotSource mapSource mapChunk && npm run lint --prefix web`. (`mapLazy`/`app` tests are updated in Task 18.)
+- [ ] **Step 5: Checkpoint** — `git add web/src/map/MapView.tsx web/src/map/lotSource.ts web/tests/mapSource.test.tsx web/tests/lotSource.test.ts`. Commit only if authorised: `feat(map): selection halo, popup, smooth recolour, padding`.
+
+## Phase E — the app
+
+### Task 18: Rewire `App.tsx`, update the app tests, bump the service worker (§3, §5, §8)
+
+**Files:**
+- Rewrite: `web/src/App.tsx`
+- Modify: `web/src/i18n.ts` — replace `startPrompt` with `startPromptMap` ("Search a place, or tap the map where you're going" / "搜尋地點，或點選地圖上的目的地"); keep `startPrompt` removed; add `listLabel` ("Ranked car parks" / "排序後的停車場")
+- Modify: `web/public/sw.js:44` (`VERSION = "v2"`)
+- Modify: `web/tests/app.test.tsx`, `web/tests/mapLazy.test.tsx`, `web/tests/mapChunk.test.tsx` (only where they reference removed props/strings)
+
+**What `App.tsx` keeps unchanged:** the artifact loading, refresh scheduling (`REFRESH_MS`, `MIN_REFETCH_MS`, visibility handling), `FUTURE_TOLERANCE_SEC`, `LIST_LIMIT`, `COVERAGE_RADIUS_M`, `ageMin`, `forecastExpired` (same rule), `mapLots`, `ranked`, `listed`, `outsideCoverage`, the single `pickDestination` path, the lazy `MapView`, the module comment's arguments (update the wording where the scrubber became the strip and the search became places). Export `GEO_WATCHDOG_MS` re-exported from `useGeolocation` so the tests' import keeps working.
+
+**What changes:**
+- `arrivalTs` state, `options = arrivalOptions(nowSec, grid)`, `clampArrival` applied in an effect whenever `options` change; `horizonFromReadingMin = horizonFromReading(arrivalTs, grid.baseDataTs)`; `nowSec = Math.floor(nowMs / 1000)`.
+- `selectedLotId`, `centerRequest`, `snap` (initial `"peek"`) state. `selectLot(id)`: set selected, set `centerRequest` from the lot's coordinates with `nonce + 1`, and on the phone snap to `"half"` if at `"peek"`.
+- Geolocation through `useGeolocation(pickDestination)`; `pickDestination` calls `abandon()` and `clearFailure()` then sets the destination and clears the selection.
+- Place search: `onSelect(place)` → `pickDestination({ lat: place.lat, lon: place.lon })`; for a car park additionally `selectLot(place.lotId)`.
+- `bestId = listed.find(r => r.probability !== null)?.id ?? null` when `!forecastExpired`, else `null`.
+- Map padding: phone `{ bottom: sheetHeight, top: 60, left: 0, right: 0 }` where `sheetHeight = snapHeights(window.innerHeight, 60)[snap]` (recomputed with `useMediaQuery`/resize via the `Shell`'s `useIsDesktop`); desktop `{ left: 420, top: 0, right: 0, bottom: 0 }`.
+- Layout: `Shell` with `map` = the Suspense'd `MapView` (placeholder `MapPlaceholder` now positioned absolutely by CSS), `overlay` = `<p class="map-hint glass anim-slide-down">{startPromptMap}</p>` when `artifacts && destination === null`, `topBar` = `TopBar` with `PlaceSearch`, `LocateButton`, `LangToggle`; `floatControls` = `LocateButton` + `LangToggle` (desktop); `header` = head row (`<h1 class="app-name">` + `FreshnessBadge`) + on desktop the `PlaceSearch` + the `ArrivalStrip` + geo status; `children` = notices, skeleton (loading), `<h2 class="list-head">` + `LotList`.
+- `indexUrl = \`${import.meta.env.BASE_URL.replace(/\/+$/, "")}/places/taipei.json\``.
+
+- [ ] **Step 1: Write the new `App.tsx`.** Skeleton with the essential wiring (fill in from today's file for the parts marked "as today"):
+
+```tsx
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { arrivalOptions, clampArrival, defaultArrival, horizonFromReading } from "./arrival";
+import { artifactsBase, horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
+import { ArrivalStrip } from "./components/ArrivalStrip";
+import { FreshnessBadge } from "./components/FreshnessBadge";
+import { LangToggle } from "./components/LangToggle";
+import { LocateButton } from "./components/LocateButton";
+import { LotList } from "./components/LotList";
+import { Notice } from "./components/Notice";
+import { PlaceSearch } from "./components/PlaceSearch";
+import { Skeleton } from "./components/Skeleton";
+import { TopBar } from "./components/TopBar";
+import type { LatLon } from "./geo";
+import { detectLang, fillTemplate, t, type Lang } from "./i18n";
+import { Shell, useIsDesktop } from "./layout/Shell";
+import { snapHeights, type Snap } from "./layout/sheet";
+import { toMapLot } from "./map/lotSource";
+import type { Place } from "./places";
+import { listRows, rankLots } from "./rank";
+import type { Grid, Lot, LotsDoc } from "./types";
+import { useGeolocation } from "./useGeolocation";
+
+export { GEO_WATCHDOG_MS } from "./useGeolocation";
+const MapView = lazy(() => import("./map/MapView"));
+const ARTIFACTS_BASE = artifactsBase(import.meta.env.BASE_URL);
+const PLACES_URL = `${import.meta.env.BASE_URL.replace(/\/+$/, "")}/places/taipei.json`;
+export const LIST_LIMIT = 20;
+export const COVERAGE_RADIUS_M = 10_000;
+const CLOCK_TICK_MS = 30_000;
+export const REFRESH_MS = 120_000;
+export const MIN_REFETCH_MS = 30_000;
+export const FUTURE_TOLERANCE_SEC = 600;
+const TOP_BAR_PX = 60;
+const PANEL_PX = 420;
+
+interface Artifacts { grid: Grid; lots: LotsDoc }
+
+function probabilityForLot(grid: Grid, lot: Lot | undefined, horizonMin: number): number | null { /* as today */ }
+function MapPlaceholder({ lang }: { lang: Lang }) { return <p className="map-placeholder" role="status" data-testid="map-loading">{t(lang).mapLoading}</p>; }
+
+export default function App() {
+  const [lang, setLang] = useState<Lang>(detectLang);
+  const [artifacts, setArtifacts] = useState<Artifacts | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const [refresh, setRefresh] = useState(0);
+  const [destination, setDestination] = useState<LatLon | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [arrivalTs, setArrivalTs] = useState(() => defaultArrival(Math.floor(Date.now() / 1000)));
+  const [selectedLotId, setSelectedLotId] = useState<string | null>(null);
+  const [centerRequest, setCenterRequest] = useState<{ lat: number; lon: number; nonce: number } | null>(null);
+  const [snap, setSnap] = useState<Snap>("peek");
+  const desktop = useIsDesktop();
+  const s = t(lang);
+  const loadedRef = useRef(false);
+  const lastFetchRef = useRef(0);
+
+  /* artifact load effect, clock effect, refresh effect, document.lang effect: as today */
+
+  const grid = artifacts?.grid ?? null;
+  const nowSec = Math.floor(nowMs / 1000);
+  const ageMin = grid === null ? null : Math.max(0, Math.round((nowSec - grid.baseDataTs) / 60));
+  const options = useMemo(() => (grid === null ? [] : arrivalOptions(nowSec, grid)), [grid, nowSec]);
+  useEffect(() => { setArrivalTs((ts) => clampArrival(ts, options)); }, [options]);
+  const horizonFromReadingMin = grid === null ? 0 : horizonFromReading(arrivalTs, grid.baseDataTs);
+  const forecastExpired = grid !== null && ageMin !== null && horizonColumn(grid, grid.stepMin + ageMin) === grid.nHorizons - 1;
+
+  const pickDestination = useCallback((at: LatLon) => {
+    abandonRef.current?.();
+    clearFailureRef.current?.();
+    setSelectedLotId(null);
+    setDestination(at);
+  }, []);
+  const { geo, request, abandon, clearFailure } = useGeolocation(pickDestination);
+  const abandonRef = useRef(abandon); const clearFailureRef = useRef(clearFailure);
+  useEffect(() => { abandonRef.current = abandon; clearFailureRef.current = clearFailure; }, [abandon, clearFailure]);
+
+  const mapLots = useMemo(/* as today, with horizonFromReadingMin in place of gridHorizonMin */);
+  const ranked = useMemo(/* as today, horizonMin: horizonFromReadingMin */);
+  const listed = useMemo(() => listRows(ranked, LIST_LIMIT), [ranked]);
+  const outsideCoverage = useMemo(/* as today */);
+  const bestId = !forecastExpired ? (listed.find((r) => r.probability !== null)?.id ?? null) : null;
+
+  function selectLot(id: string) {
+    const lot = artifacts?.lots.lots.find((l) => l.id === id);
+    setSelectedLotId(id);
+    if (lot) setCenterRequest((c) => ({ lat: lot.y, lon: lot.x, nonce: (c?.nonce ?? 0) + 1 }));
+    if (!desktop && snap === "peek") setSnap("half");
+  }
+  function onPlace(place: Place) {
+    pickDestination({ lat: place.lat, lon: place.lon });
+    if (place.kind === "carpark" && place.lotId) selectLot(place.lotId);
+  }
+
+  const sheetHeight = typeof window === "undefined" ? 300 : snapHeights(window.innerHeight, TOP_BAR_PX)[snap];
+  const padding = desktop ? { left: PANEL_PX, top: 0, right: 0, bottom: 0 } : { left: 0, top: TOP_BAR_PX, right: 0, bottom: sheetHeight };
+
+  const search = artifacts !== null ? <PlaceSearch lots={artifacts.lots.lots} indexUrl={PLACES_URL} onSelect={onPlace} lang={lang} /> : null;
+  const locate = <LocateButton geo={geo} onClick={request} lang={lang} />;
+  const langToggle = <LangToggle lang={lang} onChange={setLang} />;
+  const header = (
+    <>
+      <div className="head-row"><h1 className="app-name">{s.appName}</h1><FreshnessBadge ageMin={ageMin} expired={forecastExpired} lang={lang} /></div>
+      {desktop && search}
+      {grid !== null && <ArrivalStrip options={options} value={arrivalTs} nowSec={nowSec} onChange={setArrivalTs} expired={forecastExpired} lang={lang} />}
+      <p className="status visually-hidden" role="status">{geo === "unavailable" ? s.locationUnavailable : ""}</p>
+    </>
+  );
+  const map = loadFailed ? null : (
+    <Suspense fallback={<MapPlaceholder lang={lang} />}>
+      <MapView lots={mapLots} destination={destination} onPick={pickDestination} lang={lang} selectedId={selectedLotId} bestId={bestId} onSelectLot={selectLot} centerRequest={centerRequest} padding={padding} />
+    </Suspense>
+  );
+  return (
+    <Shell map={map} topBar={<TopBar search={search} locate={locate} lang={langToggle} />} floatControls={<>{locate}{langToggle}</>}
+      header={header} snap={snap} onSnapChange={setSnap} lang={lang}
+      overlay={artifacts !== null && destination === null ? <p className="map-hint glass anim-slide-down">{s.startPromptMap}</p> : null}>
+      {loadFailed && <Notice tone="error" role="alert">{s.loadFailed} <button type="button" onClick={() => { setLoadFailed(false); setAttempt((n) => n + 1); }}>{s.retry}</button></Notice>}
+      {!loadFailed && artifacts === null && <Skeleton />}
+      {geo === "unavailable" && <Notice tone="warn" testId="geo-unavailable">{s.locationUnavailable}</Notice>}
+      {forecastExpired && <Notice tone="warn" testId="forecast-expired" role="status">{s.forecastTooOld}</Notice>}
+      {outsideCoverage && <Notice tone="warn" testId="outside-coverage" role="status">{fillTemplate(s.outsideCoverage, { km: COVERAGE_RADIUS_M / 1000 })}</Notice>}
+      {artifacts !== null && destination !== null && !outsideCoverage && (
+        <>
+          <h2 className="list-head">{forecastExpired ? s.nearbyCarParks : s.rankedForArrival}</h2>
+          <LotList rows={listed} lang={lang} baseDataTs={artifacts.grid.baseDataTs} ageMin={ageMin ?? 0} arrivalTs={arrivalTs}
+            horizonFromReadingMin={horizonFromReadingMin} bestId={bestId} selectedId={selectedLotId} onSelect={selectLot} />
+        </>
+      )}
+    </Shell>
+  );
+}
+```
+
+(`useGeolocation` is called after `pickDestination` is defined, and `pickDestination` reaches `abandon` through refs so the two can reference each other without a stale closure. Keep every "as today" block's comments.)
+
+- [ ] **Step 2: Update `web/tests/app.test.tsx`.** Keep every describe; change only what the structure changed. The exact edits:
+  1. `stubFetch`: also answer `places/taipei.json` with `{ ok: true, status: 200, json: () => Promise.resolve({ v: 1, built: 1, source: "t", rows: [] }) }` and keep rejecting anything else.
+  2. `renderLocated`: the locate button is now found by `screen.findByRole("button", { name: t("en").useMyLocation })` — unchanged; it still works.
+  3. `describe("staleness")`: `expect(line.textContent).toContain("data from 4 min ago")` (the badge may add nothing else at 4 min).
+  4. `describe("arrival time")` → replace the body with: renders the strip; `screen.findByRole("radiogroup", { name: t("en").arrivalGroupLabel })`; the radios' text equals `arrivalOptions(NOW_SEC, grid).map(formatClock)` where `NOW_SEC = NOW_MS / 1000` and `grid = { baseDataTs: BASE_DATA_TS, stepMin: STEP_MIN, nHorizons: N_HORIZONS }` (import `arrivalOptions`, `defaultArrival`, `formatClock`, `horizonFromReading` from `../src/arrival`); the checked radio's text is `formatClock(defaultArrival(NOW_SEC))`.
+  5. `describe("staleness correction")`:
+     - first test: `const column = horizonColumn(grid, horizonFromReading(defaultArrival(NOW_SEC + AGE_MIN*60), BASE_DATA_TS))` where the fixture ages via `ageArtifact(AGE_MIN)` (so NOW is `BASE + AGE_MIN` minutes; compute `NOW_SEC` from `Date.now()` after `ageArtifact`); expect `columnMark(column)` in the probability and not `columnMark(column - AGE_MIN / STEP_MIN)`.
+     - second test: same idea at ages 0 and 20; the column read must move by 4 (20 min / 5) — assert the two marks differ by `columnMark(c + 4) − columnMark(c)`.
+     - third test ("leaves the control offering the arrival times the user picks") → the checked radio shows `formatClock(defaultArrival(NOW_SEC))` regardless of age (the age is inside the horizon, not the label).
+     - fourth test: click the last radio; the probability shows `columnMark(N_HORIZONS − 1)` and not `noData`.
+  6. `describe("an artifact older than the grid")`: "disables the scrubber…" → "renders no arrival chips" (`expect(screen.queryAllByRole("radio")).toEqual([])`); the rest unchanged except `data-testid="staleness"` now also contains `t("en").expired`.
+  7. `describe("searching for a destination")`: the combobox is found by `t("en").searchLabel`; results by `screen.findAllByTestId("search-option")`; the "makes no network request at all while searching" test becomes "makes no request beyond the one place-index fetch": after typing, `fetchMock` calls whose URL ends with `places/taipei.json` ≤ 1 and no other new URLs. Keep the 臺/台, keyboard, escape, no-match and language assertions; the district text is inside `.search__option-where`.
+  8. `describe("geolocation")`: the unavailable string is now in `getByTestId("geo-unavailable")`.
+  9. Everything else (price, probability, not-updating, language, refresh, document language, artifacts, list cap, coverage, separate chunk) is unchanged in intent; fix selectors only where a testid moved: the row is still `[data-testid="lot-row"]`, the probability `lot-probability`, walk `lot-walk`, price `lot-price`.
+  10. `mapLazy.test.tsx` / `mapChunk.test.tsx`: update `MapView` props to the new interface where they render it directly (`selectedId={null} bestId={null} centerRequest={null} padding={{top:0,right:0,bottom:0,left:0}}`).
+
+- [ ] **Step 3: `web/public/sw.js`** — `const VERSION = "v2";` with a one-line comment: the redesign changed every hashed asset and added `places/`; v2 drops the v1 cache on activate.
+
+- [ ] **Step 4: Verify everything** — `npm test --prefix web && npm run typecheck --prefix web && npm run lint --prefix web && npm run build --prefix web`. Expected: green. Count the tests and record the number in the report.
+
+- [ ] **Step 5: Checkpoint** — `git add web/src/App.tsx web/src/i18n.ts web/public/sw.js web/tests/app.test.tsx web/tests/mapLazy.test.tsx web/tests/mapChunk.test.tsx`. Commit only if authorised: `feat(web): map-first shell, place search, clock-time arrival`.
+
+### Task 19: Browser verification and polish (§2 "both layouts", §11 browser check)
+
+**Files:** whatever the checks require (CSS tweaks in `web/src/styles/*`, small component fixes). No new behaviour.
+
+Run `npm run dev --prefix web` from PowerShell (the dev server serves `web/.dev-artifacts/`; refresh it first with `node scripts/sync-artifacts.mjs` if the collector is running, else `python scripts/refresh-demo-artifacts.py`), open `http://127.0.0.1:5173/` in the Browser pane and check each item; fix and re-check until all pass. Record a screenshot description per item in the report.
+
+- [ ] **Phone, 390 × 844, light:** map fills the screen; top bar pill, locate and language buttons; sheet at `peek` shows the header row, the strip and the first card; drag to `half` and `full`; the list scrolls only at `full`; a downward drag at the top collapses it; the grip button toggles by keyboard (Tab to it, Enter).
+- [ ] **Search:** type `台北101` → car parks first, then the landmark and the station, each with an icon; `忠孝東路四段216巷` → a street result with its locality; `西門町` → an area; choosing one sets the pin, the ranking appears, the sheet is at least `half`; recents appear on an empty focused box.
+- [ ] **Arrival strip:** chips from now+5 to the grid's end; dragging across the strip sweeps the selection and the map dots recolour smoothly; the big time and "in N min" update; the card's arrival tile matches.
+- [ ] **Cards:** best pick has the rail, ribbon and glowing ring; rings animate on first appearance and on a time change; the observed count reads "N / C free · n min ago" (only once the live `lots.json` has `f`; with demo artifacts the tile is absent — say so); confidence pill opens its note; tapping a card eases the map to it and highlights the dot; tapping a dot highlights the card and shows the popup; tapping empty map moves the pin with a ripple.
+- [ ] **States:** no destination → the map hint; expired forecast (age the demo artifact by editing its header, or wait) → grey badge with "expired", no chips, "car parks nearby" heading, rings say "no data"; a not-updating lot shows "No change in n h"; unpriced shows words only.
+- [ ] **Desktop, 1280 × 800:** side panel 420 px with search inside; float controls top-right; hover lifts a card and halos its dot; the map's padding keeps the pin centred in the visible map.
+- [ ] **Dark mode** (Browser pane `colorScheme: dark`): tokens flip, glass is navy, text legible, ramp colours still distinct.
+- [ ] **Reduced motion** (emulate via DevTools or `matchMedia` override in the console): no rise/stagger/pulse/ripple; rings and counts jump; the sheet snaps instantly.
+- [ ] **Console clean** on every screen above (no errors, no MapLibre warnings about images).
+- [ ] Checkpoint whatever changed; commit only if authorised: `style(web): polish from browser verification`.
+
+### Task 20: Docs
+
+**Files:** `README.md` (Status table: tests; the "Deployment"/"Basemap" sections mention the place index and the redesign), `docs/pwa.md` (the layout, the sheet, `places/` cache-first, `VERSION` v2), `docs/basemap.md` (already has the place index from Task 5; cross-link), `docs/state-of-play.md` (a "UI redesign — 2026-09-15" section: what shipped, the two open polish items if any, the deferred later-than-2h forecast and per-lot confidence), `CLAUDE.md` (the web file map under a "Web app structure (2026-09-15)" heading: shell/sheet/panel, pure modules, components; the three honesty rules restated for the card).
+
+- [ ] Write them; keep every number real (test counts from Task 18's report, index size from Task 4).
+- [ ] Checkpoint; commit only if authorised: `docs: describe the map-first redesign`.
+
+### Task 21: Release — USER-GATED
+
+- [ ] `npm run deploy:check --prefix worker` (no key in the shell) → green.
+- [ ] The user runs `npm run deploy:release` from `worker/` with a fresh token (docs/deploy.md §5); expected: ~700 new assets, smoke test passed (including `/places/taipei.json`), preview URLs off.
+- [ ] Verify live in the browser: the map draws, search finds `台北101`, cards show the observed count.
+- [ ] Ledger: `Task 21: complete — version <id>`.
 
 ---
-
-### Task 13: Hand back, and go live with the user (controller only; every credential step is the user's)
-
-Nothing in this task happens without the user's explicit yes, asked separately for: commits, push,
-the `go-pmtiles` download, the first release, and recreating the collector.
-
-- [ ] **Step 1: Write the Review section** (below): per-task outcome, test counts from real runs
-  (Python, web, worker, scripts), every ruling, the Task 8 local CPU number, the `wrangler` flags as
-  verified, the `--ignore-scripts` result, and the dry-run measurements.
-- [ ] **Step 2: Ask to commit** — list one Conventional Commit per task (no `Co-Authored-By`, no AI
-  attribution), and whether to push the branch. Nothing is committed without a yes.
-- [ ] **Step 3: The user's one-time setup** from `docs/deploy.md` §3. The user tells the controller only
-  non-secret values: the subdomain and the two KV namespace ids. The controller then fills
-  `worker/wrangler.jsonc` (`id`, `preview_id`, `PRODUCTION_HOST`) and `config.UPLOAD_HOST`, and adds to
-  the `collector` service in `docker/docker-compose.yml`:
-  ```yaml
-      environment:
-        TZ: Asia/Taipei
-        PARKCAST_UPLOAD_URL: https://parkcast.<name>.workers.dev/artifacts/latest
-      secrets:
-        - parkcast_upload_secret
-  ```
-  plus a top-level
-  ```yaml
-  secrets:
-    parkcast_upload_secret:
-      file: ./secrets/parkcast_upload_secret
-  ```
-  Run the Python suite and `npm test --prefix worker` again.
-- [ ] **Step 4: The basemap.** Ask permission to download `go-pmtiles_1.31.2_Windows_x86_64.zip` from
-  <https://github.com/protomaps/go-pmtiles/releases/tag/v1.31.2> (state its size from the release page),
-  verify the SHA-256 in `docs/basemap.md`, run `node scripts/build-basemap.mjs`, and confirm the file is
-  15–25 MiB.
-- [ ] **Step 5: Check phase** — `npm run deploy:check --prefix worker -- --with-python`, no key in the
-  shell. Everything must pass, including the bundle check.
-- [ ] **Step 6: First release — the user runs it** in a fresh PowerShell (`docs/deploy.md` §5). The smoke
-  test's forecast checks warn "no forecast stored yet" on this first release, because nothing has
-  uploaded; every other check must pass.
-- [ ] **Step 7: Roll out the collector** (with a yes), just after a tick (minute ≡ 1 mod 5, second ≈ 40):
-  `docker compose -f docker/docker-compose.yml up -d --build --force-recreate`. Confirm the next two
-  ticks log `tick`, `published … not updating` and `uploaded … bytes`; `docker inspect -f
-  '{{.State.OOMKilled}} {{.RestartCount}} {{.Config.User}}'` shows `false 0 10001:10001`; the row count
-  keeps growing. Confirm the `/scratch` bind mount is writable by uid 10001 (untested until now):
-  `MSYS_NO_PATHCONV=1 docker exec docker-collector-1 python -c "import pathlib; p = pathlib.Path('/scratch/.probe'); p.write_bytes(b'ok'); p.unlink(); print('scratch writable')"`.
-  Then `node scripts/smoke-live.mjs https://parkcast.<name>.workers.dev` passes with a fresh forecast.
-- [ ] **Step 8: Confirm the open questions (§10)**, recording each answer in the Review section:
-  1. `npm run deploy:preview` (its `wrangler triggers deploy` with `preview_urls: true` switches preview
-     URLs on before the upload); the preview URL's `/artifacts/grid.bin` equals the live one (the preview
-     reads production KV); after the next normal release — whose `wrangler triggers deploy` applies
-     `preview_urls: false`, and whose final check confirms its own version's preview host does not
-     answer `2xx` — that older preview URL no longer answers (§10.13).
-  2. Dashboard Workers metrics: request count before and after 50 requests to random non-artifact paths
-     — does `404-page` handling keep them off the Worker? Update spec §6.3 with the answer.
-  3. `/_headers` is 404 and the §6.2 headers are on `/` (the smoke test covers both).
-  4. The dashboard offers no firewall rules for workers.dev.
-  5. (Done in Task 6.)
-  6. The daily-limit and CPU-exceeded responses, from Cloudflare's error documentation (never by
-     exhausting the real limit). If the daily-limit status is not `429`, change `UploadGuard.record`
-     and its test to match exactly.
-  7. (Done in Task 11B.)
-  8. The app in the Browser pane: zero CSP violations in the console across first load, map pan and
-     zoom, search, a destination tap, the language toggle, the time slider and an offline reload.
-  9. After a few hours of uploads, the dashboard's CPU time for `PUT` requests. Above 10 ms, apply
-     the §4.3 fallback.
-  10. The dashboard shows observability off and no request logs.
-  11. `wrangler secret put --help` and Cloudflare's docs: whether it deploys an undeployed version.
-      Update the runbook.
-  12. The collector log shows no `uploads disabled (no valid secret file)` line (compose secret readable).
-  13. (With 1.)
-  14. The user runs `Get-Module PSReadLine` and checks the history file has no token.
-  15. `curl -sI -H "Accept-Encoding: gzip"` on `lots.json`: record the ETag form; confirm a
-      revalidation with it returns `304`.
-  16. (Done while planning.)
-  17. Not used: the release smoke-tests after promotion and rolls back automatically.
-  18. The permissions the working deploy key has, recorded in `docs/deploy.md` — including setting the
-      Worker's workers.dev subdomain and preview-URL settings, which every release's `triggers deploy` needs.
-- [ ] **Step 9: Record the live state** in `README.md` and `docs/state-of-play.md` (address, date,
-  first upload), check `OOMKilled` after the first live midnight, and ask about committing and merging.
-
----
-
-## Deferred beyond this plan
-
-A custom domain and firewall rules (only if abuse appears); CI deploys from GitHub Actions; removing
-frozen lots from climatology; the gap-aware liveness rule; compressing daily metadata snapshots; the
-licence.
 
 ## Review
 
-Tasks 1–12 executed 2026-09-14 on `feat/cloudflare-deploy`, subagent-driven, in place. **Nothing committed and nothing deployed.** Every task had a fresh implementer and a task review; seven needed one fix round (Tasks 3, 5, 9, 11, 12, plus rulings in 1 and 8); a final whole-branch review (opus) found one Critical and three Important issues, fixed in one wave and re-reviewed clean. The full ledger of rulings, deferred minors and parked items is in `.superpowers/sdd/todo/progress.md` (git-ignored).
+(Filled in by the controller at the end: what shipped, measured numbers, open items.)
 
-**Final verification** (the staged tree, 72 files, +6,449/−133 against `6ebeefe`): Python 350 passed / 3 skipped; web 219, typecheck and lint clean; Worker 62, typecheck clean; scripts 32. The credential-free check phase passes every step except `missing required file: basemap/taipei.pmtiles` (rebuilt in Task 13). `deploy:release` refuses without a key. The live collector was never touched (StartedAt 2026-09-14T01:06:58Z, RestartCount 0). `core.hooksPath` is still unset.
-
-**Measured during execution:** feed bodies 421,825 B and 2,883,343 B, no redirects; hardened rehearsal exit 0 as uid 10001 on a read-only root, memory.peak 265,166,848 B, pids.peak 6; Worker upload validation + hashing ~1.5 ms per upload in Node on the real 1,090-lot pair; wrangler 4.131.1's `deploy --dry-run`, `versions upload/deploy`, `rollback` and `triggers deploy` (experimental) exist as used.
-
-**Found and fixed beyond the plan:** prune could delete an unarchived day (Task 1, existing bug); a bad secret file or URL would crash-loop the collector (Task 3); the pre-commit hook could be bypassed by a `+++`-shaped line (Task 5); a smoke-test exception skipped rollback, and pruning dry-run maps was unguarded (Task 11); the release never applied `workers_dev`/`preview_urls` — only `wrangler triggers deploy` does (final review); the non-root image broke the documented throwaway test containers (final review); `authorized()` let `Bearer ` through when the secret was missing (final review).
-
-**Execution-time rulings that changed commands:** `node --test scripts/tests/*.test.mjs` (a bare directory runs nothing on Node 22/Windows); npm 10 ignores `--prefix` for install/ci/audit; throwaway `docker run` test containers need `--user 0:0` once the image is non-root.
-
-**Open for Task 13** (in addition to §10): `triggers deploy` on the draft Worker `secret put` creates; what a disabled preview host returns; the deploy key's workers.dev subdomain/preview permission; `/scratch` writable by uid 10001; merge the compose snippet into the existing `environment:` block (the docs say "add"); do not rotate the secret right after a `deploy:preview` — release first.
