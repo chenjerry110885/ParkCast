@@ -1,0 +1,18 @@
+{
+  "name": "parkcast-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev": "wrangler dev --local",
+    "deploy:check": "node ../scripts/deploy-check.mjs",
+    "deploy:release": "node ../scripts/release.mjs",
+    "deploy:preview": "node ../scripts/release.mjs --preview"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vitest": "5.0.0",
+    "wrangler": "4.131.1"
+  }
+}

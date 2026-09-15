@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "parkcast",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": false },
+  "assets": {
+    "directory": "../web/dist",
+    "run_worker_first": ["/artifacts/*"],
+    "not_found_handling": "404-page"
+  },
+  "kv_namespaces": [
+    { "binding": "ARTIFACTS", "id": "REPLACE_WITH_PROD_KV_ID", "preview_id": "REPLACE_WITH_PREVIEW_KV_ID" }
+  ],
+  "vars": { "PRODUCTION_HOST": "parkcast.REPLACE-SUBDOMAIN.workers.dev" },
+  "secrets": { "required": ["UPLOAD_SECRET"] }
+}
