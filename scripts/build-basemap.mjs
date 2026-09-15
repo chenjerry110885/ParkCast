@@ -148,3 +148,7 @@ const unpacked = await unpackTiles();
 console.log(
   `build-basemap: unpacked ${unpacked.count} tiles (${(unpacked.bytes / 1048576).toFixed(1)} MB) to web/public/basemap/tiles/`,
 );
+
+const { buildPlaceIndex } = await import("./build-place-index.mjs");
+const index = await buildPlaceIndex();
+console.log(`build-basemap: place index ${index.rows} rows, ${(index.gzipBytes / 1024).toFixed(0)} KB gzipped -> web/public/places/taipei.json`);
