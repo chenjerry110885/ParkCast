@@ -54,7 +54,7 @@ export interface MapViewProps {
 }
 
 export default function MapView({ lots, destination, onPick, lang }: MapViewProps) {
-  const { containerRef, map, unavailable } = useMapLibre();
+  const { containerRef, map, unavailable } = useMapLibre(lang);
   const s = t(lang);
 
   const features = useMemo(() => toFeatureCollection(lots), [lots]);

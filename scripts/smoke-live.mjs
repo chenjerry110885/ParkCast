@@ -16,6 +16,8 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MUST_404 = ["/src/main.tsx", "/assets/index.js.map", "/.env", "/_headers", "/wp-login.php", "/artifacts/grid.bin.tmp"];
+// The map's roads and its labels. HEAD, so a smoke test never pulls the 23 MB archive.
+const MUST_SERVE = ["/basemap/taipei.pmtiles", "/basemap/fonts/Noto%20Sans%20Regular/0-255.pbf"];
 const TIMEOUT_MS = 15_000;
 
 export async function smoke(origin, { fetchImpl = fetch, now = Date.now } = {}) {
@@ -71,6 +73,11 @@ export async function smoke(origin, { fetchImpl = fetch, now = Date.now } = {}) 
         failures.push("grid.bin and lots.json do not pair");
       }
     }
+  }
+
+  for (const path of MUST_SERVE) {
+    const res = await get(path, { method: "HEAD" });
+    if (res !== null && res.status !== 200) failures.push(`${path} answered ${res.status}, expected 200`);
   }
 
   for (const path of MUST_404) {

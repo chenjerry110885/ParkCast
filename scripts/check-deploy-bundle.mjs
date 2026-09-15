@@ -18,10 +18,15 @@ export const ALLOWED = [
   /^index\.html$/, /^404\.html$/, /^sw\.js$/, /^manifest\.webmanifest$/, /^favicon\.svg$/,
   /^icon-(192|512|maskable-512)\.png$/, /^_headers$/, /^robots\.txt$/, /^fallback\.css$/,
   /^basemap\/taipei\.pmtiles$/, /^assets\/[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(js|css)$/,
+  // Label glyphs (docs/basemap.md): one file per font per 256 codepoints, plus the font licence.
+  /^basemap\/fonts\/OFL\.txt$/, /^basemap\/fonts\/Noto Sans (Regular|Medium|Italic)\/\d{1,5}-\d{1,5}\.pbf$/,
 ];
+export const LABEL_FONTS = ["Noto Sans Regular", "Noto Sans Medium", "Noto Sans Italic"];
 export const REQUIRED = [
   "index.html", "404.html", "sw.js", "manifest.webmanifest", "_headers", "fallback.css",
-  "robots.txt", "basemap/taipei.pmtiles",
+  "robots.txt", "basemap/taipei.pmtiles", "basemap/fonts/OFL.txt",
+  // Every label font's Latin range: without it the map ships with no street or place names.
+  ...LABEL_FONTS.map((font) => `basemap/fonts/${font}/0-255.pbf`),
 ];
 export const FORBIDDEN = [
   /\.map$/i, /\.(ts|tsx|py)$/i, /(^|\/)\.env/i, /(^|\/)\.dev\.vars/i,

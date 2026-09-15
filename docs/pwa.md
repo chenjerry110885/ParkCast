@@ -131,9 +131,9 @@ offline" badge would be a prettier lie than the age line already tells the truth
 notions of staleness would eventually disagree.
 
 Offline, the app renders in full -- the ranked list, the arrival-time scrubber, every lot marker on
-the map, and the age line -- on a **blank basemap**. The roads and labels come from the 23 MB
-`.pmtiles` archive that the worker deliberately never caches, so whatever the browser's own HTTP
-cache still holds is what draws. That is the trade being made on purpose: the answer to the question
+the map, and the age line -- on a **blank basemap**. The roads come from the 23 MB `.pmtiles` archive
+and the label glyphs from `basemap/fonts/`, both under the `basemap/` prefix the worker deliberately
+never touches, so whatever the browser's own HTTP cache still holds is what draws. That is the trade being made on purpose: the answer to the question
 survives offline, the scenery may not.
 
 ### Why there is no precache manifest

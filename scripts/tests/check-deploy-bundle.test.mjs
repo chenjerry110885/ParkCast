@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { checkBundle, listFiles, pruneDryRunArtifacts } from "../check-deploy-bundle.mjs";
+import { LABEL_FONTS, checkBundle, listFiles, pruneDryRunArtifacts } from "../check-deploy-bundle.mjs";
 
 let dist;
 const put = (rel, content = "x") => {
@@ -18,10 +18,28 @@ beforeEach(() => {
     "robots.txt", "favicon.svg", "icon-192.png", "icon-512.png", "icon-maskable-512.png",
     "assets/index-DsYeQuWT.js", "assets/index-Bmp4thyU.css", "assets/maplibre-gl-worker-AbPoOmO0.js"]) put(f);
   put("basemap/taipei.pmtiles", "p".repeat(500));
+  put("basemap/fonts/OFL.txt");
+  for (const font of LABEL_FONTS) {
+    put(`basemap/fonts/${font}/0-255.pbf`);
+    put(`basemap/fonts/${font}/8192-8447.pbf`);
+  }
 });
 afterEach(() => rmSync(dist, { recursive: true, force: true }));
 
 test("passes a clean build", () => assert.deepEqual(check(), []));
+
+test("fails when a label font is missing, so the map cannot ship without street names", () => {
+  rmSync(join(dist, "basemap/fonts/Noto Sans Medium"), { recursive: true });
+  assert.ok(check().some((p) => p.includes("basemap/fonts/Noto Sans Medium/0-255.pbf")));
+});
+
+test("allows only glyph ranges of the known fonts under basemap/fonts", () => {
+  put("basemap/fonts/Noto Sans Regular/notes.txt");
+  put("basemap/fonts/Some Other Font/0-255.pbf");
+  const problems = check();
+  assert.ok(problems.some((p) => p.includes("Noto Sans Regular/notes.txt")));
+  assert.ok(problems.some((p) => p.includes("Some Other Font/0-255.pbf")));
+});
 
 for (const [label, rel] of [
   ["a source map", "assets/index-DsYeQuWT.js.map"],

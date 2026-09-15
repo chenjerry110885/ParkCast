@@ -32,8 +32,9 @@ const OUT_PATH = join(repoRoot, "web", "public", "basemap", "taipei.pmtiles");
 
 // Facts measured 2026-09-06 -- see docs/basemap.md. Do not re-derive without
 // re-running the extract; the source planet build is versioned by date and
-// will eventually move on.
-const SOURCE_URL = "https://build.protomaps.com/20260901.pmtiles";
+// Protomaps deletes old ones (20260901 was gone by 2026-09-15). On a 404, pick
+// a current 4.x build from https://build-metadata.protomaps.dev/builds.json.
+const SOURCE_URL = "https://build.protomaps.com/20260914.pmtiles";
 const BBOX = "121.4433,24.9576,121.6405,25.1999"; // all 1,088 lots plus ~2 km
 const MAXZOOM = 15; // the planet build's own ceiling at this bbox
 

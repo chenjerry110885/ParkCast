@@ -23,5 +23,6 @@ web/node_modules/
 web/dist/
 # Dev copies of the collector output (see scripts/sync-artifacts.mjs)
 web/public/artifacts/
-# Basemap archive: ~23 MB, regenerable via scripts/build-basemap.mjs (see docs/basemap.md)
-web/public/basemap/
+# Basemap archive: ~23 MB, regenerable via scripts/build-basemap.mjs (see docs/basemap.md).
+# The label glyphs beside it in basemap/fonts/ are small and committed.
+web/public/basemap/*.pmtiles

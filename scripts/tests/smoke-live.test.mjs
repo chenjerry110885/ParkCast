@@ -22,6 +22,8 @@ function site(overrides = {}) {
     "GET /artifacts/grid.bin": () => new Response(gridBytes(7, NOW / 1000 - 240)),
     "GET /artifacts/lots.json": () => new Response(JSON.stringify({ roster_id: 7 })),
     "PUT /artifacts/latest": () => new Response("", { status: 401 }),
+    "HEAD /basemap/taipei.pmtiles": () => new Response(null),
+    "HEAD /basemap/fonts/Noto%20Sans%20Regular/0-255.pbf": () => new Response(null),
     ...overrides,
   };
   return async (url, init = {}) => {
@@ -38,6 +40,16 @@ test("passes a healthy site", async () => {
 test("fails when a source path is served", async () => {
   const { failures } = await smoke(ORIGIN, { fetchImpl: site({ "GET /src/main.tsx": () => new Response("code") }), now: () => NOW });
   assert.ok(failures.some((f) => f.includes("/src/main.tsx")));
+});
+
+test("fails when the map's archive or label fonts are not served", async () => {
+  const missing = () => new Response("not found", { status: 404 });
+  const { failures } = await smoke(ORIGIN, {
+    fetchImpl: site({ "HEAD /basemap/fonts/Noto%20Sans%20Regular/0-255.pbf": missing, "HEAD /basemap/taipei.pmtiles": missing }),
+    now: () => NOW,
+  });
+  assert.ok(failures.some((f) => f.includes("taipei.pmtiles")));
+  assert.ok(failures.some((f) => f.includes("0-255.pbf")));
 });
 
 test("fails when an unauthenticated upload is not refused", async () => {

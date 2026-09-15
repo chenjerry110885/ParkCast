@@ -15,11 +15,11 @@
  * user pan around their own city. That is why the archive exists at all -- see
  * `docs/basemap.md`.
  *
- * **No labels, on purpose.** Symbol layers need glyph PBFs, and the only place
- * to fetch those from is a CDN -- a runtime request to a third party, which is
- * exactly what self-hosting the tiles was meant to avoid. So the basemap draws
- * roads, water, parks and buildings and no text. Self-hosting the glyph ranges
- * (Chinese needs a lot of them) is the fix, and it is a separate piece of work.
+ * **Labels are self-hosted too.** Symbol layers need glyph PBFs, which usually
+ * come from a font CDN. Here they come from `basemap/fonts/` on this origin --
+ * only the ranges Taipei's labels use -- and Chinese, Japanese and Korean
+ * characters are drawn with the device's own fonts, so no CJK glyph files ship
+ * at all. The style itself is plain data in `basemapStyle.ts`.
  */
 import { useEffect, useRef, useState } from "react";
 import { MapLibreMap, addProtocol, setWorkerUrl } from "maplibre-gl";
@@ -36,38 +36,14 @@ import { MapLibreMap, addProtocol, setWorkerUrl } from "maplibre-gl";
 // build alike. `setWorkerUrl` takes precedence over MapLibre's guess.
 import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import { Protocol } from "pmtiles";
-import { noLabels } from "protomaps-themes-base";
-
-/**
- * Where the archive is served from. Relative to the deployment root, like the
- * artifacts, so the app works under a sub-path (GitHub Pages) unrebuilt.
- *
- * Only the seam between base and path is normalised. Collapsing *every* run of
- * slashes -- what this used to do -- turns an absolute base's `https://` into
- * `https:/`, a break that cannot appear in dev because the base has no scheme
- * there. Same hazard, same shape, as `artifactsBase` in `artifacts.ts`.
- */
-export const BASEMAP_URL = `${import.meta.env.BASE_URL.replace(/\/+$/, "")}/basemap/taipei.pmtiles`;
-
-/**
- * The archive's real ceiling, declared rather than discovered.
- *
- * The Protomaps planet build stops at zoom 15 for this bbox -- a `--maxzoom=16`
- * extract came back byte-identical. Telling MapLibre so makes it overzoom the
- * z15 tiles (they are geometry, so they stay sharp) instead of requesting a z16
- * tile that does not exist and painting the gap blank.
- */
-export const BASEMAP_MAX_ZOOM = 15;
+import type { Lang } from "../i18n";
+import { basemapStyle } from "./basemapStyle";
 
 /** Roughly Taipei Main Station, in GeoJSON order: [lon, lat]. */
 export const TAIPEI_CENTER: [number, number] = [121.5170, 25.0478];
 
 /** Wide enough to see the whole basin, close enough that lots are separable. */
 export const INITIAL_ZOOM = 12;
-
-/** OSM's licence requires this, and it costs one line. */
-const ATTRIBUTION =
-  '<a href="https://protomaps.com">Protomaps</a> © <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>';
 
 /**
  * MapLibre's global setup: the worker it parses tiles on, and the `pmtiles://`
@@ -88,7 +64,7 @@ function configureMapLibre(): void {
  * live map drops every custom source and layer with it, so a colour-scheme flip
  * mid-session keeps the basemap it started with until the next reload.
  */
-function basemapTheme(): string {
+function basemapTheme(): "light" | "dark" {
   return typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches
     ? "dark"
     : "light";
@@ -103,8 +79,11 @@ export interface MapLifecycle {
   unavailable: boolean;
 }
 
-export function useMapLibre(): MapLifecycle {
+export function useMapLibre(lang: Lang): MapLifecycle {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Read once, like the theme: labels keep the language the map was built in
+  // until the next load, because restyling a live map drops the lot layers.
+  const initialLang = useRef(lang);
   const [map, setMap] = useState<MapLibreMap | null>(null);
   const [unavailable, setUnavailable] = useState(false);
 
@@ -124,18 +103,7 @@ export function useMapLibre(): MapLifecycle {
         // has quietly rotated under a two-finger gesture is worse than useless.
         dragRotate: false,
         pitchWithRotate: false,
-        style: {
-          version: 8,
-          sources: {
-            basemap: {
-              type: "vector",
-              url: `pmtiles://${BASEMAP_URL}`,
-              maxzoom: BASEMAP_MAX_ZOOM,
-              attribution: ATTRIBUTION,
-            },
-          },
-          layers: noLabels("basemap", basemapTheme()),
-        },
+        style: basemapStyle(basemapTheme(), initialLang.current),
       });
     } catch {
       // No WebGL: an old phone, a locked-down browser, or jsdom. The ranked
