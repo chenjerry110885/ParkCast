@@ -1,0 +1,24 @@
+# A rehearsal of the hardened settings against a SNAPSHOT COPY of data/.
+# It never polls the availability feed, never uploads, and never touches the live
+# corpus: its only bind mount is the copy outside the repository.
+name: parkcast-dryrun
+services:
+  rehearsal:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: "1.0"
+    pids_limit: 256
+    volumes:
+      - ../../parkcast-dryrun/data:/app/data
+      - ../scripts/hardening-dryrun.py:/app/hardening-dryrun.py:ro
+    environment:
+      TZ: Asia/Taipei
+    entrypoint: ["python", "/app/hardening-dryrun.py"]

@@ -4,7 +4,23 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
     restart: unless-stopped
+    # Hardening (docs/superpowers/specs/2026-09-14-deployment-design.md §5.4).
+    # Read-only root; the only writable places are data/, /scratch and a small /tmp.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # CPU is throttled, never killed. There is deliberately NO memory limit: an
+    # OOM kill of the one irreplaceable process costs ticks that cannot be
+    # re-fetched, and Docker Desktop's VM already bounds memory.
+    cpus: "1.0"
+    pids_limit: 256
     volumes:
       - ../data:/app/data
+      # Snapshots for analysis go here, never to /tmp (docker/README.md).
+      - ../../parkcast-scratch:/scratch
     environment:
       TZ: Asia/Taipei
