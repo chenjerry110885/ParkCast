@@ -7,3 +7,5 @@
   X-Frame-Options: DENY
 /sw.js
   Cache-Control: no-cache
+/basemap/tiles/*
+  Content-Type: application/x-protobuf

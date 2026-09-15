@@ -104,11 +104,11 @@ const PASSTHROUGH = "passthrough";
  *     rule 3, and it is here so that a future range-reading client is safe
  *     before anyone remembers to add it to the list.
  *
- *  3. **The basemap** -- passthrough, unconditionally. `taipei.pmtiles` is 23 MB
- *     read by HTTP range request, and naively caching its `206 Partial Content`
- *     responses is a well-known way to serve corrupt tiles. The browser's own
- *     HTTP cache handles it correctly; there is nothing to improve here, and an
- *     attempt to improve it would be a regression. Leave it alone.
+ *  3. **The basemap** -- passthrough, unconditionally. `basemap/tiles/` holds
+ *     44 MB of tiles, far more than an offline cache should grow to, and the
+ *     browser's own HTTP cache already keeps the ones a visitor has seen. A
+ *     `.pmtiles` archive, read by range request, gets the same treatment for
+ *     rule 2's reason. Leave it alone.
  *
  *  4. **The artifacts** -- network-first. A forecast from the network beats one
  *     from disk every time. The cached copy is the fallback, and it carries its

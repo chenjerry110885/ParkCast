@@ -64,7 +64,7 @@ as haunted code rather than as a caching problem.
 
 | request | strategy | why |
 |---|---|---|
-| `taipei.pmtiles`, anything under `basemap/`, anything with a `Range` header | **never intercepted** | 23 MB read by HTTP range request. Caching `206 Partial Content` naively is a well-known way to serve corrupt tiles. The browser's own HTTP cache handles it correctly. |
+| anything under `basemap/` (tiles and label glyphs), anything with a `Range` header | **never intercepted** | 44 MB of tiles is far more than an offline cache should hold, and the browser's own HTTP cache already keeps the ones a visitor has seen. A `Range` request comes back `206 Partial Content`, and caching that naively is a well-known way to serve corrupt data. |
 | `artifacts/grid.bin`, `artifacts/lots.json` | **network-first**, cache as fallback | A forecast from the network beats one from disk every time. |
 | navigations (`index.html`) | **network-first**, cache as fallback, and **never written back** | `index.html` is the one file Vite does *not* hash, so it is the one file for which "a cached URL cannot be stale" is false. Cache-first would pin the app to whichever hashed bundle names the first visit saw. The fallback copy is the one `install` stored and the runtime never replaces it -- see [one writer for the shell](#the-cached-shell-has-exactly-one-writer). |
 | hashed assets (`assets/*`) | **cache-first** | Vite hashes these filenames, so a changed file has a different name and is simply a cache miss. |
@@ -131,7 +131,7 @@ offline" badge would be a prettier lie than the age line already tells the truth
 notions of staleness would eventually disagree.
 
 Offline, the app renders in full -- the ranked list, the arrival-time scrubber, every lot marker on
-the map, and the age line -- on a **blank basemap**. The roads come from the 23 MB `.pmtiles` archive
+the map, and the age line -- on a **blank basemap**. The roads come from the tile files in `basemap/tiles/`
 and the label glyphs from `basemap/fonts/`, both under the `basemap/` prefix the worker deliberately
 never touches, so whatever the browser's own HTTP cache still holds is what draws. That is the trade being made on purpose: the answer to the question
 survives offline, the scenery may not.
@@ -225,8 +225,8 @@ Then, in DevTools:
 - **Application → Service Workers** shows one activated worker scoped to `/` (today's deployment base).
 - Reload once, then **Network → Offline** and reload again: the list still renders, with the
   staleness line reporting an honest age, on a blank basemap.
-- **Network** shows `taipei.pmtiles` requests served by the browser, *not* by the worker (no
-  "ServiceWorker" in the Size column), and returning `206`.
+- **Network** shows `basemap/tiles/…pbf` requests served by the browser, *not* by the worker (no
+  "ServiceWorker" in the Size column).
 - After changing `sw.js` and rebuilding, the new worker sits in "waiting" until every tab on the app
   has been closed -- a reload alone will not hand over.
 

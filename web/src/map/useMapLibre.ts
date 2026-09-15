@@ -8,12 +8,10 @@
  * with an empty dependency list and torn down in its cleanup; nothing else in
  * this app ever constructs one.
  *
- * **The basemap is a static file, not a service.** `taipei.pmtiles` is served
- * from this app's own origin and read by HTTP range request through the pmtiles
- * protocol, so a browser downloads only the few hundred KB of tiles actually on
- * screen, and there is no API key, no account and no third party watching the
- * user pan around their own city. That is why the archive exists at all -- see
- * `docs/basemap.md`.
+ * **The basemap is static files, not a service.** Each tile is its own file on
+ * this app's origin (`basemap/tiles/{z}/{x}/{y}.pbf`), so a browser downloads only
+ * the tiles actually on screen, and there is no API key, no account and no third
+ * party watching the user pan around their own city -- see `docs/basemap.md`.
  *
  * **Labels are self-hosted too.** Symbol layers need glyph PBFs, which usually
  * come from a font CDN. Here they come from `basemap/fonts/` on this origin --
@@ -22,7 +20,7 @@
  * at all. The style itself is plain data in `basemapStyle.ts`.
  */
 import { useEffect, useRef, useState } from "react";
-import { MapLibreMap, addProtocol, setWorkerUrl } from "maplibre-gl";
+import { MapLibreMap, setWorkerUrl } from "maplibre-gl";
 // MapLibre 6 works out its worker's URL at runtime, as
 // `new URL('./maplibre-gl-worker.mjs', import.meta.url)` -- a path that exists
 // in `node_modules/maplibre-gl/dist` and nowhere a bundler puts things. Vite's
@@ -35,7 +33,6 @@ import { MapLibreMap, addProtocol, setWorkerUrl } from "maplibre-gl";
 // imports -- and hand back the URL of the emitted asset, in dev and in the
 // build alike. `setWorkerUrl` takes precedence over MapLibre's guess.
 import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
-import { Protocol } from "pmtiles";
 import type { Lang } from "../i18n";
 import { basemapStyle } from "./basemapStyle";
 
@@ -46,16 +43,13 @@ export const TAIPEI_CENTER: [number, number] = [121.5170, 25.0478];
 export const INITIAL_ZOOM = 12;
 
 /**
- * MapLibre's global setup: the worker it parses tiles on, and the `pmtiles://`
- * scheme the basemap is served over. Both are per-page rather than per-map, and
- * both must be in place *before* a map is constructed -- a style referencing an
- * unregistered scheme fails outright.
+ * MapLibre's global setup: the worker it parses tiles on. Per-page rather than
+ * per-map, and it must be in place *before* a map is constructed.
  */
 let configured = false;
 function configureMapLibre(): void {
   if (configured) return;
   setWorkerUrl(maplibreWorkerUrl);
-  addProtocol("pmtiles", new Protocol().tile);
   configured = true;
 }
 

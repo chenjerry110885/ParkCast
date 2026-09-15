@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BASEMAP_URL, GLYPHS_URL, basemapStyle, labelLang } from "../src/map/basemapStyle";
+import { BASEMAP_BOUNDS, GLYPHS_URL, TILES_URL, basemapStyle, labelLang } from "../src/map/basemapStyle";
 
 /** Every string anywhere in a value, so a nested URL cannot hide from the check. */
 function strings(value: unknown): string[] {
@@ -19,15 +19,32 @@ describe("basemapStyle", () => {
     }
   });
 
-  it("serves glyphs and tiles from this origin only", () => {
+  it("loads plain tile files within the extract's bounds, not a range-read archive", () => {
+    const source = basemapStyle("light", "zh").sources.basemap as {
+      tiles?: string[];
+      url?: string;
+      bounds?: number[];
+      maxzoom?: number;
+    };
+    // Cloudflare's static hosting ignores Range, so a pmtiles:// archive draws nothing live.
+    expect(source.url).toBeUndefined();
+    expect(source.tiles).toEqual([TILES_URL]);
+    expect(TILES_URL).toBe(`${window.location.origin}/basemap/tiles/{z}/{x}/{y}.pbf`);
+    expect(source.bounds).toEqual(BASEMAP_BOUNDS);
+    expect(source.maxzoom).toBe(15);
+  });
+
+  it("fetches tiles and glyphs from this origin only", () => {
     const style = basemapStyle("dark", "zh");
     expect(style.glyphs).toBe(GLYPHS_URL);
     expect(GLYPHS_URL).toBe("/basemap/fonts/{fontstack}/{range}.pbf");
-    expect(BASEMAP_URL).toBe("/basemap/taipei.pmtiles");
     // The attribution is the only place a third-party URL may appear, and it is a link, not a fetch.
     const { attribution: _attribution, ...source } = style.sources.basemap as Record<string, unknown>;
     const fetched = [...strings(style.glyphs), ...strings(source), ...strings(style.layers)];
-    expect(fetched.filter((s) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s) && !s.startsWith("pmtiles:///"))).toEqual([]);
+    const offOrigin = fetched.filter(
+      (s) => /^[a-z][a-z0-9+.-]*:\/\//i.test(s) && !s.startsWith(`${window.location.origin}/`),
+    );
+    expect(offOrigin).toEqual([]);
   });
 
   it("asks for no sprite images, because none is shipped", () => {
@@ -47,7 +64,7 @@ describe("basemapStyle", () => {
     expect(JSON.stringify(symbolLayers(basemapStyle("light", "en")))).toContain("name:en");
   });
 
-  it("names only the fonts the deploy gate ships, plus Devanagari, which the device draws", () => {
+  it("names only fonts the deploy gate ships, plus Devanagari, which the device draws", () => {
     const fonts = new Set<string>();
     for (const theme of ["light", "dark"] as const) {
       for (const lang of ["zh", "en"] as const) {

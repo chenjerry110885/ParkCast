@@ -1,6 +1,6 @@
 /**
- * The basemap's MapLibre style: the self-hosted tile archive, the self-hosted
- * label glyphs, and the Protomaps theme drawn from them.
+ * The basemap's MapLibre style: the self-hosted tiles, the self-hosted label
+ * glyphs, and the Protomaps theme drawn from them.
  *
  * Plain data, kept apart from `useMapLibre.ts` so it can be tested without a
  * WebGL context. Every URL in it is on this app's own origin: no tile server, no
@@ -21,8 +21,21 @@ import type { Lang } from "../i18n";
  */
 const base = import.meta.env.BASE_URL.replace(/\/+$/, "");
 
-/** Where the archive is served from. */
-export const BASEMAP_URL = `${base}/basemap/taipei.pmtiles`;
+/**
+ * Where the tiles are served from: one static file per tile, unpacked from the
+ * extract by `scripts/unpack-tiles.mjs`. Not a `.pmtiles` archive -- reading one
+ * needs HTTP Range requests, and Cloudflare's static hosting ignores Range.
+ * Absolute, because MapLibre fetches tiles from inside its worker.
+ */
+const origin = typeof window === "undefined" ? "" : window.location.origin;
+export const TILES_URL = `${origin}${base}/basemap/tiles/{z}/{x}/{y}.pbf`;
+
+/**
+ * The extract's bounding box, [west, south, east, north] -- the BBOX in
+ * `scripts/build-basemap.mjs`, which a script test holds this to. MapLibre asks
+ * for no tile outside it, so panning past the edge requests nothing that 404s.
+ */
+export const BASEMAP_BOUNDS: [number, number, number, number] = [121.4433, 24.9576, 121.6405, 25.1999];
 
 /**
  * Where the label glyphs are served from: one file per font per 256 codepoints,
@@ -71,8 +84,10 @@ export function basemapStyle(theme: "light" | "dark", lang: Lang): StyleSpecific
     sources: {
       basemap: {
         type: "vector",
-        url: `pmtiles://${BASEMAP_URL}`,
+        tiles: [TILES_URL],
+        minzoom: 0,
         maxzoom: BASEMAP_MAX_ZOOM,
+        bounds: BASEMAP_BOUNDS,
         attribution: ATTRIBUTION,
       },
     },

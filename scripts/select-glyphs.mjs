@@ -17,12 +17,11 @@
  * a pinned commit of github.com/protomaps/basemaps-assets, and point --fonts at
  * them. Re-run it after rebuilding the basemap: new place names can need new ranges.
  */
-import { copyFileSync, existsSync, mkdirSync, openSync, readSync, rmSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { copyFileSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { ARCHIVE, openArchive, repoRoot, tileCoords, webModule } from "./basemap-archive.mjs";
 
-const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const ARCHIVE = join(repoRoot, "web", "public", "basemap", "taipei.pmtiles");
 const OUT = join(repoRoot, "web", "public", "basemap", "fonts");
 
 /** The languages the app offers, as `labelLang` in `web/src/map/basemapStyle.ts` names them. */
@@ -77,16 +76,6 @@ export function labelInputs(layerLists) {
   return { keys, sourceLayers, fonts };
 }
 
-class FileSource {
-  constructor(path) { this.fd = openSync(path, "r"); }
-  getKey() { return "taipei.pmtiles"; }
-  async getBytes(offset, length) {
-    const buf = Buffer.alloc(length);
-    readSync(this.fd, buf, 0, length, offset);
-    return { data: buf.buffer.slice(buf.byteOffset, buf.byteOffset + length) };
-  }
-}
-
 async function main() {
   const flag = process.argv.indexOf("--fonts");
   if (flag < 0 || !process.argv[flag + 1]) {
@@ -99,16 +88,14 @@ async function main() {
     process.exit(2);
   }
   if (!existsSync(ARCHIVE)) {
-    console.error("select-glyphs: web/public/basemap/taipei.pmtiles is missing -- run scripts/build-basemap.mjs first");
+    console.error("select-glyphs: web/basemap-src/taipei.pmtiles is missing -- run scripts/build-basemap.mjs first");
     process.exit(2);
   }
 
   // The web app's own copies, so the style read here is the style the app draws.
-  const web = (p) => import(pathToFileURL(join(repoRoot, "web", "node_modules", p)).href);
-  const { PMTiles } = await web("pmtiles/dist/esm/index.js");
-  const { VectorTile } = await web("@mapbox/vector-tile/index.js");
-  const { PbfReader } = await web("pbf/index.js");
-  const { layers, namedTheme } = await web("protomaps-themes-base/dist/esm/index.js");
+  const { VectorTile } = await webModule("@mapbox/vector-tile/index.js");
+  const { PbfReader } = await webModule("pbf/index.js");
+  const { layers, namedTheme } = await webModule("protomaps-themes-base/dist/esm/index.js");
 
   // The same call `web/src/map/basemapStyle.ts` makes, labels only.
   const { keys, sourceLayers, fonts } = labelInputs(
@@ -116,33 +103,23 @@ async function main() {
       LABEL_LANGS.map((lang) => layers("basemap", namedTheme(theme), { lang, labelsOnly: true }))),
   );
 
-  const archive = new PMTiles(new FileSource(ARCHIVE));
-  const h = await archive.getHeader();
-  const lon2x = (lon, z) => Math.floor(((lon + 180) / 360) * 2 ** z);
-  const lat2y = (lat, z) => {
-    const r = (lat * Math.PI) / 180;
-    return Math.floor(((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * 2 ** z);
-  };
+  const archive = await openArchive();
   const codepoints = new Set();
   let tiles = 0;
-  for (let z = h.minZoom; z <= h.maxZoom; z++) {
-    for (let x = lon2x(h.minLon, z); x <= lon2x(h.maxLon, z); x++) {
-      for (let y = lat2y(h.maxLat, z); y <= lat2y(h.minLat, z); y++) {
-        const tile = await archive.getZxy(z, x, y);
-        if (!tile) continue;
-        tiles++;
-        const vt = new VectorTile(new PbfReader(new Uint8Array(tile.data)));
-        for (const name of Object.keys(vt.layers)) {
-          if (!sourceLayers.has(name)) continue;
-          const layer = vt.layers[name];
-          for (let i = 0; i < layer.length; i++) {
-            const props = layer.feature(i).properties;
-            for (const key of keys) {
-              const value = props[key];
-              if (value === undefined || typeof value === "boolean") continue;
-              for (const ch of String(value)) codepoints.add(ch.codePointAt(0));
-            }
-          }
+  for (const [z, x, y] of tileCoords(await archive.getHeader())) {
+    const tile = await archive.getZxy(z, x, y);
+    if (!tile) continue;
+    tiles++;
+    const vt = new VectorTile(new PbfReader(new Uint8Array(tile.data)));
+    for (const name of Object.keys(vt.layers)) {
+      if (!sourceLayers.has(name)) continue;
+      const layer = vt.layers[name];
+      for (let i = 0; i < layer.length; i++) {
+        const props = layer.feature(i).properties;
+        for (const key of keys) {
+          const value = props[key];
+          if (value === undefined || typeof value === "boolean") continue;
+          for (const ch of String(value)) codepoints.add(ch.codePointAt(0));
         }
       }
     }

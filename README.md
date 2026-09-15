@@ -276,9 +276,12 @@ workflow, and the runbook.
 The map tiles are **self-hosted**, not pulled from a keyed provider. Most hobby projects reach for
 MapTiler or Mapbox here, but those need an API key and a billing account, and this project has no
 server to hide a key behind. Instead, a ~23 MB [Protomaps](https://protomaps.com/) `.pmtiles`
-archive covering Taipei is served as a static file and read by the browser via range request.
+extract covering Taipei is unpacked into 633 static tile files, which the browser fetches directly
+(the static host ignores the range requests an archive would need). Street and place names use
+self-hosted label fonts, committed under `web/public/basemap/fonts/`.
 
-It is not committed (regenerable, so it does not belong in git) -- one command rebuilds it:
+The extract and its tiles are not committed (regenerable, so they do not belong in git) -- one
+command rebuilds both:
 
 ```bash
 node scripts/build-basemap.mjs
@@ -300,9 +303,9 @@ the probability entirely once it is too old to answer the question.
 that registers it, so the first load has nothing cached behind it. Saying "works offline" without
 that clause would be the same kind of overclaim the rest of this app exists to avoid.
 
-The service worker deliberately leaves the 23 MB basemap alone: it is read by HTTP range request,
-and caching partial responses is a well-known way to serve corrupt tiles. Offline you get the full
-ranked list and no map tiles, which is the right half to keep.
+The service worker deliberately leaves the 44 MB of basemap tiles alone -- far more than an offline
+cache should hold -- so offline you get the full ranked list and whatever tiles the browser's own
+cache still has, which is the right half to keep.
 
 The icons are generated, not drawn — `zlib` and `struct`, no image library:
 

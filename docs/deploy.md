@@ -12,7 +12,7 @@ once by a human. Until it happens, the live address stays a placeholder:
 ## 1. What is deployed where
 
 One Cloudflare Worker, `parkcast`, on its own `workers.dev` subdomain. The web app's production build
-and the ~23 MB basemap archive are served as **static assets**, free and unlimited on Workers Free. The
+and the basemap's 633 tile files (44 MB) are served as **static assets**, free and unlimited on Workers Free. The
 forecast lives in exactly **one Workers KV key**, `latest` — `grid.bin` bytes followed by `lots.json`
 bytes, with metadata describing the split — written once per publish. The collector, running on the
 desktop, hands every successful publish to a background **upload thread** that `PUT`s the pair to the
@@ -46,7 +46,8 @@ paid product; any future feature is a static file or a new forecast artifact ins
 | KV reads | 100,000 / day | ≤ 1 per isolate per 60 s | bounded by Worker requests |
 | KV writes | 1,000 / day, per write | 288; the 180-second minimum spacing between accepted uploads caps *all* writers at 480/day | under the limit even with a stolen secret |
 | KV storage | 1 GB | ~0.22 MB | — |
-| Static asset file size | 25 MiB | basemap ~23 MB | gated on every deploy (`docs/basemap.md`) |
+| Static asset file size | 25 MiB | largest basemap tile 406 KB | the tile archive itself is refused by the deploy gate (`docs/basemap.md`) |
+| Static asset files | 20,000 per version | ~780 (633 of them tiles) | — |
 | CPU per request | 10 ms | upload path's validation, measured 2026-09-14 in Node against the real 1,090-lot pair: **~1.5 ms** | Cloudflare's own CPU time is measured after go-live; a cheaper fallback validation is defined in the design spec §4.3 if it ever comes in over budget |
 
 Why KV and not R2: enabling R2 requires a payment method on the account, even to use its free tier — a
@@ -195,8 +196,8 @@ the built script — but only after confirming `worker/wrangler.jsonc` does not 
 map, because a set `upload_source_maps` means that file would actually be uploaded to Cloudflare, and
 silently deleting it before the bundle scan would hide a real source-map upload rather than a harmless
 local debug artifact. It then scans the built app and the Worker bundle against an explicit allowlist —
-required files present, no `.map`/`.ts`/`.env*`/`.dev.vars*`/database file anywhere, the basemap at
-15–25 MiB, the label fonts present (only glyph ranges of the three shipped fonts under
+required files present, no `.map`/`.ts`/`.env*`/`.dev.vars*`/database file anywhere, at least 600
+basemap tiles and no `.pmtiles` archive, the label fonts present (only glyph ranges of the three shipped fonts under
 `basemap/fonts/`), no byte of the upload secret's value or shape — and finally runs `npm audit` in both
 `web/` and `worker/` for review (informational, not a gate). `deploy-check.mjs` itself refuses to run at
 all if `CLOUDFLARE_API_TOKEN` is set in the shell.

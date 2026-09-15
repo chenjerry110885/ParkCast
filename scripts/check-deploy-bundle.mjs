@@ -14,23 +14,29 @@ import { fileURLToPath } from "node:url";
 
 const MiB = 1024 * 1024;
 
+/** One basemap tile, as scripts/unpack-tiles.mjs writes it. */
+const TILE = /^basemap\/tiles\/\d{1,2}\/\d{1,6}\/\d{1,6}\.pbf$/;
+/** 633 tiles on 2026-09-15; a floor against a partial or failed unpack. */
+export const MIN_TILES = 600;
+
 export const ALLOWED = [
   /^index\.html$/, /^404\.html$/, /^sw\.js$/, /^manifest\.webmanifest$/, /^favicon\.svg$/,
   /^icon-(192|512|maskable-512)\.png$/, /^_headers$/, /^robots\.txt$/, /^fallback\.css$/,
-  /^basemap\/taipei\.pmtiles$/, /^assets\/[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(js|css)$/,
+  TILE, /^assets\/[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(js|css)$/,
   // Label glyphs (docs/basemap.md): one file per font per 256 codepoints, plus the font licence.
   /^basemap\/fonts\/OFL\.txt$/, /^basemap\/fonts\/Noto Sans (Regular|Medium|Italic)\/\d{1,5}-\d{1,5}\.pbf$/,
 ];
 export const LABEL_FONTS = ["Noto Sans Regular", "Noto Sans Medium", "Noto Sans Italic"];
 export const REQUIRED = [
   "index.html", "404.html", "sw.js", "manifest.webmanifest", "_headers", "fallback.css",
-  "robots.txt", "basemap/taipei.pmtiles", "basemap/fonts/OFL.txt",
+  "robots.txt", "basemap/tiles/0/0/0.pbf", "basemap/fonts/OFL.txt",
   // Every label font's Latin range: without it the map ships with no street or place names.
   ...LABEL_FONTS.map((font) => `basemap/fonts/${font}/0-255.pbf`),
 ];
 export const FORBIDDEN = [
   /\.map$/i, /\.(ts|tsx|py)$/i, /(^|\/)\.env/i, /(^|\/)\.dev\.vars/i,
-  /\.(sqlite|db|parquet)$/i, /^artifacts\//, /^data\//,
+  // The tile archive too: the site serves the unpacked tiles, and a static host ignores Range anyway.
+  /\.(sqlite|db|parquet|pmtiles)$/i, /^artifacts\//, /^data\//,
 ];
 const SECRET_SHAPE = /pcu_[A-Za-z0-9_-]{43}/;
 const PRIVATE_KEY = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
@@ -84,7 +90,7 @@ function scanContent(path, label, secrets, problems) {
   }
 }
 
-export function checkBundle({ distDir, workerDir = null, secrets = [], basemapBytes = [15 * MiB, 25 * MiB] }) {
+export function checkBundle({ distDir, workerDir = null, secrets = [], minTiles = MIN_TILES }) {
   const problems = [];
   const files = listFiles(distDir);
   for (const rel of files) {
@@ -96,11 +102,8 @@ export function checkBundle({ distDir, workerDir = null, secrets = [], basemapBy
   for (const rel of REQUIRED) {
     if (!files.includes(rel)) problems.push(`missing required file: ${rel}`);
   }
-  if (files.includes("basemap/taipei.pmtiles")) {
-    const size = statSync(join(distDir, "basemap/taipei.pmtiles")).size;
-    const [min, max] = basemapBytes;
-    if (size < min || size >= max) problems.push(`basemap size ${size} outside ${min}..${max}`);
-  }
+  const tiles = files.filter((rel) => TILE.test(rel)).length;
+  if (tiles < minTiles) problems.push(`only ${tiles} basemap tiles, expected at least ${minTiles}`);
   if (workerDir) {
     for (const rel of listFiles(workerDir)) {
       if (FORBIDDEN.some((r) => r.test(rel))) problems.push(`forbidden file in the Worker bundle: ${rel}`);

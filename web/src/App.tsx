@@ -74,7 +74,7 @@ import { listRows, rankLots } from "./rank";
 import type { Grid, Lot, LotsDoc } from "./types";
 
 /**
- * The map, and everything it drags in: MapLibre, pmtiles, the Protomaps theme
+ * The map, and everything it drags in: MapLibre, the Protomaps theme
  * and `maplibre-gl.css`. Split out of the entry chunk so the first paint costs
  * what the list costs and not what the map costs.
  *

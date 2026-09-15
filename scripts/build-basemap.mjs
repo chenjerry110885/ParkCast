@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 /**
- * Build the self-hosted Taipei basemap: `web/public/basemap/taipei.pmtiles`.
+ * Build the self-hosted Taipei basemap: extract `web/basemap-src/taipei.pmtiles`
+ * from the public Protomaps planet build, then unpack it into one static file per
+ * tile under `web/public/basemap/tiles/` (scripts/unpack-tiles.mjs).
  *
  * ParkCast is a static site with no server and no secrets, so a hosted tile
  * provider (MapTiler, Mapbox, Stadia) is out -- they all require an API key
- * and a billing account. Instead the map is served from a single `.pmtiles`
- * archive, extracted from the public Protomaps planet build and read by the
- * browser via HTTP range request. See docs/basemap.md for the full story.
+ * and a billing account. The archive itself is not served: Cloudflare's static
+ * hosting ignores the Range requests a `.pmtiles` read needs, so the site serves
+ * the unpacked tiles instead. See docs/basemap.md for the full story.
  *
  * This script does NOT download or run anything on its own. The extractor is
  * a third-party binary (go-pmtiles), and fetching and executing one without
@@ -28,7 +30,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
 const repoRoot = join(fileURLToPath(import.meta.url), "..", "..");
-const OUT_PATH = join(repoRoot, "web", "public", "basemap", "taipei.pmtiles");
+const OUT_PATH = join(repoRoot, "web", "basemap-src", "taipei.pmtiles");
 
 // Facts measured 2026-09-06 -- see docs/basemap.md. Do not re-derive without
 // re-running the extract; the source planet build is versioned by date and
@@ -108,7 +110,7 @@ everything needed to do it yourself:
   4. Re-run this script. It will extract:
        source: ${SOURCE_URL}
        bbox:   ${BBOX}
-       output: web/public/basemap/taipei.pmtiles  (~23 MB)
+       output: web/basemap-src/taipei.pmtiles  (~23 MB), then web/public/basemap/tiles/
 `);
   process.exit(1);
 }
@@ -118,7 +120,7 @@ if (!bin) {
   printMissingBinaryInstructions();
 }
 
-mkdirSync(join(repoRoot, "web", "public", "basemap"), { recursive: true });
+mkdirSync(join(repoRoot, "web", "basemap-src"), { recursive: true });
 
 console.log(`build-basemap: using ${bin}`);
 console.log(`build-basemap: extracting bbox ${BBOX} (maxzoom ${MAXZOOM}) from`);
@@ -139,4 +141,10 @@ execFileSync(
 
 const { size } = statSync(OUT_PATH);
 const mb = (size / (1024 * 1024)).toFixed(1);
-console.log(`build-basemap: wrote web/public/basemap/taipei.pmtiles (${size} bytes, ${mb} MB)`);
+console.log(`build-basemap: wrote web/basemap-src/taipei.pmtiles (${size} bytes, ${mb} MB)`);
+
+const { unpackTiles } = await import("./unpack-tiles.mjs");
+const unpacked = await unpackTiles();
+console.log(
+  `build-basemap: unpacked ${unpacked.count} tiles (${(unpacked.bytes / 1048576).toFixed(1)} MB) to web/public/basemap/tiles/`,
+);

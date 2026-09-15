@@ -10,14 +10,15 @@ const put = (rel, content = "x") => {
   mkdirSync(dirname(join(dist, rel)), { recursive: true });
   writeFileSync(join(dist, rel), content);
 };
-const check = (extra = {}) => checkBundle({ distDir: dist, basemapBytes: [1, 1000], ...extra });
+const check = (extra = {}) => checkBundle({ distDir: dist, minTiles: 2, ...extra });
 
 beforeEach(() => {
   dist = mkdtempSync(join(tmpdir(), "dist-"));
   for (const f of ["index.html", "404.html", "sw.js", "manifest.webmanifest", "_headers", "fallback.css",
     "robots.txt", "favicon.svg", "icon-192.png", "icon-512.png", "icon-maskable-512.png",
     "assets/index-DsYeQuWT.js", "assets/index-Bmp4thyU.css", "assets/maplibre-gl-worker-AbPoOmO0.js"]) put(f);
-  put("basemap/taipei.pmtiles", "p".repeat(500));
+  put("basemap/tiles/0/0/0.pbf");
+  put("basemap/tiles/1/1/0.pbf");
   put("basemap/fonts/OFL.txt");
   for (const font of LABEL_FONTS) {
     put(`basemap/fonts/${font}/0-255.pbf`);
@@ -56,11 +57,16 @@ for (const [label, rel] of [
   });
 }
 
-test("fails when the basemap is missing or the wrong size", () => {
-  rmSync(join(dist, "basemap/taipei.pmtiles"));
-  assert.ok(check().some((p) => p.includes("basemap/taipei.pmtiles")));
-  put("basemap/taipei.pmtiles", "p".repeat(5000));
-  assert.ok(check().some((p) => p.includes("basemap size")));
+test("fails when basemap tiles are missing or too few", () => {
+  rmSync(join(dist, "basemap/tiles/1"), { recursive: true });
+  assert.ok(check().some((p) => p.includes("basemap tiles")));
+  rmSync(join(dist, "basemap/tiles/0/0/0.pbf"));
+  assert.ok(check().some((p) => p.includes("basemap/tiles/0/0/0.pbf")));
+});
+
+test("fails on the tile archive itself, which the site never serves", () => {
+  put("basemap/taipei.pmtiles", "p");
+  assert.ok(check().some((p) => p.includes("taipei.pmtiles")));
 });
 
 test("fails on the upload secret, its shape, or the deploy key anywhere in any file", () => {

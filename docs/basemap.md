@@ -3,25 +3,36 @@
 ParkCast's map needs basemap tiles -- roads, water, place labels, the geography a driver orients
 by. Every hosted tile provider (MapTiler, Mapbox, Stadia) requires an API key and a billing
 account, and this project has no server and no secrets: no backend to hide a key behind, no billing
-relationship to maintain. So the basemap is **self-hosted**: a single [Protomaps][protomaps]
-`.pmtiles` archive, checked out of the public planet build, served as a plain static file, and read
-by the browser via HTTP range request (no tile server -- MapLibre's `pmtiles://` protocol fetches
-byte ranges directly).
+relationship to maintain. So the basemap is **self-hosted**: a [Protomaps][protomaps] `.pmtiles` extract
+of the public planet build, unpacked into one plain static file per tile that MapLibre fetches
+directly -- no tile server, no key.
 
 [protomaps]: https://protomaps.com/
 
 ## The file
 
-`web/public/basemap/taipei.pmtiles` -- **not committed to git** (see `.gitignore`). It is
-regenerable in about 15 seconds from a public source with no key, so it does not belong in version
-control any more than `node_modules` does.
+Two generated forms, both **not committed to git** (see `.gitignore`) -- regenerable in under a
+minute from a public source with no key, so they do not belong in version control any more than
+`node_modules` does:
+
+- `web/basemap-src/taipei.pmtiles` -- the extract. Local only: the site never serves it.
+- `web/public/basemap/tiles/{z}/{x}/{y}.pbf` -- every tile in it, unpacked by
+  `scripts/unpack-tiles.mjs` (which `build-basemap.mjs` runs after each extract). This is what the
+  site serves and what `web/src/map/basemapStyle.ts` points MapLibre at.
+
+**Why tiles, not the archive.** A `.pmtiles` archive is read by HTTP range request, and Cloudflare's
+static-asset hosting ignores `Range`: asked for 127 bytes of the archive, it answered `200` with all
+24 MB, on every retry, with no `Accept-Ranges` -- measured on the first live release, 2026-09-15 --
+and the pmtiles client aborts on that, so the live map drew no roads. Serving through the Worker
+instead would cost a Worker request per map move against the free daily limit. Plain tile files need
+no ranges, stay free and unlimited static assets, and are well under the 20,000-file limit.
 
 | | |
 |---|---|
 | Source | `https://build.protomaps.com/20260914.pmtiles` (128 GB planet build, public, no auth) |
 | Bounding box | `121.4433,24.9576,121.6405,25.1999` -- all 1,088 tracked lots plus ~2 km margin |
 | Zoom levels | 0-15 |
-| Result | **~23 MB**, 633 tiles |
+| Result | archive **~23 MB**; unpacked, **633 tiles, 44.1 MB**, largest 406 KB (the archive stores tiles gzipped; they are written decompressed) |
 | Extract time | ~15 s over ~40 HTTP range requests (nothing else downloads) |
 
 Zoom 15 is not an arbitrary cutoff: it is the planet build's own ceiling for this bbox. An extract
@@ -35,13 +46,13 @@ starting `4.` so it stays on the tile schema the `protomaps-themes-base` style r
 `SOURCE_URL` in `scripts/build-basemap.mjs` and the table above. The file already extracted keeps
 working; only rebuilding needs a live source.
 
-**The deploy gate requires this file, sized 15–25 MiB.** `scripts/check-deploy-bundle.mjs` (run by
+**The deploy gate requires the tiles.** `scripts/check-deploy-bundle.mjs` (run by
 `npm run deploy:check --prefix worker`, `docs/deploy.md`) fails the build if
-`web/dist/basemap/taipei.pmtiles` is missing, or is outside that range -- 15 MiB as a floor against a
-truncated or empty extract, 25 MiB because that is Cloudflare Workers' own per-file size limit for a
-static asset (this file, at ~23 MB, is the only asset anywhere near it). Rebuild it before deploying if
-`web/dist/` doesn't have it yet -- the build does not generate it, only copies whatever
-`web/public/basemap/taipei.pmtiles` already holds.
+`basemap/tiles/0/0/0.pbf` is missing or fewer than 600 tiles are present (633 on 2026-09-15) -- a floor
+against a partial unpack -- and refuses any `.pmtiles` file in the bundle. The web build does not
+generate tiles, only copies whatever `web/public/basemap/tiles/` holds, so on a fresh clone run
+`node scripts/build-basemap.mjs` (or `node scripts/unpack-tiles.mjs`, if the archive is already there)
+before deploying. `web/public/_headers` labels the tiles `application/x-protobuf`.
 
 ## Labels
 
@@ -69,7 +80,7 @@ character locally; nothing breaks.
 
 **The deploy gate requires the fonts.** `scripts/check-deploy-bundle.mjs` requires `OFL.txt` and each
 font's `0-255.pbf`, and allows nothing under `basemap/fonts/` but range files of those three fonts.
-After a release, `scripts/smoke-live.mjs` checks that the live site serves both the archive and a glyph
+After a release, `scripts/smoke-live.mjs` checks that the live site serves both a tile and a glyph
 file.
 
 [assets]: https://github.com/protomaps/basemaps-assets

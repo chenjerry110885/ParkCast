@@ -16,7 +16,7 @@ here. The repository is the handoff.
 |---|---|---|
 | Code, docs, scripts, `CLAUDE.md` | **git** | 114 tracked files. `git clone` is the whole story. |
 | `data/` | **by hand** | 40 MB, **2.6 MB zipped** — SQLite is mostly empty pages. **Irreplaceable — see below.** |
-| `web/public/basemap/taipei.pmtiles` | regenerate | 24 MB, `node scripts/build-basemap.mjs` |
+| `web/basemap-src/taipei.pmtiles`, `web/public/basemap/tiles/` | regenerate | 24 MB + 44 MB, `node scripts/build-basemap.mjs` |
 | `web/public/artifacts/` | regenerate | `node scripts/sync-artifacts.mjs`, dev only |
 
 **`data/` is the only thing that cannot be rebuilt.** Every observation in it was fetched from a
