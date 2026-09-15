@@ -24,3 +24,10 @@ services:
       - ../../parkcast-scratch:/scratch
     environment:
       TZ: Asia/Taipei
+      PARKCAST_UPLOAD_URL: https://parkcast.tpe-dev.workers.dev/artifacts/latest
+    secrets:
+      - parkcast_upload_secret
+
+secrets:
+  parkcast_upload_secret:
+    file: ./secrets/parkcast_upload_secret

@@ -14,6 +14,6 @@
   "kv_namespaces": [
     { "binding": "ARTIFACTS", "id": "REPLACE_WITH_PROD_KV_ID", "preview_id": "REPLACE_WITH_PREVIEW_KV_ID" }
   ],
-  "vars": { "PRODUCTION_HOST": "parkcast.REPLACE-SUBDOMAIN.workers.dev" },
+  "vars": { "PRODUCTION_HOST": "parkcast.tpe-dev.workers.dev" },
   "secrets": { "required": ["UPLOAD_SECRET"] }
 }

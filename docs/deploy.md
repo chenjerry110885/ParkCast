@@ -2,9 +2,9 @@
 
 **Nothing described here has been deployed yet.** The design was approved 2026-09-14
 (`docs/superpowers/specs/2026-09-14-deployment-design.md`); the Worker, the collector's upload path,
-the hardened container and the deploy scripts are built and staged on `feat/cloudflare-deploy` but the
-Cloudflare account, its KV namespaces and its secret do not exist yet — that is the one-time setup
-below, done once by a human. Until it happens, the live address stays a placeholder:
+the hardened container and the deploy scripts are built and merged to `main`, but the Cloudflare
+account, its KV namespaces and its secret do not exist yet — that is the one-time setup below, done
+once by a human. Until it happens, the live address stays a placeholder:
 `https://parkcast.<name>.workers.dev`.
 
 ---
@@ -66,8 +66,11 @@ agent. Cloudflare and GitHub steps happen in a browser; the two commands happen 
    ```
    git config core.hooksPath scripts/hooks
    ```
-3. Create a short-lived **setup key** — a custom API token, restricted to this account only, expiring in
-   one day, with the permissions Task 13 confirms `wrangler` actually needs for this setup. Enter it in a
+3. Create a short-lived **setup key** — a custom API token, restricted to this account only, expiring
+   within a few days, with Account · Workers Scripts · Edit, Account · Workers KV Storage · Edit and
+   Account · Account Settings · Read (add User · User Details · Read and User · Memberships · Read only
+   if `wrangler` reports an authentication error). The same key may also carry the first release (§5)
+   in the same shell, then gets revoked. Enter it in a
    **fresh PowerShell** (Git Bash rewrites a path-like value such as `PARKCAST_BASE=/` into a Windows
    path — measured 2026-09-14 — so set Cloudflare credentials from PowerShell, never Git Bash):
    ```powershell
@@ -88,12 +91,15 @@ agent. Cloudflare and GitHub steps happen in a browser; the two commands happen 
 5. Generate the collector's upload secret and push it to the Worker — through `cmd`, not a PowerShell
    pipe, because a PowerShell pipe appends a trailing newline and the file and the value `wrangler`
    sends would then differ:
+   still in `worker/` (the script writes `docker/secrets/parkcast_upload_secret` wherever it is run
+   from, and prints nothing secret):
    ```
-   python scripts\new-upload-secret.py
+   python ..\scripts\new-upload-secret.py
    cmd /c "npx --no-install wrangler secret put UPLOAD_SECRET < ..\docker\secrets\parkcast_upload_secret"
    ```
-6. Wire the collector for uploads. Add to the `collector` service in `docker/docker-compose.yml`, with
-   the real subdomain from step 1:
+6. Wire the collector for uploads. In the `collector` service of `docker/docker-compose.yml`, add
+   `PARKCAST_UPLOAD_URL` to the **existing** `environment:` block (a second `environment:` key is a
+   YAML duplicate) and add a `secrets:` list, with the real subdomain from step 1:
    ```yaml
        environment:
          TZ: Asia/Taipei
@@ -124,8 +130,8 @@ agent. Cloudflare and GitHub steps happen in a browser; the two commands happen 
    ```bash
    MSYS_NO_PATHCONV=1 docker exec docker-collector-1 python -c "import pathlib; p = pathlib.Path('/scratch/.probe'); p.write_bytes(b'ok'); p.unlink(); print('scratch writable')"
    ```
-7. Clear the setup key from the shell and revoke it in the dashboard — it has done everything it needs
-   to:
+7. Once the first release has passed, clear the setup key from the shell and revoke it in the
+   dashboard (or let it expire) — it has done everything it needs to:
    ```powershell
    Remove-Item Env:CLOUDFLARE_API_TOKEN
    ```
@@ -190,7 +196,8 @@ map, because a set `upload_source_maps` means that file would actually be upload
 silently deleting it before the bundle scan would hide a real source-map upload rather than a harmless
 local debug artifact. It then scans the built app and the Worker bundle against an explicit allowlist —
 required files present, no `.map`/`.ts`/`.env*`/`.dev.vars*`/database file anywhere, the basemap at
-15–25 MiB, no byte of the upload secret's value or shape — and finally runs `npm audit` in both
+15–25 MiB, the label fonts present (only glyph ranges of the three shipped fonts under
+`basemap/fonts/`), no byte of the upload secret's value or shape — and finally runs `npm audit` in both
 `web/` and `worker/` for review (informational, not a gate). `deploy-check.mjs` itself refuses to run at
 all if `CLOUDFLARE_API_TOKEN` is set in the shell.
 
@@ -260,7 +267,7 @@ upload.
 
 | Situation | Action |
 |---|---|
-| Upload secret may have leaked | `python scripts\new-upload-secret.py --force` to write a new one; from a fresh PowerShell with the deploy key, `cd worker` then `cmd /c "npx --no-install wrangler secret put UPLOAD_SECRET < ..\docker\secrets\parkcast_upload_secret"`. That command refuses when the latest uploaded version is not the deployed one (after a rollback or a `deploy:preview`); then run `cmd /c "npx --no-install wrangler versions secret put UPLOAD_SECRET < ..\docker\secrets\parkcast_upload_secret"` instead, followed by `npx --no-install wrangler versions deploy <the version id it printed>@100% --yes` — but that new version copies the latest *uploaded* version's code, so after rolling back a bad deploy, release a good build with `deploy:release` first and then use plain `secret put`; `docker compose -f docker/docker-compose.yml up -d --build --force-recreate` so the collector picks up the new secret file after its next tick; if a false forecast is already live, `npx --no-install wrangler kv key delete latest --binding ARTIFACTS` |
+| Upload secret may have leaked | `python scripts\new-upload-secret.py --force` to write a new one; from a fresh PowerShell with the deploy key, `cd worker` then `cmd /c "npx --no-install wrangler secret put UPLOAD_SECRET < ..\docker\secrets\parkcast_upload_secret"`. That command refuses when the latest uploaded version is not the deployed one (after a rollback or a `deploy:preview`); then run `cmd /c "npx --no-install wrangler versions secret put UPLOAD_SECRET < ..\docker\secrets\parkcast_upload_secret"` instead, followed by `npx --no-install wrangler versions deploy <the version id it printed>@100% --yes` — but that new version copies the latest *uploaded* version's code, so after rolling back a bad deploy, or right after a `deploy:preview` of code not yet released, release a good build with `deploy:release` first and then use plain `secret put`; `docker compose -f docker/docker-compose.yml up -d --build --force-recreate` so the collector picks up the new secret file after its next tick; if a false forecast is already live, `npx --no-install wrangler kv key delete latest --binding ARTIFACTS` |
 | Deploy key may have leaked | revoke it on the Cloudflare dashboard; review recent deployments there; treat any deployment you don't recognise as a malicious one |
 | Malicious or broken deploy | `npx --no-install wrangler rollback --yes --message "<reason>"` (the same call `deploy:release` already makes automatically on a failed smoke test); redeploy with `web/public/sw.js`'s `VERSION` bumped so every visitor's cached worker drops its old cache; rotate both the deploy key and the upload secret |
 | Flooding | nothing to do until 00:00 UTC (08:00 Taipei), when the daily Worker-request limit resets — the app, the map and the last forecast keep serving from static assets throughout, nothing is billed, and the collector pauses uploads on its own; if it recurs, revisit a custom domain with firewall rules, deliberately out of scope today |

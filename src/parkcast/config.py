@@ -100,10 +100,10 @@ NOT_UPDATING_AFTER_SEC = 24 * 3600
 NOT_UPDATING_MIN_COVERAGE = 0.5
 
 # --- uploading to the deployed site (docs/deploy.md) ---
-# The Worker's hostname. Not secret -- the repository is public. The sentinel
-# keeps uploads switched off until the account exists; `upload.upload_url`
-# refuses any URL whose host is not exactly this.
-UPLOAD_HOST = "parkcast.REPLACE-SUBDOMAIN.workers.dev"
+# The Worker's hostname. Not secret -- the repository is public. A host
+# containing "REPLACE" keeps uploads switched off; `upload.upload_url` refuses
+# any URL whose host is not exactly this.
+UPLOAD_HOST = "parkcast.tpe-dev.workers.dev"
 UPLOAD_URL_ENV = "PARKCAST_UPLOAD_URL"
 UPLOAD_SECRET_PATH = Path("/run/secrets/parkcast_upload_secret")
 UPLOAD_TIMEOUT_SEC = 10          # per socket operation
