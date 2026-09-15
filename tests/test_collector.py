@@ -57,3 +57,69 @@ def test_fetch_failure_propagates_rather_than_writing_partial_data(conn):
     with pytest.raises(ConnectionError):
         collector.collect_once(conn, {}, now=fixture_observed_at(), fetch=boom)
     assert store.count_rows(conn) == 0
+
+
+import requests as _requests
+
+
+class _FakeResponse:
+    def __init__(self, status=200, headers=None, chunks=(b'{"ok": true}',)):
+        self.status_code = status
+        self.headers = headers or {}
+        self._chunks = chunks
+        self.is_redirect = 300 <= status < 400 and "Location" in self.headers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise _requests.HTTPError(str(self.status_code))
+
+    def iter_content(self, chunk_size):
+        yield from self._chunks
+
+
+def _patch_get(monkeypatch, response, calls):
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return response
+
+    monkeypatch.setattr(collector.requests, "get", fake_get)
+
+
+def test_fetch_json_streams_without_following_redirects(monkeypatch):
+    calls = []
+    _patch_get(monkeypatch, _FakeResponse(chunks=(b'{"a":', b" 1}")), calls)
+    assert collector.fetch_json("https://example.test/x.json") == {"a": 1}
+    _, kwargs = calls[0]
+    assert kwargs["allow_redirects"] is False
+    assert kwargs["stream"] is True
+    assert kwargs["timeout"] == collector.config.HTTP_TIMEOUT_SEC
+
+
+def test_fetch_json_refuses_a_redirect(monkeypatch):
+    _patch_get(monkeypatch, _FakeResponse(302, {"Location": "http://10.0.0.1/"}), [])
+    with pytest.raises(collector.FeedError):
+        collector.fetch_json("https://example.test/x.json")
+
+
+def test_fetch_json_refuses_a_declared_oversize_body(monkeypatch):
+    _patch_get(monkeypatch, _FakeResponse(headers={"Content-Length": "2000"}), [])
+    with pytest.raises(collector.FeedError):
+        collector.fetch_json("https://example.test/x.json", max_bytes=1000)
+
+
+def test_fetch_json_refuses_an_oversize_stream_without_a_length(monkeypatch):
+    _patch_get(monkeypatch, _FakeResponse(chunks=(b"x" * 600, b"x" * 600)), [])
+    with pytest.raises(collector.FeedError):
+        collector.fetch_json("https://example.test/x.json", max_bytes=1000)
+
+
+def test_fetch_json_still_raises_on_http_errors(monkeypatch):
+    _patch_get(monkeypatch, _FakeResponse(503), [])
+    with pytest.raises(_requests.HTTPError):
+        collector.fetch_json("https://example.test/x.json")

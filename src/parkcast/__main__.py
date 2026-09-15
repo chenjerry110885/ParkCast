@@ -2,7 +2,7 @@
 import logging
 from datetime import date, datetime
 
-from parkcast import config, store
+from parkcast import config, store, upload
 from parkcast.collector import fetch_json
 from parkcast.metadata import Lot, capacity_map, parse_metadata, snapshot_metadata
 from parkcast.scheduler import publish_artifacts, run_forever
@@ -48,11 +48,14 @@ def main() -> None:
             "(every lot flags NO_CAPACITY) until the next day-rollover refresh"
         )
 
+    # None unless the upload URL and the secret file are both valid; logs why once.
+    uploader = upload.from_environment()
+
     run_forever(
         conn,
         capacities,
         refresh_metadata=build_capacities,
-        publish=lambda conn: publish_artifacts(conn, _lots),
+        publish=lambda conn: publish_artifacts(conn, _lots, uploader=uploader),
     )
 
 

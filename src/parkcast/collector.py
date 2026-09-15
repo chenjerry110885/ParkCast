@@ -1,4 +1,5 @@
 """One collection tick: fetch, parse, validate, persist."""
+import json
 import time
 from dataclasses import dataclass
 
@@ -15,10 +16,32 @@ class TickResult:
     advanced: bool
 
 
-def fetch_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC) -> dict:
-    response = requests.get(url, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
+class FeedError(RuntimeError):
+    """The feed answered with something we refuse to read."""
+
+
+def fetch_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC,
+               max_bytes: int = config.MAX_FEED_BYTES) -> dict:
+    """GET one feed blob as JSON, refusing redirects and oversized bodies.
+
+    Both feed URLs answer 200 directly (checked 2026-09-14), so a redirect is
+    never legitimate: following one would let a hijacked endpoint send this
+    container's requests anywhere, including the local network. The size cap
+    bounds memory against a body that never ends.
+    """
+    with requests.get(url, timeout=timeout, allow_redirects=False, stream=True) as response:
+        if response.is_redirect or 300 <= response.status_code < 400:
+            raise FeedError(f"refusing a redirect from the feed (HTTP {response.status_code})")
+        response.raise_for_status()
+        declared = response.headers.get("Content-Length")
+        if declared is not None and declared.isdigit() and int(declared) > max_bytes:
+            raise FeedError(f"feed body of {declared} bytes exceeds {max_bytes}")
+        body = bytearray()
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            body += chunk
+            if len(body) > max_bytes:
+                raise FeedError(f"feed body exceeds {max_bytes} bytes")
+    return json.loads(bytes(body))
 
 
 def collect_once(

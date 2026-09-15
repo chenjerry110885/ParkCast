@@ -14,7 +14,7 @@ from pathlib import Path
 
 from parkcast import artifacts, config, liveness, store
 from parkcast.collector import collect_once
-from parkcast.compact import compact_day
+from parkcast.compact import compact_day, day_bounds
 from parkcast.forecast import Blend, load_history
 from parkcast.grid import build_grid
 from parkcast.report import build_report, format_report
@@ -73,7 +73,7 @@ def _first_day_to_archive(conn, today: date) -> date:
     return today if oldest is None else min(taipei_date(oldest), today)
 
 
-def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
+def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=None) -> None:
     """Rebuild and republish grid.bin and lots.json from current history.
 
     Lots are ordered by id and filtered to those that take cars at all and have
@@ -87,6 +87,9 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
 
     Every refusal returns rather than raises. Publishing sits downstream of
     collection and must never be able to stop it.
+
+    `uploader`, when given, receives the exact published bytes and never blocks
+    (see `upload.Uploader`).
     """
     history = load_history(conn, cold_dir=config.PARQUET_DIR)
     # `counts.lot`, not `recent`: the filter asks "has this lot ever produced a
@@ -168,15 +171,19 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR) -> None:
         "generated_at": int(time.time()),
         "base_data_ts": history.latest_ts,
     }
-    artifacts.publish(
-        out_dir,
-        grid_blob=artifacts.encode_grid(grid, lot_ids=lot_ids, **identity),
-        lots_blob=artifacts.build_lots_json(ordered, not_updating=withheld, **identity),
-    )
+    grid_blob = artifacts.encode_grid(grid, lot_ids=lot_ids, **identity)
+    lots_blob = artifacts.build_lots_json(ordered, not_updating=withheld, **identity)
+    artifacts.publish(out_dir, grid_blob=grid_blob, lots_blob=lots_blob)
     log.info(
         "published %s lots x %s horizons, %s not updating",
         len(ordered), config.HORIZON_COUNT, len(withheld),
     )
+    if uploader is not None:
+        # The same bytes just written locally, handed to a thread that never
+        # blocks this loop. Uploading is downstream of publishing, which is
+        # downstream of collection.
+        uploader.offer(grid_blob, lots_blob, base_data_ts=history.latest_ts,
+                       roster_id=artifacts.roster_id(lot_ids))
 
 
 def run_forever(
@@ -257,7 +264,14 @@ def run_forever(
                 break
             archived_day += timedelta(days=1)
 
-        removed = store.prune(conn, now_fn() - config.HOT_RETENTION_SEC)
+        # Prune is the only thing that destroys rows, and it must never take a
+        # day compaction has not written out. Compaction stops at its first
+        # failure and retries next slot; without this bound, a day whose
+        # compaction kept failing for ~24 h fell out of the 48 h window and was
+        # deleted with no cold copy. `archived_day` is the earliest day not yet
+        # archived, so nothing from its first second onward may go.
+        cutoff = min(now_fn() - config.HOT_RETENTION_SEC, day_bounds(archived_day)[0])
+        removed = store.prune(conn, cutoff)
         if removed:
             log.info("pruned %s rows beyond the hot window", removed)
 

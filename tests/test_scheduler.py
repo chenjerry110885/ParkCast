@@ -510,6 +510,68 @@ def test_failed_compaction_is_retried_for_the_same_day_and_collection_continues(
     assert len(ticks) == 4, "collection must continue through a compaction failure"
 
 
+def test_prune_keeps_a_day_whose_compaction_keeps_failing(monkeypatch):
+    """Prune must never delete rows no Parquet file holds.
+
+    Compaction stops at its first failure, but prune used to run regardless with
+    a cutoff of now - 48h. A day whose compaction failed for about a day was
+    therefore deleted from the hot store with no cold copy -- gone for good.
+    Found by the 2026-09-14 security review.
+    """
+    cutoffs = []
+    ticks = []
+    # 23:59:30 Taipei on 2026-09-04; compaction of 09-04 is due at the rollover.
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+
+    def fake_prune(conn, cutoff_ts):
+        cutoffs.append(cutoff_ts)
+        return 0
+
+    monkeypatch.setattr(scheduler.store, "prune", fake_prune)
+
+    def always_fails(conn, day):
+        raise OSError("disk full")
+
+    def collect(conn, capacities):
+        ticks.append(clock.now)
+        # Three days of slots: well past the point where now - 48h passes the
+        # start of 2026-09-04.
+        if len(ticks) > 3 * 288:
+            raise _StopLoop()
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn, archive=always_fails)
+
+    unarchived_start, _ = day_bounds(date(2026, 9, 4))
+    assert clock.now - config.HOT_RETENTION_SEC > unarchived_start, "scenario must reach the old failure"
+    assert max(cutoffs) <= unarchived_start, "prune reached into a day that was never archived"
+
+
+def test_prune_uses_the_normal_window_once_days_are_archived(monkeypatch):
+    seen = []  # (now at the prune, cutoff it used)
+    clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
+
+    def fake_prune(conn, cutoff_ts):
+        seen.append((clock.now, cutoff_ts))
+        if len(seen) > 3 * 288:
+            raise _StopLoop()
+        return 0
+
+    monkeypatch.setattr(scheduler.store, "prune", fake_prune)
+
+    def collect(conn, capacities):
+        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+                              now_fn=clock.now_fn, archive=_no_archive)
+
+    now_at_prune, cutoff = seen[-1]
+    assert cutoff == now_at_prune - config.HOT_RETENTION_SEC
+
+
 def test_startup_catches_up_days_a_restart_left_unarchived(tmp_path, monkeypatch):
     """A restart between midnight and the first rollover must not lose the day.
 
@@ -1068,3 +1130,39 @@ def test_publish_artifacts_withholds_a_lot_that_is_not_updating(tmp_path):
     assert doc["lots"][0]["u"] == start
     assert "u" not in doc["lots"][1]
     assert doc["base_data_ts"] == start + 26 * 12 * 300
+
+
+class _RecordingUploader:
+    def __init__(self):
+        self.offers = []
+
+    def offer(self, grid, lots, *, base_data_ts, roster_id):
+        self.offers.append((grid, lots, base_data_ts, roster_id))
+
+
+def test_publish_artifacts_hands_the_published_bytes_to_the_uploader(tmp_path):
+    """What goes to the site must be byte-identical to what was published here."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    up = _RecordingUploader()
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, uploader=up)
+    conn.close()
+
+    assert len(up.offers) == 1
+    grid, lots, base_data_ts, roster = up.offers[0]
+    assert grid == (out_dir / "grid.bin").read_bytes()
+    assert lots == (out_dir / "lots.json").read_bytes()
+    header = artifacts.decode_header(grid)
+    assert (base_data_ts, roster) == (header["base_data_ts"], header["roster_id"])
+
+
+def test_publish_artifacts_offers_nothing_when_it_refuses_to_publish(tmp_path):
+    conn = store.connect(tmp_path / "t.sqlite")  # no observations: publishing refuses
+    up = _RecordingUploader()
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], tmp_path / "artifacts", uploader=up)
+    conn.close()
+
+    assert up.offers == []

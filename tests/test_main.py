@@ -49,6 +49,22 @@ def test_startup_passes_the_loaded_capacities_through(monkeypatch, tmp_path):
     assert seen["capacities"] == {"TPE0001": 50}
 
 
+def test_publishing_is_wired_to_the_uploader_from_the_environment(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(entry.config, "DB_PATH", tmp_path / "hot.sqlite")
+    _capture_run_forever(monkeypatch, seen)
+    monkeypatch.setattr(entry, "build_capacities", lambda day: {})
+    sentinel = object()
+    monkeypatch.setattr(entry.upload, "from_environment", lambda: sentinel)
+    calls = []
+    monkeypatch.setattr(entry, "publish_artifacts", lambda conn, lots, **kw: calls.append(kw))
+
+    entry.main()
+    seen["kwargs"]["publish"]("conn")
+
+    assert calls == [{"uploader": sentinel}]
+
+
 def test_compaction_is_wired_up_by_default():
     """The cold store must not depend on a caller remembering to ask for it.
 

@@ -20,6 +20,11 @@ POLL_PERIOD_MIN = 5
 RETRY_DELAYS_SEC = (45, 45, 60)  # if data_ts has not advanced
 HTTP_TIMEOUT_SEC = 30
 
+# Largest feed body accepted. Measured 2026-09-14: availability 421,825 B,
+# metadata 2,883,343 B. 32 MiB is ~11x the larger, so growth never trips it,
+# while a hijacked or broken endpoint cannot stream gigabytes into memory.
+MAX_FEED_BYTES = 32 * 1024 * 1024
+
 HOT_RETENTION_SEC = 48 * 3600
 
 # Consecutive slots that may end without a fresh tick before the collector
@@ -93,3 +98,17 @@ NOT_UPDATING_AFTER_SEC = 24 * 3600
 # this share of its 5-minute slots. Without it, a lot that read 5 before a long
 # collector outage and 5 again after it would look frozen straight across it.
 NOT_UPDATING_MIN_COVERAGE = 0.5
+
+# --- uploading to the deployed site (docs/deploy.md) ---
+# The Worker's hostname. Not secret -- the repository is public. The sentinel
+# keeps uploads switched off until the account exists; `upload.upload_url`
+# refuses any URL whose host is not exactly this.
+UPLOAD_HOST = "parkcast.REPLACE-SUBDOMAIN.workers.dev"
+UPLOAD_URL_ENV = "PARKCAST_UPLOAD_URL"
+UPLOAD_SECRET_PATH = Path("/run/secrets/parkcast_upload_secret")
+UPLOAD_TIMEOUT_SEC = 10          # per socket operation
+UPLOAD_DEADLINE_SEC = 30         # whole attempt, DNS included
+UPLOAD_DAILY_CAP = 300           # attempts per Taipei day; 288 slots exist
+UPLOAD_MAX_SKIP_TICKS = 12       # back-off ceiling: one hour of slots
+UPLOAD_AUTH_RETRY_SEC = 3600     # after a 401
+UPLOAD_LIMIT_PROBE_SEC = 3600    # after the daily-limit response
