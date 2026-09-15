@@ -405,6 +405,7 @@ describe("install", () => {
     expect([...worker.cacheStore.keys()].sort()).toEqual(
       [
         SCOPE,
+        `${SCOPE}fallback.css`,
         `${SCOPE}favicon.svg`,
         `${SCOPE}icon-192.png`,
         `${SCOPE}icon-512.png`,
@@ -554,8 +555,13 @@ describe("the shell's static fallback", () => {
     expect(root).toContain("停車先知無法載入");
   });
 
-  it("carries its own styles, because the stylesheet may be the missing file", () => {
-    expect(root).toMatch(/style="[^"]*font-family/);
+  it("carries its own styles, from the unhashed stylesheet the worker precaches", () => {
+    // No longer inline -- Task 10's Content-Security-Policy leaves no
+    // `'unsafe-inline'` for `style-src` to grant it. `fallback.css` is
+    // precached in `sw.js` for exactly the same reason the markup itself is:
+    // so it is still there in the offline case this fallback exists for.
+    expect(html).toContain('<link rel="stylesheet" href="/fallback.css" />');
+    expect(root).toContain('class="boot-fallback"');
   });
 });
 

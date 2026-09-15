@@ -1,30 +1,41 @@
 import react from '@vitejs/plugin-react'
+import { fileURLToPath } from 'node:url'
+import type { Plugin } from 'vite'
 import { defineConfig } from 'vitest/config'
+import { createLiveArtifacts } from './dev/liveArtifacts.ts'
+import { createLocalArtifacts } from './dev/localArtifacts.ts'
 
 /**
- * Where a production build expects to be served from.
- *
- * GitHub Pages serves a project site under the repository name, so a build made
- * for the root would ask for `/assets/...` and get the user's 404 page. Setting
- * it here rather than passing `--base` at build time means the deploy is one
- * `npm run build` with no flag to forget; `PARKCAST_BASE` overrides it for a
- * root domain (`PARKCAST_BASE=/`) or a CDN prefix.
- *
- * Dev and test stay at `/`: `command` is `serve` for both, and pinning them to
- * the sub-path would only make every local URL longer.
- *
- * `preview` is the exception, and needs asking for by name. It serves the
- * *build*, whose HTML already points at `/ParkCast/assets/...`, so serving it
- * from `/` gives a blank page and a wall of 404s -- and `command` is `serve`
- * there too, which is why `isPreview` has to carry the distinction. This is the
- * only way to check a Pages build locally, service worker scope included.
+ * Forecast files for `npm run dev`. With PARKCAST_LIVE_ORIGIN set, from the live
+ * site through a shared, budgeted copy; otherwise from web/.dev-artifacts/.
+ * Nothing under public/ -- whatever is there is copied into every build.
  */
-const PAGES_BASE = '/ParkCast/'
+function devArtifacts(): Plugin {
+  const live = process.env.PARKCAST_LIVE_ORIGIN
+  const middleware = live
+    ? createLiveArtifacts({ origin: live })
+    : createLocalArtifacts(fileURLToPath(new URL('./.dev-artifacts', import.meta.url)))
+  return {
+    name: 'parkcast-dev-artifacts',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        middleware(req, res, next).catch(next)
+      })
+    },
+  }
+}
 
 // https://vite.dev/config/
-export default defineConfig(({ command, isPreview }) => ({
-  base: process.env.PARKCAST_BASE ?? (command === 'build' || isPreview ? PAGES_BASE : '/'),
-  plugins: [react()],
+export default defineConfig({
+  // The app is served from the root of its workers.dev address (docs/deploy.md).
+  // PARKCAST_BASE overrides it -- set it from PowerShell: Git Bash rewrites "/"
+  // into a Windows path (measured 2026-09-14).
+  base: process.env.PARKCAST_BASE ?? '/',
+  plugins: [react(), devArtifacts()],
+  // Never reachable from the network: the dev server can read files and relay the live site.
+  server: { host: '127.0.0.1', strictPort: true },
+  preview: { host: '127.0.0.1', strictPort: true },
   test: {
     // jsdom, not node: later tasks render components against this same config.
     environment: 'jsdom',
@@ -34,4 +45,4 @@ export default defineConfig(({ command, isPreview }) => ({
     // at the missing wiring, and costs the next author an afternoon.
     setupFiles: ['./tests/setup.ts'],
   },
-}))
+})

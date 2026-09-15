@@ -634,6 +634,24 @@ describe("refresh", () => {
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByTestId("staleness")).toBeDefined();
   });
+
+  it("keeps its request rate bounded when every fetch fails for an hour", async () => {
+    useDrivableFakeTimers();
+    render(<App />);
+    await screen.findByTestId("staleness");
+    let calls = 0;
+    vi.stubGlobal("fetch", () => {
+      calls++;
+      return Promise.reject(new Error("offline"));
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+    });
+
+    // One refresh per REFRESH_MS asks for both files; a failure must never trigger a retry loop.
+    expect(calls).toBeLessThanOrEqual(2 * Math.ceil((60 * 60 * 1000) / REFRESH_MS) + 2);
+  });
 });
 
 describe("document language", () => {
@@ -665,6 +683,16 @@ describe("artifacts", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain(t("en").loadFailed);
     expect(screen.queryByTestId("lot-list")).toBeNull();
+  });
+
+  it("refuses a forecast dated in the future instead of calling it fresh", async () => {
+    const grid = makeGrid();
+    // base_data_ts sits at header offset 9; an hour ahead of the frozen clock.
+    new DataView(grid).setUint32(9, BASE_DATA_TS + 3600, true);
+    stubFetch(grid);
+    render(<App />);
+    expect(await screen.findByRole("alert")).toBeDefined();
+    expect(screen.queryByTestId("staleness")).toBeNull();
   });
 });
 

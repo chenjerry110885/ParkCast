@@ -1,0 +1,11 @@
+/* The static boot fallback in index.html and 404.html. Unhashed and precached,
+   so it is still there in the offline case the fallback exists for, and the
+   Content-Security-Policy needs no 'unsafe-inline'. No colours: the app's own
+   light and dark themes still apply when it is only the script that failed. */
+.boot-fallback {
+  margin: 0 auto;
+  max-width: 26rem;
+  padding: 4rem 1.5rem;
+  font-family: system-ui, sans-serif;
+  line-height: 1.6;
+}

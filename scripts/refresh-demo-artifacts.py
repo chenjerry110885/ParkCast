@@ -14,7 +14,7 @@ and the forecast is worse -- it is just not *stale*, which is a different fault.
 
 **This is not collection, and must never become it.**
 
-  - It writes to `web/public/artifacts/` only. `data/` is opened read-only, and
+  - It writes to `web/.dev-artifacts/` only. `data/` is opened read-only, and
     the one row this fetches goes into a throwaway copy of `hot.sqlite` in a
     temp directory that is deleted on the way out.
   - So it cannot fork the corpus. Two machines collecting the same feed into two
@@ -25,7 +25,7 @@ and the forecast is worse -- it is just not *stale*, which is a different fault.
     loop and should not be made into one.
 
     python scripts/refresh-demo-artifacts.py
-    python scripts/refresh-demo-artifacts.py --out web/public/artifacts
+    python scripts/refresh-demo-artifacts.py --out web/.dev-artifacts
 """
 import argparse
 import shutil
@@ -59,7 +59,7 @@ def describe(path: Path) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", default="web/public/artifacts",
+    parser.add_argument("--out", default="web/.dev-artifacts",
                         help="where to write grid.bin and lots.json")
     args = parser.parse_args()
 

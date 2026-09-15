@@ -1,0 +1,9 @@
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; worker-src 'self'; connect-src 'self'; font-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  Permissions-Policy: geolocation=(self), camera=(), microphone=(), payment=(), usb=()
+  Cross-Origin-Opener-Policy: same-origin
+  X-Frame-Options: DENY
+/sw.js
+  Cache-Control: no-cache

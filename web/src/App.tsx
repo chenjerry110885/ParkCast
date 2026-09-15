@@ -167,6 +167,13 @@ export const REFRESH_MS = 120_000;
  */
 export const MIN_REFETCH_MS = 30_000;
 
+/**
+ * How far ahead of this device's clock a reading may claim to be before it is
+ * refused. A reading from the future is a broken clock upstream or a forged
+ * upload; shown as it is, it would read "0 min old" forever (spec §6.2).
+ */
+export const FUTURE_TOLERANCE_SEC = 600;
+
 /** Passed to the Geolocation API, which starts it only after the permission decision. */
 const GEO_TIMEOUT_MS = 10_000;
 
@@ -267,6 +274,12 @@ export default function App() {
     loadArtifacts(ARTIFACTS_BASE).then(
       (loaded) => {
         if (cancelled) return;
+        if (loaded.grid.baseDataTs > Date.now() / 1000 + FUTURE_TOLERANCE_SEC) {
+          // Handled exactly like a failed load: keep the grid we have, or say we
+          // could not load. Never present it as fresh.
+          if (!loadedRef.current) setLoadFailed(true);
+          return;
+        }
         loadedRef.current = true;
         setArtifacts(loaded);
         setLoadFailed(false);

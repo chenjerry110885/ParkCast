@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Copy the collector's published artifacts into `web/public/artifacts/` for dev.
+ * Copy the collector's published artifacts into `web/.dev-artifacts/` for dev.
  *
  * The app never reads `data/` directly. `data/` is gitignored, the collector
  * rewrites it every five minutes, and Vite would serve a half-written file
@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = join(repoRoot, "data", "artifacts");
-const dest = join(repoRoot, "web", "public", "artifacts");
+const dest = join(repoRoot, "web", ".dev-artifacts");
 const NAMES = ["grid.bin", "lots.json"];
 
 mkdirSync(dest, { recursive: true });
@@ -37,5 +37,5 @@ for (const name of NAMES) {
   const tmp = join(dest, `${name}.tmp`);
   copyFileSync(from, tmp);
   renameSync(tmp, join(dest, name));
-  console.log(`sync-artifacts: ${name} -> web/public/artifacts/${name} (${bytes} bytes)`);
+  console.log(`sync-artifacts: ${name} -> web/.dev-artifacts/${name} (${bytes} bytes)`);
 }

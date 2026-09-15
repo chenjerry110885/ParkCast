@@ -70,6 +70,7 @@ const SCOPE = new URL("./", self.location.href).href;
 const PRECACHE = [
   "./",
   "./manifest.webmanifest",
+  "./fallback.css",
   "./favicon.svg",
   "./icon-192.png",
   "./icon-512.png",

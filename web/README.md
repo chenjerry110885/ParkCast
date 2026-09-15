@@ -15,14 +15,28 @@ That is what lets a client cache the ~186 KB `lots.json` and re-fetch only the ~
 ## Dev
 
 ```bash
-node ../scripts/sync-artifacts.mjs   # copy data/artifacts/ -> public/artifacts/
+node ../scripts/sync-artifacts.mjs   # copy data/artifacts/ -> .dev-artifacts/
 npm install
 npm run dev
 ```
 
 `data/` is gitignored and the collector rewrites it every five minutes, so the app never
-reads it directly — `sync-artifacts` takes a snapshot the dev server can hold still.
-`public/artifacts/` is gitignored too; run the sync after a fresh clone or the fetch 404s.
+reads it directly — `sync-artifacts` takes a snapshot the dev server can hold still, now written to
+the git-ignored `web/.dev-artifacts/` (not `public/artifacts/` — nothing under `public/` may hold dev
+data, since everything there is copied into every build). Run the sync after a fresh clone or the
+fetch 404s.
+
+**Testing against the live site instead**, once it exists (`docs/deploy.md`): set
+`PARKCAST_LIVE_ORIGIN` from PowerShell, not Git Bash, which rewrites path-like values —
+
+```powershell
+$env:PARKCAST_LIVE_ORIGIN = "https://parkcast.<name>.workers.dev"
+npm run dev
+```
+
+— and the dev server relays the two artifact files from one shared copy, refreshed from the live site
+at most once a minute and capped at 120 upstream requests an hour, instead of reading
+`.dev-artifacts/`.
 
 ## Checks
 
