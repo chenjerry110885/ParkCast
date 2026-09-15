@@ -426,6 +426,43 @@ deploy path, the collector's upload code, or the web build.
   deliberate (see "A pause is not a stop" in `docker/README.md`); the deploy design and its smoke test
   treat a stale or missing forecast as a warning, never a failure, for exactly this reason.
 
+### Web app structure (2026-09-15)
+
+The map-first redesign (`docs/superpowers/specs/2026-09-15-ui-redesign-design.md`) replaced the plain
+page's layout and most of its components. Two arrangements, one shell: phone (viewport width < 768 px)
+gets a full-screen map under a frosted **bottom sheet** with three snap points (`peek` / `half` /
+`full`, reached by drag or the grip button); desktop (≥ 768 px) gets the same content in a fixed
+**420 px side panel**, with locate and language buttons floating over the map instead of docked in a
+top bar. `Shell.tsx` picks between the two from one media query hook and nothing else in the app
+decides layout.
+
+| Path | Role |
+|---|---|
+| `web/src/layout/{Shell,BottomSheet,SidePanel}.tsx`, `layout/sheet.ts`, `layout/useMediaQuery.ts` | the two arrangements, and the pure snap-point arithmetic behind the sheet |
+| `web/src/map/{MapView.tsx,useMapLibre.ts,basemapStyle.ts,lotSource.ts,colour.ts}` | the map itself: MapLibre lifecycle, the self-hosted basemap style, the lots GeoJSON source with its selected, best-pick and hovered-card halo layers (the hover one is a `setFilter` on the hovered id, under the other two), and the red→amber→teal ramp (`colour.ts`) |
+| `web/src/{arrival,confidence,places,motion}.ts`, `web/src/useGeolocation.ts` | the redesign's pure logic modules, each independently tested (beside the older `rank.ts`, `geo.ts`, `format.ts`, `i18n.ts`, `artifacts.ts`) |
+| `web/src/components/{TopBar,PlaceSearch,ArrivalStrip,LotCard,LotList,ProbabilityRing,ConfidencePill,FreshnessBadge,Skeleton,Notice,LocateButton,LangToggle}.tsx` | UI |
+| `web/src/styles/{tokens,base,motion,components}.css` | replaces `index.css`, imported from `main.tsx` in that order |
+| `web/src/icons.tsx` | inline SVG icon components, no icon pack, no emoji |
+
+Removed, not carried forward: `web/src/index.css`, `components/DestinationSearch.tsx`,
+`components/LotRow.tsx`, `components/Scrubber.tsx`, `web/src/search.ts` — `PlaceSearch.tsx` replaces
+the first and last of those, `LotCard.tsx` the second, `ArrivalStrip.tsx` the third.
+
+**The three honesty rules the card still has to hold, restated for `LotCard.tsx`:**
+
+- **No data is never 0%.** A `null` probability renders as "no data" — a grey track, no arc, no
+  number — never a value on the ramp; a not-updating lot says so explicitly ("not updating · no change
+  in N h"), never a stale percentage standing in for it.
+- **The observed count is labelled with its age, and is never presented as a forecast.** `lots.json`'s
+  `f` field is the free count *at the reading*, shown as `f / c` alongside how old that reading is; it
+  is its own fact tile beside the probability ring, not folded into the ring, and the tile is omitted
+  entirely when `f` is `null` rather than showing a manufactured zero.
+- **P, walk and price stay three separate, visible facts.** The ranker's expected-cost score
+  (`rank.ts`) decides the list's order, but the number itself is never shown — the card always shows
+  the probability, the walking time and the price as three tiles a driver can weigh for themselves,
+  exactly as before the redesign.
+
 ---
 
 # Workflow Orchestration

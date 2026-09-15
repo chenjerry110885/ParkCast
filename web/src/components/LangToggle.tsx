@@ -1,3 +1,4 @@
+import { Globe } from "../icons";
 import type { Lang } from "../i18n";
 
 interface LangToggleProps {
@@ -18,10 +19,15 @@ export function LangToggle({ lang, onChange }: LangToggleProps) {
   return (
     <button
       type="button"
+      className="round-btn glass lang-btn"
       onClick={() => onChange(other)}
       aria-label={lang === "en" ? "切換為中文" : "Switch to English"}
     >
-      {other === "zh" ? "中文" : "English"}
+      <Globe size={16} />
+      {/* Keyed on the language, so React remounts it rather than editing the
+          text in place -- which is what gives `anim-fade` something to play, and
+          is how the spec's "crossfade" (§9 #15) ships. */}
+      <span key={other} className="anim-fade">{other === "zh" ? "中" : "EN"}</span>
     </button>
   );
 }

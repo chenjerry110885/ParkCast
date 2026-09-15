@@ -2,18 +2,27 @@
  * The map: every car park in the roster over a self-hosted basemap, coloured by
  * its chance of having a space at the driver's arrival time.
  *
- * Every lot is one point in **one** GeoJSON source drawn by **one** circle
- * layer. The obvious alternative -- a `maplibregl.Marker` per lot -- puts a
- * thousand absolutely-positioned DOM nodes on the page and repositions every one
- * of them on every frame of a pan. That is the difference between a map that
- * glides and one that stutters on the phone this app is meant to be used on.
+ * Every lot is one point in **one** GeoJSON source, drawn by one circle layer
+ * for the dots and three more underneath: a halo around the selection, a second
+ * one around the best pick, which is the one that breathes, and a third, faintest
+ * one under both for the card the pointer is over. The obvious
+ * alternative -- a `maplibregl.Marker` per lot -- puts a thousand
+ * absolutely-positioned DOM nodes on the page and repositions every one of them
+ * on every frame of a pan. That is the difference between a map that glides and
+ * one that stutters on the phone this app is meant to be used on. The selection
+ * is a *property on the feature* for the same reason: moving the ring is one
+ * `setData`, not a DOM node that follows a lot around.
  *
  * Colour comes from the feature's own `colour` property rather than from a
  * paint expression that re-derives it, so the map, the list and `colour.ts`
  * cannot drift apart -- and in particular the "no forecast" grey is decided in
  * exactly one place. Unknown lots are also drawn dimmer than known ones: two
  * channels saying the same true thing, for the reader who does not have the
- * legend memorised.
+ * legend memorised. That choice has a price, and it is worth stating: a change
+ * of arrival time recolours the dots *instantly*, because MapLibre transitions
+ * paint properties and not the data underneath them, so there is no
+ * `circle-color-transition` to be had on a `["get", "colour"]` fill. The
+ * animated reading of a forecast changing is the card's ring, not the map.
  *
  * **This module is a lazy boundary, and the component is a *default* export for
  * that reason.** MapLibre and its stylesheet are 333 KB gzipped between them --
@@ -26,17 +35,56 @@
  */
 import { useEffect, useMemo, useRef } from "react";
 import "maplibre-gl/dist/maplibre-gl.css";
-import type { GeoJSONSource, MapMouseEvent } from "maplibre-gl";
+// The one value this module takes from MapLibre. Everything else is a type, so
+// the lazy boundary above still decides when the library itself is downloaded.
+import { Popup } from "maplibre-gl";
+import type { GeoJSONSource, MapLayerMouseEvent, MapMouseEvent } from "maplibre-gl";
 import type { LatLon } from "../geo";
 import { t, type Lang } from "../i18n";
+import { prefersReducedMotion } from "../motion";
 import { toFeatureCollection, toPointCollection, type MapLot } from "./lotSource";
 import { useMapLibre } from "./useMapLibre";
 
 /** Exported so a test can assert on the source the app actually feeds. */
 export const LOTS_SOURCE = "lots";
 const LOTS_LAYER = "lots-circles";
+/**
+ * Two halo layers, not one with a filter that matches both.
+ *
+ * The best pick breathes and the selection does not, and a paint property is
+ * set per *layer*: one layer for both would mean the driver's own selection
+ * pulsing along with the recommendation, which says the app is unsure about the
+ * thing the driver just chose.
+ */
+const LOTS_HALO_LAYER = "lots-halo";
+const LOTS_BEST_HALO_LAYER = "lots-best-halo";
+/**
+ * The third ring: the card the pointer is over, on desktop.
+ *
+ * Its own layer with a filter on the hovered id, rather than a third boolean on
+ * the features or MapLibre's feature-state. The source stays what `lotSource.ts`
+ * says it is -- a pure reshape of the roster -- and hover changes many times a
+ * second while a mouse crosses a list, which is a `setFilter` on one layer
+ * rather than a rebuilt `FeatureCollection` per frame.
+ */
+const LOTS_HOVER_HALO_LAYER = "lots-hover-halo";
 const DESTINATION_SOURCE = "destination";
 const DESTINATION_LAYER = "destination-pin";
+
+/** `--accent` in `styles/tokens.css`. The halo is the same teal as the app's own. */
+const ACCENT = "#0fb5a5";
+/** The ring at rest, and at the bottom of the best pick's breath. */
+const HALO_OPACITY = 0.55;
+const HALO_OPACITY_DIM = 0.2;
+/** The hover ring, fainter than either of the other two: a hint, not a choice. */
+const HOVER_HALO_OPACITY = 0.5;
+/** One breath per second, each one slower than a blink: noticeable, not busy. */
+const PULSE_EVERY_MS = 1000;
+const PULSE_FADE_MS = 900;
+/** The glide to a lot the driver tapped in the list. */
+const CENTRE_MS = 600;
+/** Covers both rings of the destination ripple, including the late one's delay. */
+const RIPPLE_MS = 1200;
 
 export interface MapViewProps {
   /**
@@ -51,22 +99,89 @@ export interface MapViewProps {
   /** Called with the tapped point, so the map can *be* the destination input. */
   onPick?: (at: LatLon) => void;
   lang: Lang;
+  /** The lot the driver has tapped, in the list or here. Haloed, not recoloured. */
+  selectedId: string | null;
+  /** The lot the ranking put first. Haloed too, and the only one that pulses. */
+  bestId: string | null;
+  /**
+   * The lot whose card the pointer is over, or `null`. Drawn as a fainter ring
+   * *under* the selection's, so pointing at a card can never be mistaken for
+   * having chosen it. Absent on touch, where there is no hover to report.
+   */
+  hoverId?: string | null;
+  /** A dot was tapped. The map does not own the selection; it reports one. */
+  onSelectLot?: (id: string) => void;
+  /**
+   * Where to move the view, and *which time* the request was made.
+   *
+   * The nonce is the whole point: tapping the same card twice is two requests
+   * for the same coordinates, and without it the second one would be
+   * indistinguishable from a re-render. The map eases when the nonce changes
+   * and at no other time, so a parent that re-renders mid-pan cannot yank the
+   * view out from under a finger.
+   */
+  centerRequest: { lat: number; lon: number; nonce: number } | null;
+  /**
+   * The chrome covering the map's edges, in pixels -- the sheet at the bottom,
+   * the panel at the side. MapLibre centres on the *unpadded* middle, so this
+   * is what keeps a lot the driver just tapped from arriving underneath the
+   * sheet that was showing it.
+   */
+  padding: { top: number; right: number; bottom: number; left: number };
 }
 
-export default function MapView({ lots, destination, onPick, lang }: MapViewProps) {
+export default function MapView({
+  lots,
+  destination,
+  onPick,
+  lang,
+  // Defaulted because each one has a real opening state: nothing selected,
+  // nothing ranked yet, nowhere asked for, and no chrome over the map.
+  selectedId = null,
+  bestId = null,
+  hoverId = null,
+  onSelectLot,
+  centerRequest = null,
+  padding = { top: 0, right: 0, bottom: 0, left: 0 },
+}: MapViewProps) {
   const { containerRef, map, unavailable } = useMapLibre(lang);
   const s = t(lang);
 
-  const features = useMemo(() => toFeatureCollection(lots), [lots]);
+  const features = useMemo(
+    () => toFeatureCollection(lots, { selectedId, bestId }),
+    [lots, selectedId, bestId],
+  );
   const pin = useMemo(() => toPointCollection(destination), [destination]);
 
   // The taps outlive the render that registered them, so the handler reads the
   // latest callback from a ref instead of being torn down and re-added on every
-  // parent render.
+  // parent render. The strings ride along for the same reason: the popup is
+  // written by a handler registered once, in whatever language is current when
+  // it fires rather than when it was registered.
   const onPickRef = useRef(onPick);
   useEffect(() => {
     onPickRef.current = onPick;
   }, [onPick]);
+
+  const onSelectLotRef = useRef(onSelectLot);
+  useEffect(() => {
+    onSelectLotRef.current = onSelectLot;
+  }, [onSelectLot]);
+
+  const stringsRef = useRef(s);
+  useEffect(() => {
+    stringsRef.current = s;
+  }, [s]);
+
+  /** The one popup, so the selection effect below can close what a tap opened. */
+  const popupRef = useRef<Popup | null>(null);
+  /** Which lot the open popup is about, or `null` when none is open. */
+  const popupForRef = useRef<string | null>(null);
+
+  const centerRequestRef = useRef(centerRequest);
+  useEffect(() => {
+    centerRequestRef.current = centerRequest;
+  }, [centerRequest]);
 
   // Sources and layers, once per map. Added empty: the data effect below runs
   // in the same commit, immediately after this one.
@@ -90,6 +205,72 @@ export default function MapView({ lots, destination, onPick, lang }: MapViewProp
         "circle-stroke-opacity": 0.75,
       },
     });
+    // The halos, *under* the dots: a ring around the selection and a ring
+    // around the best pick, never a recolouring of either. Colour on this map
+    // means one thing -- the chance of a space -- and a second meaning laid
+    // over the same channel would make both unreadable. Their own layers rather
+    // than a wider stroke on the dots, because a stroke would grow the hit
+    // target and shift the texture of every dot around it.
+    //
+    // The two specs differ only in what they match and whether their opacity is
+    // animated; everything else is deliberately identical, so the ring the
+    // driver chose and the ring the ranking chose are the same ring.
+    map.addLayer(
+      {
+        id: LOTS_HALO_LAYER,
+        type: "circle",
+        source: LOTS_SOURCE,
+        filter: ["get", "selected"],
+        paint: {
+          // Tracks the dot ramp above, six-ish pixels clear of it at every zoom.
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 8, 13, 12, 16, 18],
+          "circle-color": "rgba(0, 0, 0, 0)",
+          "circle-stroke-width": 3,
+          "circle-stroke-color": ACCENT,
+          "circle-stroke-opacity": HALO_OPACITY,
+        },
+      },
+      LOTS_LAYER,
+    );
+    // Under the selection's ring, deliberately: when the driver hovers the card
+    // of a lot they have already chosen, the steady ring they chose is the one
+    // that shows. Empty filter to start -- nothing is hovered on first paint.
+    map.addLayer(
+      {
+        id: LOTS_HOVER_HALO_LAYER,
+        type: "circle",
+        source: LOTS_SOURCE,
+        filter: ["==", ["get", "id"], ""],
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 8, 13, 12, 16, 18],
+          "circle-color": "rgba(0, 0, 0, 0)",
+          "circle-opacity": 0,
+          "circle-stroke-width": 3,
+          "circle-stroke-color": ACCENT,
+          "circle-stroke-opacity": HOVER_HALO_OPACITY,
+        },
+      },
+      LOTS_HALO_LAYER,
+    );
+    map.addLayer(
+      {
+        id: LOTS_BEST_HALO_LAYER,
+        type: "circle",
+        source: LOTS_SOURCE,
+        filter: ["get", "best"],
+        paint: {
+          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 8, 13, 12, 16, 18],
+          "circle-color": "rgba(0, 0, 0, 0)",
+          "circle-stroke-width": 3,
+          "circle-stroke-color": ACCENT,
+          "circle-stroke-opacity": HALO_OPACITY,
+          // Declared with the rest of the paint, so the pulse below is only a
+          // value being toggled and not a place transitions are defined.
+          "circle-stroke-opacity-transition": { duration: PULSE_FADE_MS },
+        },
+      },
+      LOTS_LAYER,
+    );
 
     map.addSource(DESTINATION_SOURCE, { type: "geojson", data: empty });
     map.addLayer({
@@ -109,6 +290,9 @@ export default function MapView({ lots, destination, onPick, lang }: MapViewProp
       // layers with it, so this guards the StrictMode double-invoke rather than
       // the unmount.
       if (map.getLayer(DESTINATION_LAYER)) map.removeLayer(DESTINATION_LAYER);
+      if (map.getLayer(LOTS_BEST_HALO_LAYER)) map.removeLayer(LOTS_BEST_HALO_LAYER);
+      if (map.getLayer(LOTS_HOVER_HALO_LAYER)) map.removeLayer(LOTS_HOVER_HALO_LAYER);
+      if (map.getLayer(LOTS_HALO_LAYER)) map.removeLayer(LOTS_HALO_LAYER);
       if (map.getLayer(LOTS_LAYER)) map.removeLayer(LOTS_LAYER);
       if (map.getSource(DESTINATION_SOURCE)) map.removeSource(DESTINATION_SOURCE);
       if (map.getSource(LOTS_SOURCE)) map.removeSource(LOTS_SOURCE);
@@ -128,6 +312,16 @@ export default function MapView({ lots, destination, onPick, lang }: MapViewProp
     source?.setData(pin);
   }, [map, pin]);
 
+  // Hover is a filter, not data: pointing at a card moves one ring by swapping
+  // the id one layer matches on, with no `setData` and no feature rebuilt. The
+  // empty string matches nothing, because no lot has an empty id.
+  useEffect(() => {
+    // The layer effect owns the halos; this one only ever borrows one -- and on
+    // the first commit, before the style has loaded, there is not one to borrow.
+    if (map === null || map.getLayer(LOTS_HOVER_HALO_LAYER) === undefined) return;
+    map.setFilter(LOTS_HOVER_HALO_LAYER, ["==", ["get", "id"], hoverId ?? ""]);
+  }, [map, hoverId]);
+
   // Follow a destination that arrives from outside the map (geolocation), but
   // never yank the view out from under a finger that just tapped inside it.
   useEffect(() => {
@@ -136,16 +330,166 @@ export default function MapView({ lots, destination, onPick, lang }: MapViewProp
     if (!map.getBounds().contains(at)) map.easeTo({ center: at });
   }, [map, destination]);
 
+  // A new destination lands with a ripple, so the eye is told where to look
+  // without the map moving. Two plain divs rather than a `Marker`: this is a
+  // one-off flourish at a known screen position, and a Marker would mean a DOM
+  // node MapLibre repositions on every frame for the 1.2 s it exists.
+  useEffect(() => {
+    if (map === null || destination === null) return;
+    // No projection (jsdom's fake map), or a driver who asked for less motion:
+    // both mean there is nothing to draw, and neither is an error.
+    if (typeof map.project !== "function" || prefersReducedMotion()) return;
+    const container = map.getContainer();
+    const at = map.project([destination.lon, destination.lat]);
+    const rings = ["pin-ripple", "pin-ripple pin-ripple--late"].map((className) => {
+      const ring = document.createElement("div");
+      ring.className = className;
+      ring.style.left = `${at.x}px`;
+      ring.style.top = `${at.y}px`;
+      container.append(ring);
+      return ring;
+    });
+    const clear = () => {
+      for (const ring of rings) ring.remove();
+    };
+    const timer = window.setTimeout(clear, RIPPLE_MS);
+    return () => {
+      window.clearTimeout(timer);
+      clear();
+    };
+  }, [map, destination]);
+
+  // What the sheet and the side panel cover. MapLibre centres on the middle of
+  // the *unpadded* canvas, so without this a lot the driver just tapped arrives
+  // underneath the sheet that is showing it.
+  const { top, right, bottom, left } = padding;
   useEffect(() => {
     if (map === null) return;
-    const handler = (event: MapMouseEvent) => {
+    map.setPadding({ top, right, bottom, left });
+  }, [map, top, right, bottom, left]);
+
+  // Keyed on the nonce alone -- see `centerRequest` above -- and reading the
+  // coordinates from the ref, so a request that is rebuilt on every parent
+  // render still moves the map exactly once.
+  const centerNonce = centerRequest === null ? null : centerRequest.nonce;
+  useEffect(() => {
+    const request = centerRequestRef.current;
+    if (map === null || request === null) return;
+    map.easeTo({
+      center: [request.lon, request.lat],
+      duration: prefersReducedMotion() ? 0 : CENTRE_MS,
+    });
+  }, [map, centerNonce]);
+
+  // The best pick breathes: one slow fade of its own halo's stroke, forever, so
+  // the dot the ranking chose can be found on a city of dots without being the
+  // only thing on the screen that moves fast. Opacity and not radius, because a
+  // changing radius reads as a changing *value* on a map whose circles already
+  // mean something. Only the best layer is touched -- the selection's ring is
+  // steady, because the driver is not waiting to be convinced about it.
+  useEffect(() => {
+    if (map === null || bestId === null || prefersReducedMotion()) return;
+    const fade = (opacity: number) => {
+      // The layer effect owns the halos; this one only ever borrows one.
+      if (map.getLayer(LOTS_BEST_HALO_LAYER) === undefined) return;
+      map.setPaintProperty(LOTS_BEST_HALO_LAYER, "circle-stroke-opacity", opacity);
+    };
+    let dim = false;
+    const timer = window.setInterval(() => {
+      dim = !dim;
+      fade(dim ? HALO_OPACITY_DIM : HALO_OPACITY);
+    }, PULSE_EVERY_MS);
+    return () => {
+      window.clearInterval(timer);
+      fade(HALO_OPACITY);
+    };
+  }, [map, bestId]);
+
+  // Taps. Two handlers, because a tap on a dot and a tap on the city mean
+  // opposite things: "tell me about this car park" and "I am going here".
+  useEffect(() => {
+    if (map === null) return;
+    // One popup, reused. A popup per tap would leave a trail of them behind.
+    const popup = new Popup({ closeButton: false, closeOnClick: false, offset: 12 });
+    popupRef.current = popup;
+
+    const onDot = (event: MapLayerMouseEvent) => {
+      const properties = event.features?.[0]?.properties;
+      // `== null`: a feature can arrive with null properties, not just without.
+      if (properties == null) return;
+      const id: unknown = properties.id;
+      if (typeof id !== "string") return;
+      // Before the selection is reported, not after: the effect that closes a
+      // popup the selection has moved past must be able to tell *this* tap's own
+      // selection from one made anywhere else.
+      popupForRef.current = id;
+      onSelectLotRef.current?.(id);
+
+      const name: unknown = properties.name;
+      const probability: unknown = properties.probability;
+      // Built as nodes, never as an HTML string: a lot's name is feed data, and
+      // `innerHTML` would make whoever writes the feed the author of this page.
+      const box = document.createElement("div");
+      const title = document.createElement("b");
+      title.textContent = typeof name === "string" ? name : id;
+      const chance = document.createElement("span");
+      // Anything that is not a real number is "no data" -- never 0%, which is a
+      // claim about a car park that nobody made.
+      chance.textContent =
+        typeof probability === "number" && Number.isFinite(probability)
+          ? `${Math.round(probability * 100)}%`
+          : stringsRef.current.noData;
+      box.append(title, chance);
+      // The name and the chance, and nothing else: the expected-cost score
+      // orders the list, and is not a number to put in front of a driver.
+      popup.setLngLat(event.lngLat).setDOMContent(box).addTo(map);
+    };
+
+    const onMap = (event: MapMouseEvent) => {
+      // One mouse event reaches both handlers -- they are siblings on the same
+      // emitter, so the dot's cannot cancel this one. Asking what is actually
+      // under the point is what keeps a tap on a car park from also declaring
+      // it the destination.
+      if (map.queryRenderedFeatures(event.point, { layers: [LOTS_LAYER] }).length > 0) return;
+      popup.remove();
+      popupForRef.current = null;
       onPickRef.current?.({ lat: event.lngLat.lat, lon: event.lngLat.lng });
     };
-    map.on("click", handler);
+
+    // Desktop only in effect: a touch device has no hover to give a cursor to.
+    const pointer = () => {
+      map.getCanvas().style.cursor = "pointer";
+    };
+    const unpointer = () => {
+      map.getCanvas().style.cursor = "";
+    };
+
+    map.on("click", LOTS_LAYER, onDot);
+    map.on("click", onMap);
+    map.on("mouseenter", LOTS_LAYER, pointer);
+    map.on("mouseleave", LOTS_LAYER, unpointer);
     return () => {
-      map.off("click", handler);
+      popup.remove();
+      popupRef.current = null;
+      popupForRef.current = null;
+      map.off("click", LOTS_LAYER, onDot);
+      map.off("click", onMap);
+      map.off("mouseenter", LOTS_LAYER, pointer);
+      map.off("mouseleave", LOTS_LAYER, unpointer);
     };
   }, [map]);
+
+  // A popup describes the dot that was tapped, so it belongs to that selection
+  // and to no other. A card tapped in the list, or a selection cleared by a new
+  // destination, would otherwise leave it open over a lot the driver has moved
+  // on from -- naming one car park while the halo sits on another. The guard is
+  // what keeps a dot's *own* tap, which selects it a moment after opening the
+  // popup, from closing what it just opened.
+  useEffect(() => {
+    if (popupForRef.current === selectedId) return;
+    popupRef.current?.remove();
+    popupForRef.current = null;
+  }, [selectedId]);
 
   return (
     <div className="map">

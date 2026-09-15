@@ -172,7 +172,10 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=
         "base_data_ts": history.latest_ts,
     }
     grid_blob = artifacts.encode_grid(grid, lot_ids=lot_ids, **identity)
-    lots_blob = artifacts.build_lots_json(ordered, not_updating=withheld, **identity)
+    # The observed count behind each forecast row, from the same reading the
+    # grid was built from. `store.free_at` is one indexed query on data_ts.
+    free = store.free_at(conn, history.latest_ts)
+    lots_blob = artifacts.build_lots_json(ordered, not_updating=withheld, free=free, **identity)
     artifacts.publish(out_dir, grid_blob=grid_blob, lots_blob=lots_blob)
     log.info(
         "published %s lots x %s horizons, %s not updating",

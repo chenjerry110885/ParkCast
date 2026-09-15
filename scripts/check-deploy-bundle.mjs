@@ -25,6 +25,8 @@ export const ALLOWED = [
   TILE, /^assets\/[A-Za-z0-9_-]+-[A-Za-z0-9_-]{8}\.(js|css)$/,
   // Label glyphs (docs/basemap.md): one file per font per 256 codepoints, plus the font licence.
   /^basemap\/fonts\/OFL\.txt$/, /^basemap\/fonts\/Noto Sans (Regular|Medium|Italic)\/\d{1,5}-\d{1,5}\.pbf$/,
+  // The offline place index the search box uses (docs/basemap.md).
+  /^places\/taipei\.json$/,
 ];
 export const LABEL_FONTS = ["Noto Sans Regular", "Noto Sans Medium", "Noto Sans Italic"];
 export const REQUIRED = [
@@ -32,6 +34,7 @@ export const REQUIRED = [
   "robots.txt", "basemap/tiles/0/0/0.pbf", "basemap/fonts/OFL.txt",
   // Every label font's Latin range: without it the map ships with no street or place names.
   ...LABEL_FONTS.map((font) => `basemap/fonts/${font}/0-255.pbf`),
+  "places/taipei.json",
 ];
 export const FORBIDDEN = [
   /\.map$/i, /\.(ts|tsx|py)$/i, /(^|\/)\.env/i, /(^|\/)\.dev\.vars/i,

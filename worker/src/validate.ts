@@ -69,6 +69,11 @@ function validRow(row: unknown, index: number): boolean {
   if (!isRecord(price) || typeof price.k !== "string" || !PRICE_KINDS.has(price.k)) return false;
   if (price.k !== "unknown" && !(numberOrNull(price.lo) && numberOrNull(price.hi))) return false;
   if ("u" in row && !Number.isInteger(row.u)) return false;
+  // The observed free count (docs/superpowers/specs/2026-09-15-ui-redesign-design.md §7.1):
+  // absent, null, or a non-negative integer. Anything else is not our collector.
+  if ("f" in row && !(row.f === null || (Number.isInteger(row.f) && (row.f as number) >= 0))) {
+    return false;
+  }
   return true;
 }
 

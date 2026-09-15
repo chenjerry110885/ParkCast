@@ -104,3 +104,18 @@ def test_prune_removes_only_old_rows(conn):
     store.insert_snapshot(conn, snap(5000, 5180), {"TPE0001": 50})
     assert store.prune(conn, cutoff_ts=2000) == 1
     assert store.latest_data_ts(conn) == 5000
+
+
+def test_free_at_returns_each_lots_count_at_one_tick(tmp_path):
+    conn = store.connect(tmp_path / "t.sqlite")
+    store.insert_snapshot(
+        conn,
+        FeedSnapshot(1000, 1200, (Observation("A", 12, None), Observation("B", None, None))),
+        {"A": 50, "B": 50},
+    )
+    store.insert_snapshot(conn, FeedSnapshot(1300, 1500, (Observation("A", 7, None),)), {"A": 50})
+    # The parser already turned the feed's -9 sentinel into None (see feed.py's
+    # clean_count call): seen, reported nothing -> None, not dropped.
+    assert store.free_at(conn, 1000) == {"A": 12, "B": None}
+    assert store.free_at(conn, 1300) == {"A": 7}
+    assert store.free_at(conn, 999) == {}

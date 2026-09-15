@@ -96,3 +96,15 @@ def prune(conn: sqlite3.Connection, cutoff_ts: int) -> int:
 
 def count_rows(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+
+
+def free_at(conn: sqlite3.Connection, data_ts: int) -> dict[str, int | None]:
+    """Each lot's validated free_car at one tick, keyed by lot id.
+
+    Only lots observed at exactly `data_ts` appear. A NULL free_car -- the
+    feed's -9 sentinel, or a reading `validate` refused -- maps to None rather
+    than being dropped: "seen, reported nothing" and "not seen" are different
+    facts, and the card shows them differently.
+    """
+    rows = conn.execute("SELECT lot_id, free_car FROM observations WHERE data_ts = ?", (data_ts,))
+    return {lot_id: free for lot_id, free in rows}

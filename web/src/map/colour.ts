@@ -16,27 +16,28 @@
  */
 
 /**
- * The ramp, low chance of a space -> high chance.
+ * The ramp, low chance of a space -> high chance: red, through amber, to teal.
  *
- * ColorBrewer's RdYlBu, minus its two palest steps: red-to-blue reads as
- * bad-to-good without relying on the red/green distinction that ~8% of men
- * cannot make, and every stop here stays saturated enough to sit on a light
- * basemap without dissolving into it.
+ * Not red-to-green. Red/teal reads as bad-to-good without relying on the
+ * red/green distinction that ~8% of men cannot make, and every stop here
+ * stays saturated enough to sit on a light basemap without dissolving into
+ * it. Each stop is `[probability, hex]` rather than an evenly spaced list so
+ * the ramp can spend more of its range on the amber middle, where a driver
+ * most needs the colour to discriminate, without needing evenly spaced data.
  */
 export const PROBABILITY_RAMP = [
-  "#d73027", // 0.00 -- almost certainly full
-  "#f46d43", // 0.25
-  "#fdae61", // 0.50
-  "#74add1", // 0.75
-  "#4575b4", // 1.00 -- almost certainly a space
+  [0, "#e5484d"],    // almost certainly full
+  [0.35, "#f5a524"],
+  [0.7, "#12b5a6"],
+  [1, "#0e9384"],    // almost certainly a space
 ] as const;
 
 /**
  * No forecast. Deliberately off-ramp: a desaturated grey that cannot be read as
- * "a bit red" or "a bit blue". Matches `--unknown` in `index.css`, so a lot
- * that says "no data" in the list is the same grey on the map.
+ * "a bit red" or "a bit teal". Matches `--unknown` in `styles/tokens.css`, so a
+ * lot that says "no data" in the list is the same grey on the map.
  */
-export const UNKNOWN_COLOUR = "#6a6a76";
+export const UNKNOWN_COLOUR = "#9aa3b2";
 
 /** `#rrggbb` -> [r, g, b]. Only ever called on the literals above. */
 function channels(hex: string): [number, number, number] {
@@ -54,22 +55,21 @@ function hex2(v: number): string {
  * Linear interpolation between the ramp stops in sRGB. Not perceptually
  * uniform -- a proper Oklab ramp would be -- but the stops are close enough in
  * hue that the difference is invisible at circle size, and this way the ramp is
- * five hex literals a reader can check against ColorBrewer rather than a colour
- * space implementation they have to trust.
+ * a handful of hex literals a reader can eyeball rather than a colour space
+ * implementation they have to trust.
  *
  * A non-finite input is unknown, not zero: NaN reaching this function means a
  * corrupt grid, and the honest answer to a corrupt reading is "no data".
  */
 export function colourFor(p: number | null): string {
   if (p === null || !Number.isFinite(p)) return UNKNOWN_COLOUR;
-
   const clamped = Math.min(1, Math.max(0, p));
-  const last = PROBABILITY_RAMP.length - 1;
-  const scaled = clamped * last;
-  const i = Math.min(last - 1, Math.floor(scaled));
-  const frac = scaled - i;
-
-  const lo = channels(PROBABILITY_RAMP[i]!);
-  const hi = channels(PROBABILITY_RAMP[i + 1]!);
+  let i = 0;
+  while (i < PROBABILITY_RAMP.length - 2 && clamped > PROBABILITY_RAMP[i + 1]![0]) i++;
+  const [p0, c0] = PROBABILITY_RAMP[i]!;
+  const [p1, c1] = PROBABILITY_RAMP[i + 1]!;
+  const frac = p1 === p0 ? 0 : (clamped - p0) / (p1 - p0);
+  const lo = channels(c0);
+  const hi = channels(c1);
   return `#${lo.map((c, k) => hex2(c + (hi[k]! - c) * frac)).join("")}`;
 }

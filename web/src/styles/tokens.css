@@ -1,0 +1,60 @@
+/* Design tokens (design spec §4.1). Light is the default; dark follows the OS. */
+:root {
+  --bg: #f4f6f8;
+  --bg-dots: rgba(15, 31, 61, 0.06);
+  --surface: #ffffff;
+  --glass: rgba(255, 255, 255, 0.82);
+  --glass-solid: rgba(255, 255, 255, 0.96);
+  --text: #0f1f3d;
+  --muted: #5b6b85;
+  --border: #e3e8f0;
+  --accent: #0fb5a5;
+  --accent-2: #22c55e;
+  --accent-soft: #dff7f3;
+  --accent-text: #ffffff;
+  --gradient-best: linear-gradient(135deg, var(--accent), var(--accent-2));
+  --gradient-navy: linear-gradient(135deg, #0f1f3d, #1c3566);
+  --warn: #f59e0b;
+  --warn-soft: #fff4dc;
+  --danger: #ef4444;
+  --unknown: #9aa3b2;
+  --unknown-soft: #eef1f5;
+  --shadow-1: 0 2px 8px rgba(15, 31, 61, 0.06);
+  --shadow-2: 0 8px 24px rgba(15, 31, 61, 0.12);
+  --shadow-sheet: 0 -10px 34px rgba(15, 31, 61, 0.16);
+  --radius-card: 16px;
+  --radius-sheet: 22px;
+  --radius-pill: 999px;
+  --panel-width: 420px;
+  --topbar-height: 60px;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --font: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b1630;
+    --bg-dots: rgba(255, 255, 255, 0.05);
+    --surface: #13264a;
+    --glass: rgba(19, 38, 74, 0.8);
+    --glass-solid: rgba(19, 38, 74, 0.97);
+    --text: #eef2f8;
+    --muted: #a9b8d1;
+    --border: #244579;
+    --accent: #2ee6cf;
+    --accent-2: #4ade80;
+    --accent-soft: rgba(46, 230, 207, 0.16);
+    --accent-text: #062b27;
+    --gradient-navy: linear-gradient(135deg, #2ee6cf, #4ade80);
+    --warn: #fbbf24;
+    --warn-soft: rgba(251, 191, 36, 0.16);
+    --danger: #f87171;
+    --unknown: #7c8aa5;
+    --unknown-soft: rgba(255, 255, 255, 0.08);
+    --shadow-1: 0 2px 8px rgba(0, 0, 0, 0.35);
+    --shadow-2: 0 8px 24px rgba(0, 0, 0, 0.45);
+    --shadow-sheet: 0 -10px 34px rgba(0, 0, 0, 0.45);
+  }
+}

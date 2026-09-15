@@ -224,6 +224,13 @@ describe("routeFor", () => {
     );
   });
 
+  it("serves the offline place index cache-first", () => {
+    // It is a build output, not an artifact: it changes only when the basemap
+    // does, and `sw.js` `VERSION` is what retires a stale copy -- see
+    // `docs/basemap.md`. Cached like `/assets/*`, never revalidated per load.
+    expect(worker.routeFor(request(`${SCOPE}places/taipei.json`), SCOPE)).toBe("cache-first");
+  });
+
   it("serves the unhashed icons and manifest cache-first", () => {
     expect(worker.routeFor(request(`${SCOPE}favicon.svg`), SCOPE)).toBe("cache-first");
     expect(worker.routeFor(request(`${SCOPE}manifest.webmanifest`), SCOPE)).toBe("cache-first");

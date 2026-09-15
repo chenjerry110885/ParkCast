@@ -54,6 +54,27 @@ the whole origin it is served from, which matters again the day anything else ev
 `public/`, so the links there are written absolute and come out prefixed with the deployment base
 (`/...` today) in a build.
 
+## Layout
+
+The installed app is map-first: `layout/Shell.tsx` lays a full-bleed map under either a frosted
+bottom sheet (phone, viewport width < 768 px) or a 420 px side panel plus floating locate/language
+buttons (desktop) -- one media query, `layout/useMediaQuery.ts`'s `DESKTOP_QUERY`
+(`(min-width: 768px)`), decides which, so the two arrangements share their content component instead
+of each carrying its own copy, and resizing across the breakpoint re-arranges without losing state.
+
+The bottom sheet's three resting heights -- `peek` (`max(240px, 34vh)`), `half` (`55vh`), `full`
+(viewport minus the top bar and safe areas) -- and the velocity-biased snap a drag release settles
+into are pure arithmetic in `layout/sheet.ts`: it never touches a DOM node or a gesture event, so the
+drag handler that does is tested by pushing numbers through this module instead of simulating touch
+events. A flick faster than 0.5 px/ms steps one point in that direction regardless of where the
+finger let go; a slow release falls back to whichever point the sheet ended up nearest.
+
+None of that is about installability by itself, but it is why `manifest.webmanifest`'s
+`display: standalone` and the `--safe-top` / `--safe-bottom` tokens (`env(safe-area-inset-*)`, set in
+`web/src/styles/tokens.css`) matter here: installed, the sheet and panel have no browser chrome to
+stay clear of, only the phone's own notch and home indicator, and `full`'s height already accounts
+for both.
+
 ## Service worker
 
 `web/public/sw.js`, registered from `main.tsx` **only under `import.meta.env.PROD`**. A worker in
@@ -69,6 +90,7 @@ as haunted code rather than as a caching problem.
 | navigations (`index.html`) | **network-first**, cache as fallback, and **never written back** | `index.html` is the one file Vite does *not* hash, so it is the one file for which "a cached URL cannot be stale" is false. Cache-first would pin the app to whichever hashed bundle names the first visit saw. The fallback copy is the one `install` stored and the runtime never replaces it -- see [one writer for the shell](#the-cached-shell-has-exactly-one-writer). |
 | hashed assets (`assets/*`) | **cache-first** | Vite hashes these filenames, so a changed file has a different name and is simply a cache miss. |
 | unhashed files under scope (`manifest.webmanifest`, `favicon.svg`, `icon-*.png`) | **cache-first, and nothing revalidates them** | A real if minor caveat, and the reason this is its own row: their names are fixed, so unlike `assets/*` a cached copy genuinely *can* be stale, and it stays until `VERSION` is bumped and `activate` drops the old cache. Traded on purpose -- an icon is not worth a conditional request on every load -- but it does mean re-running `build-icons.py` is not enough to ship a new icon. |
+| `places/taipei.json` | **cache-first, and nothing revalidates it** | Same rule as the row above -- the filename is fixed, not hashed -- reached the same way, since it falls out of rule 6 rather than a dedicated check: nothing in `routeFor` names `places/` specially. The difference is *when* it is first fetched: on demand, the first time a driver focuses the search box, not at install (see "Place index" in `docs/basemap.md`). A changed index needs the same `VERSION` bump as a changed icon would. |
 | non-GET, other origins, outside scope | **never intercepted** | The origin check is not redundant with the scope check. Under the default base `/` the scope prefix is `/`, which every path starts with, so origin is the only thing left. |
 
 ### The cached shell has exactly one writer
@@ -130,7 +152,7 @@ doing anything. **The worker deliberately adds no second notion of freshness** -
 offline" badge would be a prettier lie than the age line already tells the truth about, and two
 notions of staleness would eventually disagree.
 
-Offline, the app renders in full -- the ranked list, the arrival-time scrubber, every lot marker on
+Offline, the app renders in full -- the ranked list, the arrival strip, every lot marker on
 the map, and the age line -- on a **blank basemap**. The roads come from the tile files in `basemap/tiles/`
 and the label glyphs from `basemap/fonts/`, both under the `basemap/` prefix the worker deliberately
 never touches, so whatever the browser's own HTTP cache still holds is what draws. That is the trade being made on purpose: the answer to the question
@@ -199,6 +221,11 @@ If the app ever needs a CDN, the document and `sw.js` have to stay on the app's 
 A browser updates a worker when its **bytes** change, so editing `sw.js` at all ships a new worker.
 Bump `VERSION` when you additionally want the accumulated cache dropped: `activate` deletes every
 cache that is not the current one, and old hashed assets are never evicted otherwise.
+
+The map-first redesign is the worked example: it renamed every hashed asset in `assets/*` and added
+`places/taipei.json` as a new unhashed file, so the release bumped `VERSION` from `v1` to `v2` --
+without that bump, a visitor who had already loaded the app would keep serving the old bundle names
+and never fetch the new place index at all, since rule 6 only fetches a cache-first URL once.
 
 `web/public/_headers` serves `/sw.js` with `Cache-Control: no-cache` -- the browser always revalidates
 it, so a visitor's next load sees a bumped `VERSION` immediately rather than an HTTP-cached copy of

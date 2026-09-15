@@ -24,6 +24,7 @@ beforeEach(() => {
     put(`basemap/fonts/${font}/0-255.pbf`);
     put(`basemap/fonts/${font}/8192-8447.pbf`);
   }
+  put("places/taipei.json", '{"v":1,"rows":[]}');
 });
 afterEach(() => rmSync(dist, { recursive: true, force: true }));
 
@@ -67,6 +68,11 @@ test("fails when basemap tiles are missing or too few", () => {
 test("fails on the tile archive itself, which the site never serves", () => {
   put("basemap/taipei.pmtiles", "p");
   assert.ok(check().some((p) => p.includes("taipei.pmtiles")));
+});
+
+test("fails when the place index is missing, so search cannot silently lose landmarks", () => {
+  rmSync(join(dist, "places/taipei.json"));
+  assert.ok(check().some((p) => p.includes("places/taipei.json")));
 });
 
 test("fails on the upload secret, its shape, or the deploy key anywhere in any file", () => {

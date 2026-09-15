@@ -17,6 +17,8 @@ docker/secrets/
 *.pem
 worker/node_modules/
 web/.dev-artifacts/
+# Brainstorm mockups and SDD ledgers (superpowers plugin scratch)
+.superpowers/
 
 # Web app
 web/node_modules/
@@ -28,3 +30,5 @@ web/public/artifacts/
 # web/public/basemap/fonts/ are small and committed.
 web/basemap-src/
 web/public/basemap/tiles/
+# Offline place index, regenerable via scripts/build-place-index.mjs
+web/public/places/

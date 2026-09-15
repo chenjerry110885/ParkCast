@@ -1166,3 +1166,17 @@ def test_publish_artifacts_offers_nothing_when_it_refuses_to_publish(tmp_path):
     conn.close()
 
     assert up.offers == []
+
+
+def test_publish_artifacts_stamps_each_lots_free_count_at_the_reading(tmp_path):
+    """The count on the card is the one behind the forecast -- the reading at base_data_ts."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A", free=12)
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir)
+    conn.close()
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert doc["lots"][0]["f"] == 12

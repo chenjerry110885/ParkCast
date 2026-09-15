@@ -28,12 +28,6 @@ export interface Strings {
   appName: string;
   /** Button label: use the device's geolocation instead of picking a point. */
   useMyLocation: string;
-  /** Label in front of the arrival-time control, e.g. "Arriving in 15 min". */
-  arrivingIn: string;
-  /** Label over the headline probability, e.g. "Chance of a space: 82%". */
-  chanceOfSpace: string;
-  /** Label in front of the walking-time column. */
-  walk: string;
   /** Unit suffix for an hourly rate, e.g. "NT$60 per hour". */
   perHour: string;
   /**
@@ -78,28 +72,59 @@ export interface Strings {
   loadFailed: string;
   /** Label on the button that retries a failed load. */
   retry: string;
-  /** Shown before a destination is known -- the list has nothing to rank against. */
-  startPrompt: string;
-  /** Visible label on the destination search box. */
+  /**
+   * Shown over the map before a destination is known -- the list has nothing to
+   * rank against yet. Names the two ways in that are visible at that moment:
+   * the search box in front of the user, and the map filling the screen behind
+   * it. (Geolocation is the third, and the one an icon button already offers.)
+   */
+  startPromptMap: string;
+  /** Visible label on the place search box. */
   searchLabel: string;
-  /** Example queries in the search box, shown while it is empty. */
+  /** Example queries in the search box, shown while it is empty -- one of each kind it can find. */
   searchPlaceholder: string;
   /**
    * What the search can and cannot find.
    *
-   * Load-bearing rather than decorative. This searches car park *names* and
-   * districts, not addresses and not landmarks, so `市政府` finds nothing --
-   * the two car parks by Taipei City Hall are called 松壽廣場 and 府前廣場. A
-   * search box with no such caption reads as a general place search and earns
-   * every "it can't find anything" the limitation would otherwise get.
+   * Load-bearing rather than decorative. `PlaceSearch` merges the live roster
+   * with an offline place index (see `../places`), so this now finds car
+   * parks, landmarks, MRT and rail stations, streets down to the lane, and
+   * neighbourhoods -- but never a house number, because the index built by
+   * `scripts/build-place-index.mjs` has none to search. A search box with no
+   * such caption reads as a full address lookup and earns every "it can't
+   * find anything" the limitation would otherwise get.
    */
   searchHint: string;
-  /** Accessible name for the results listbox. */
+  /** Accessible name for the results listbox when it holds search matches (recent picks use `recentSearches` instead). */
   searchResultsLabel: string;
-  /** Announced when results change, e.g. "8 car parks match". Carries `{n}`. */
+  /** Announced when results change, e.g. "8 matching places". Carries `{n}`. */
   searchResultsTemplate: string;
-  /** Shown under the box when a query matches no car park at all. */
+  /** Shown under the box when a query matches no place at all -- roster or index. */
   searchNoMatch: string;
+  /**
+   * Shown under the results while the offline place index is still loading,
+   * for a query the live roster alone hasn't already answered. The index is
+   * fetched lazily on the search box's first focus, so a driver who searches
+   * right away can see this for a moment before the fuller, grouped results
+   * arrive.
+   */
+  loadingPlaces: string;
+  /** Heading over the on-device recent-picks list, shown when the search box is empty and focused. Also that list's accessible name. */
+  recentSearches: string;
+  /** Button label that clears the on-device recent-picks list. */
+  clearRecent: string;
+  /** Group heading over car park results in the search list. */
+  groupCarParks: string;
+  /** Group heading over MRT and rail station results in the search list. */
+  groupStations: string;
+  /** Group heading over landmark results in the search list. */
+  groupLandmarks: string;
+  /** Group heading over street and lane results in the search list. */
+  groupStreets: string;
+  /** Group heading over neighbourhood/area results in the search list. */
+  groupAreas: string;
+  /** Accessible label for the button that clears the search box's query. */
+  clearSearch: string;
   /** Heading over the ranked list. */
   rankedForArrival: string;
   /**
@@ -142,14 +167,57 @@ export interface Strings {
    * leaving a blank rectangle.
    */
   mapUnavailable: string;
+  /** Unit label under the ring's percentage, e.g. "space" / "有車位". */
+  spaceLabel: string;
+  /** Badge on the top-ranked car park's card. */
+  bestPick: string;
+  /** Label on the confidence pill, in front of the level word. */
+  confidence: string;
+  /** Confidence level: mostly the live reading (within `HIGH_MAX_MIN`). */
+  confidenceHigh: string;
+  /** Confidence level: a blend of the live reading and the usual pattern. */
+  confidenceMedium: string;
+  /** Confidence level: mostly the usual pattern for this time of week. */
+  confidenceLow: string;
+  /** The pill's popover text for `confidenceHigh`. */
+  confidenceWhyHigh: string;
+  /** The pill's popover text for `confidenceMedium`. */
+  confidenceWhyMedium: string;
+  /** The pill's popover text for `confidenceLow`. */
+  confidenceWhyLow: string;
+  /** Appended to the freshness badge once its reading has actually expired. */
+  expired: string;
+  /** Accessible label prefix for the freshness badge, e.g. "Data age: …". */
+  freshnessLabel: string;
+  /** Label on the card's walking-time fact tile. */
+  walkTile: string;
+  /** Label on the card's predicted-arrival fact tile. */
+  arrivalTile: string;
+  /** The observed-spaces fact when the lot has a capacity, e.g. "38 / 400 free · 4 min ago". Carries `{f}`, `{c}`, `{n}`. */
+  spacesNowTemplate: string;
+  /** The observed-spaces fact when the lot has no published capacity, e.g. "38 free · 4 min ago". Carries `{f}`, `{n}`. */
+  spacesNowNoCapacityTemplate: string;
+  /** Label on the card's observed-spaces fact tile. */
+  spacesNowLabel: string;
+  /** Accessible name suffix for a card's tap target, after the lot's own name. */
+  selectCard: string;
+  /** Label in front of the arrival strip's clock-time readout, e.g. "Arrive at 18:35". */
+  arrivalLabel: string;
+  /** Lead time under the readout, e.g. "in 15 min". Carries `{n}`, minutes from now. */
+  inMinutesTemplate: string;
+  /** The strip's tail text once its options run out or the forecast has expired. */
+  noForecastBeyond: string;
+  /** Accessible name for the arrival strip's radiogroup. */
+  arrivalGroupLabel: string;
+  /** Accessible label for the bottom sheet's grip button when tapping it would open the sheet to `full`. */
+  expandList: string;
+  /** Accessible label for the bottom sheet's grip button when tapping it would collapse the sheet. */
+  collapseList: string;
 }
 
 const en: Strings = {
   appName: "ParkCast",
   useMyLocation: "Use my location",
-  arrivingIn: "Arriving in",
-  chanceOfSpace: "Chance of a space",
-  walk: "Walk",
   perHour: "per hour",
   perEntry: "per entry",
   priceUnknown: "Price unknown",
@@ -165,14 +233,22 @@ const en: Strings = {
   loading: "Loading forecast…",
   loadFailed: "Couldn't load the forecast.",
   retry: "Try again",
-  startPrompt:
-    "Search for a car park, tap the map where you're headed, or use your location, to rank the car parks around that point.",
-  searchLabel: "Search car parks",
-  searchPlaceholder: "e.g. 台北車站, 101, USPACE",
-  searchHint: "Searches car park names and districts — not addresses or landmarks.",
-  searchResultsLabel: "Matching car parks",
-  searchResultsTemplate: "{n} matching car parks",
-  searchNoMatch: "No car park name matches that. Try a district, or tap the map.",
+  startPromptMap: "Search a place, or tap the map where you're going",
+  searchLabel: "Where are you going?",
+  searchPlaceholder: "e.g. 台北101, 忠孝東路四段216巷, 西門町",
+  searchHint: "Finds car parks, landmarks, MRT stations, streets down to the lane, and neighbourhoods — not house numbers.",
+  searchResultsLabel: "Matching places",
+  searchResultsTemplate: "{n} matching places",
+  searchNoMatch: "Nothing matches that. Try a landmark, a street, or tap the map.",
+  loadingPlaces: "loading places…",
+  recentSearches: "Recent",
+  clearRecent: "Clear",
+  groupCarParks: "Car parks",
+  groupStations: "Stations",
+  groupLandmarks: "Landmarks",
+  groupStreets: "Streets & lanes",
+  groupAreas: "Areas",
+  clearSearch: "Clear search",
   rankedForArrival: "Ranked for your arrival",
   nearbyCarParks: "Car parks nearby",
   forecastTooOld:
@@ -182,14 +258,34 @@ const en: Strings = {
   mapLabel: "Map of car parks",
   mapLoading: "Loading map…",
   mapUnavailable: "This device can't draw the map. The ranked list still works.",
+  spaceLabel: "space",
+  bestPick: "Best pick",
+  confidence: "Confidence",
+  confidenceHigh: "High",
+  confidenceMedium: "Medium",
+  confidenceLow: "Low",
+  confidenceWhyHigh: "Based mostly on the live reading.",
+  confidenceWhyMedium: "A mix of the live reading and the usual pattern for this time.",
+  confidenceWhyLow: "Mostly the usual pattern for this time of week.",
+  expired: "expired",
+  freshnessLabel: "Data age",
+  walkTile: "Walk",
+  arrivalTile: "Arrival",
+  spacesNowTemplate: "{f} / {c} free · {n} min ago",
+  spacesNowNoCapacityTemplate: "{f} free · {n} min ago",
+  spacesNowLabel: "Observed spaces",
+  selectCard: "Show on map",
+  arrivalLabel: "Arrive at",
+  inMinutesTemplate: "in {n} min",
+  noForecastBeyond: "no forecast beyond this yet",
+  arrivalGroupLabel: "Arrival time",
+  expandList: "Expand the list",
+  collapseList: "Collapse the list",
 };
 
 const zh: Strings = {
   appName: "停車先知",
   useMyLocation: "使用目前位置",
-  arrivingIn: "抵達時間",
-  chanceOfSpace: "有位機率",
-  walk: "步行",
   perHour: "每小時",
   perEntry: "每次",
   priceUnknown: "價格未知",
@@ -205,13 +301,22 @@ const zh: Strings = {
   loading: "載入預報中…",
   loadFailed: "無法載入預報。",
   retry: "重試",
-  startPrompt: "搜尋停車場、點選地圖上的目的地，或使用目前位置，即可排序該地點附近的停車場。",
-  searchLabel: "搜尋停車場",
-  searchPlaceholder: "例如：台北車站、101、USPACE",
-  searchHint: "搜尋的是停車場名稱與行政區，不含地址或地標。",
-  searchResultsLabel: "符合的停車場",
-  searchResultsTemplate: "{n} 個符合的停車場",
-  searchNoMatch: "沒有符合的停車場名稱。可改以行政區搜尋，或直接點選地圖。",
+  startPromptMap: "搜尋地點，或點選地圖上的目的地",
+  searchLabel: "要去哪裡？",
+  searchPlaceholder: "例如：台北101、忠孝東路四段216巷、西門町",
+  searchHint: "可搜尋停車場、地標、捷運站、路名與巷弄、以及地區，但不含門牌號碼。",
+  searchResultsLabel: "符合的地點",
+  searchResultsTemplate: "{n} 個符合的地點",
+  searchNoMatch: "沒有符合的地點。可改試地標、路名，或直接點選地圖。",
+  loadingPlaces: "載入地點中…",
+  recentSearches: "最近搜尋",
+  clearRecent: "清除",
+  groupCarParks: "停車場",
+  groupStations: "捷運與車站",
+  groupLandmarks: "地標",
+  groupStreets: "路名與巷弄",
+  groupAreas: "地區",
+  clearSearch: "清除搜尋",
   rankedForArrival: "依抵達時間排序",
   nearbyCarParks: "附近的停車場",
   forecastTooOld: "預報資料已過舊，無法推估您抵達時的狀況，因此不顯示有位機率。名稱、步行距離與價格仍然正確。",
@@ -220,6 +325,29 @@ const zh: Strings = {
   mapLabel: "停車場地圖",
   mapLoading: "載入地圖中…",
   mapUnavailable: "此裝置無法顯示地圖，排序清單仍可使用。",
+  spaceLabel: "有車位",
+  bestPick: "最佳選擇",
+  confidence: "信心",
+  confidenceHigh: "高",
+  confidenceMedium: "中",
+  confidenceLow: "低",
+  confidenceWhyHigh: "主要依據最新讀數。",
+  confidenceWhyMedium: "綜合最新讀數與此時段的平常狀況。",
+  confidenceWhyLow: "主要依據此時段每週的平常狀況。",
+  expired: "已過期",
+  freshnessLabel: "資料時間",
+  walkTile: "步行",
+  arrivalTile: "預計抵達",
+  spacesNowTemplate: "現在 {f} / {c} 位 · {n} 分鐘前",
+  spacesNowNoCapacityTemplate: "現在 {f} 位 · {n} 分鐘前",
+  spacesNowLabel: "觀測空位",
+  selectCard: "在地圖上顯示",
+  arrivalLabel: "抵達",
+  inMinutesTemplate: "{n} 分鐘後",
+  noForecastBeyond: "之後尚無預測",
+  arrivalGroupLabel: "抵達時間",
+  expandList: "展開清單",
+  collapseList: "收合清單",
 };
 
 const DICTS: Record<Lang, Strings> = { en, zh };

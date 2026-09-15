@@ -24,6 +24,7 @@ function site(overrides = {}) {
     "PUT /artifacts/latest": () => new Response("", { status: 401 }),
     "HEAD /basemap/tiles/0/0/0.pbf": () => new Response(null),
     "HEAD /basemap/fonts/Noto%20Sans%20Regular/0-255.pbf": () => new Response(null),
+    "HEAD /places/taipei.json": () => new Response(null),
     ...overrides,
   };
   return async (url, init = {}) => {
@@ -45,11 +46,16 @@ test("fails when a source path is served", async () => {
 test("fails when the map's tiles or label fonts are not served", async () => {
   const missing = () => new Response("not found", { status: 404 });
   const { failures } = await smoke(ORIGIN, {
-    fetchImpl: site({ "HEAD /basemap/fonts/Noto%20Sans%20Regular/0-255.pbf": missing, "HEAD /basemap/tiles/0/0/0.pbf": missing }),
+    fetchImpl: site({
+      "HEAD /basemap/fonts/Noto%20Sans%20Regular/0-255.pbf": missing,
+      "HEAD /basemap/tiles/0/0/0.pbf": missing,
+      "HEAD /places/taipei.json": missing,
+    }),
     now: () => NOW,
   });
   assert.ok(failures.some((f) => f.includes("tiles/0/0/0.pbf")));
   assert.ok(failures.some((f) => f.includes("0-255.pbf")));
+  assert.ok(failures.some((f) => f.includes("places/taipei.json")));
 });
 
 test("fails when an unauthenticated upload is not refused", async () => {

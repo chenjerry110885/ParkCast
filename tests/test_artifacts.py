@@ -242,3 +242,23 @@ def test_not_updating_is_additive_and_leaves_the_schema_version_alone():
     doc = json.loads(build_lots_json([lot(1)], generated_at=1, base_data_ts=1,
                                      not_updating={"TPE0001": 5}))
     assert doc["v"] == VERSION == 1
+
+
+# --- f: the observed free count behind the forecast -------------------------
+
+
+def test_lots_json_carries_the_observed_free_count_at_the_reading():
+    doc = json.loads(build_lots_json([lot(1), lot(2), lot(3)], generated_at=1, base_data_ts=1,
+                                     free={"TPE0001": 12, "TPE0002": None}))
+    rows = {r["id"]: r for r in doc["lots"]}
+    assert rows["TPE0001"]["f"] == 12
+    assert rows["TPE0002"]["f"] is None, "seen at the reading, reported nothing: null, not dropped"
+    assert "f" not in rows["TPE0003"], "not observed at the reading: no field at all"
+
+
+def test_free_count_is_additive_and_leaves_the_schema_version_alone():
+    with_free = json.loads(build_lots_json([lot(1)], generated_at=1, base_data_ts=1,
+                                           free={"TPE0001": 3}))
+    without = json.loads(build_lots_json([lot(1)], generated_at=1, base_data_ts=1))
+    assert with_free["v"] == VERSION == without["v"]
+    assert "f" not in without["lots"][0]

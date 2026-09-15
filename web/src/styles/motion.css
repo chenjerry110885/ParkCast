@@ -1,0 +1,38 @@
+/*
+ * Durations and easings live here, once, because `motion.ts` reads the same
+ * `--dur-*` custom properties at runtime (for JS-driven transitions like the
+ * sheet drag) and the two must never drift apart. Keep the names.
+ *
+ * The reduced-motion block collapses every duration to ~0 and swaps the
+ * directional entrances for a plain fade, per the design spec -- respected
+ * exactly as written, not reinterpreted per component.
+ */
+:root {
+  --dur-fast: 160ms; --dur-base: 260ms; --dur-slow: 400ms; --dur-sheet: 360ms;
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.2, 0.9, 0.3, 1.1);
+}
+@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slide-down { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+@keyframes shimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }
+@keyframes breathe { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.35); opacity: 0.7; } }
+@keyframes sweep { to { transform: rotate(360deg); } }
+@keyframes ripple { from { transform: scale(0.4); opacity: 0.6; } to { transform: scale(2.2); opacity: 0; } }
+@keyframes flash { 0% { box-shadow: 0 0 0 0 rgba(15, 181, 165, 0.55); } 100% { box-shadow: 0 0 0 12px rgba(15, 181, 165, 0); } }
+@keyframes shine { from { transform: translateX(-120%) skewX(-20deg); } to { transform: translateX(220%) skewX(-20deg); } }
+@keyframes pop { from { opacity: 0; transform: translateY(4px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+.anim-rise { animation: rise var(--dur-base) var(--ease-out) both; }
+.anim-fade { animation: fade-in var(--dur-base) var(--ease-out) both; }
+.anim-slide-down { animation: slide-down 220ms var(--ease-out) both; }
+.anim-pop { animation: pop var(--dur-fast) var(--ease-out) both; }
+/* Stagger: the component sets --i on each child. */
+.anim-stagger > * { animation-delay: calc(var(--i, 0) * 40ms); }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; --dur-sheet: 0ms; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  .anim-rise, .anim-pop, .anim-slide-down { animation-name: fade-in; }
+  .anim-stagger > * { animation-delay: 0ms; }
+}
