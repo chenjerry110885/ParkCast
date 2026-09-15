@@ -12,7 +12,7 @@
     "not_found_handling": "404-page"
   },
   "kv_namespaces": [
-    { "binding": "ARTIFACTS", "id": "REPLACE_WITH_PROD_KV_ID", "preview_id": "REPLACE_WITH_PREVIEW_KV_ID" }
+    { "binding": "ARTIFACTS", "id": "d8c99f61d6754e46ba881be5f92a4995", "preview_id": "4677c2847e194e0c81b0e2354d549a11" }
   ],
   "vars": { "PRODUCTION_HOST": "parkcast.tpe-dev.workers.dev" },
   "secrets": { "required": ["UPLOAD_SECRET"] }
