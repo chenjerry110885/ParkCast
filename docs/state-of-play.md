@@ -329,13 +329,28 @@ do today.
    (design: [`docs/superpowers/specs/2026-09-15-ui-redesign-design.md`](superpowers/specs/2026-09-15-ui-redesign-design.md)).
    The one follow-up it left open — `PlaceSearch`'s `loading` flag sticking when the box blurs
    mid-fetch — was closed in the review round the same day; see above.
-5. **Roll out the nationwide collector, live, with the user** — code-complete on
-   `feat/nationwide-collector` (see "Nationwide collection" above), but turning it on is a live
-   operation against a running collector and a published site, not something to do unattended:
-   1. **Back up `data/hot.sqlite`** before the first boot of this code — the id migration has never
-      run in production. If the boot log says the migration failed, **fix it before trusting a
-      published forecast**: until it succeeds, no Taipei lot can be judged not-updating for ~24 h and
-      stuck sensors are published as certainties again (the log now says so).
+5. **Roll out the nationwide collector, live, with the user** — merged to `main` and **steps 1 and 3
+   are done**; steps 2, 4 and 5 remain.
+
+   **Done, 2026-09-16 21:34–21:56 Taipei.** Backup at
+   `D:\Projects\parkcast-backups6-09-16-2134-before-nationwide` (all three WAL files, 43 MB).
+   The migration **rewrote 669,564 rows and dropped 0 twins** — 0 is the right answer for a clean
+   whole-branch deploy, since twins only arise from a partial one. It took **11 minutes 43 seconds**,
+   not the ~47 s a reviewer measured on a synthetic store: every row of a `WITHOUT ROWID` table moves
+   in the B-tree when its primary key changes, and the container is capped at 1.0 CPU. Budget the
+   better part of a quarter-hour of lost ticks if this is ever re-run, and do not mistake the silence
+   for a hang — `hot.sqlite-wal` grows about 12 MB a minute throughout. The file roughly doubled
+   (33.6 MB → 72.9 MB) with free pages the prune will reuse; a `VACUUM` would reclaim it, at the cost
+   of another long stop.
+
+   Two clean ticks followed (21:51, 21:56), each publishing `taipei: 1089 lots x 24 horizons, 109 not
+   updating` and uploading `204` — the same shape as before the deploy. The live site serves 1,089
+   lots whose first id is `TPE0001`, **bare**, with `f` on 1,081 of them: the published format did not
+   move. `cities.json` now appears beside the unsuffixed pair.
+
+   The remaining steps, unchanged:
+   1. ~~**Back up `data/hot.sqlite`**~~ — done, see above. Keep the backup until the corpus has been
+      through a compaction cycle or two on the new ids.
    2. **Check TLS from inside the container, before enabling anything but Taipei.** During review,
       host Python failed certificate verification for **New Taipei** (missing intermediate),
       **Kaohsiung** and **Hsinchu** (missing Subject Key Identifier under OpenSSL 3.x), while `curl`
@@ -343,9 +358,8 @@ do today.
       measured where the collector actually runs — one `python -c` per URL inside
       `docker-collector:latest`. **Never `verify=False`.** If a feed genuinely needs an intermediate,
       the fix is the container's CA bundle, not switching verification off.
-   3. `python -m pytest` green, then restart the collector with **`PARKCAST_CITIES=taipei`**. Confirm
-      the boot log reads `collecting 1 of 6 cities: taipei`, the live site is unchanged, and
-      `grid.bin` still republishes byte-for-byte.
+   3. ~~Restart with **`PARKCAST_CITIES=taipei`**~~ — done; the boot log read
+      `collecting 1 of 6 cities: taipei` and publishing resumed unchanged.
    4. **`PARKCAST_CITIES=taipei,newtaipei`.** Let it run a day, then read `data/cold/`'s actual growth
       and compare it against the spec's 150–400 MB/month estimate — the number this plan deliberately
       left unmeasured.
