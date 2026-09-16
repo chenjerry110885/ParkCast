@@ -121,3 +121,22 @@ def test_free_at_returns_each_lots_count_at_one_tick(tmp_path):
     assert store.free_at(conn, 1000) == {"A": 12, "B": None}
     assert store.free_at(conn, 1300) == {"A": 7}
     assert store.free_at(conn, 999) == {}
+
+
+def test_migration_namespaces_every_row_once(tmp_path):
+    conn = store.connect(tmp_path / "hot.sqlite")
+    conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at, free_car, free_motor, quality)"
+                 " VALUES ('TPE0001', '', 100, 100, 5, NULL, 0)")
+    assert store.migrate_to_namespaced_ids(conn) == 1
+    row = conn.execute("SELECT lot_id, city FROM observations").fetchone()
+    assert row == ("taipei:TPE0001", "taipei")
+    # Idempotent: a second run must not double-prefix.
+    assert store.migrate_to_namespaced_ids(conn) == 0
+    assert conn.execute("SELECT lot_id FROM observations").fetchone()[0] == "taipei:TPE0001"
+
+
+def test_source_health_round_trips(tmp_path):
+    conn = store.connect(tmp_path / "hot.sqlite")
+    store.record_source_health(conn, "tainan", observed_at=200, rows=268, usable=190, newest_ts=199, ok=True)
+    health = store.source_health(conn)["tainan"]
+    assert (health["rows"], health["usable"], health["ok"]) == (268, 190, True)

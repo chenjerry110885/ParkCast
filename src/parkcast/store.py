@@ -2,6 +2,7 @@
 import sqlite3
 from pathlib import Path
 
+from parkcast import ids
 from parkcast.feed import FeedSnapshot
 from parkcast.quality import validate
 
@@ -17,6 +18,15 @@ CREATE TABLE IF NOT EXISTS observations (
 ) WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS idx_obs_data_ts ON observations(data_ts);
+
+CREATE TABLE IF NOT EXISTS sources (
+    city        TEXT    NOT NULL PRIMARY KEY,
+    first_ts    INTEGER,
+    last_ts     INTEGER,
+    last_rows   INTEGER NOT NULL DEFAULT 0,
+    last_usable INTEGER NOT NULL DEFAULT 0,
+    last_ok     INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
 """
 
 
@@ -32,6 +42,12 @@ def connect(path: Path | str) -> sqlite3.Connection:
     # one fsync per five minutes; the corpus is worth more than that.
     conn.execute("PRAGMA synchronous=FULL")
     conn.executescript(_SCHEMA)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(observations)")}
+    if "city" not in columns:
+        # Existing rows are Taipei's -- it is the only city ever collected --
+        # and the migration below rewrites both this and the id.
+        conn.execute("ALTER TABLE observations ADD COLUMN city TEXT NOT NULL DEFAULT ''")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_obs_city_ts ON observations(city, data_ts)")
     return conn
 
 
@@ -56,7 +72,7 @@ def insert_snapshot(
         free_car, flags = validate(obs.free_car, capacity)
         free_motor, _ = validate(obs.free_motor, None)
         rows.append(
-            (obs.lot_id, obs.data_ts, snapshot.observed_at,
+            (obs.lot_id, snapshot.city, obs.data_ts, snapshot.observed_at,
              free_car, free_motor, int(flags))
         )
 
@@ -67,8 +83,8 @@ def insert_snapshot(
         cursor = conn.executemany(
             """
             INSERT INTO observations
-                (lot_id, data_ts, observed_at, free_car, free_motor, quality)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (lot_id, city, data_ts, observed_at, free_car, free_motor, quality)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(lot_id, data_ts) DO NOTHING
             """,
             rows,
@@ -81,12 +97,89 @@ def insert_snapshot(
     return written
 
 
-def latest_data_ts(conn: sqlite3.Connection) -> int | None:
-    return conn.execute("SELECT MAX(data_ts) FROM observations").fetchone()[0]
+def migrate_to_namespaced_ids(conn: sqlite3.Connection, city: str = "taipei") -> int:
+    """Prefix every un-namespaced row's id, once. Returns rows rewritten.
+
+    One transaction: a half-migrated store has two id conventions in one table
+    and every later query silently reads half the corpus. Idempotent, because
+    the collector may restart mid-day and this runs at startup.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        cursor = conn.execute(
+            "UPDATE observations SET lot_id = ? || lot_id, city = ? "
+            "WHERE instr(lot_id, ?) = 0",
+            (f"{city}{ids.SEPARATOR}", city, ids.SEPARATOR),
+        )
+        rewritten = cursor.rowcount
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+    return rewritten
 
 
-def oldest_data_ts(conn: sqlite3.Connection) -> int | None:
-    return conn.execute("SELECT MIN(data_ts) FROM observations").fetchone()[0]
+def record_source_health(
+    conn: sqlite3.Connection,
+    city: str,
+    *,
+    observed_at: int,
+    rows: int,
+    usable: int,
+    newest_ts: int | None,
+    ok: bool,
+) -> None:
+    """Upsert one city's latest fetch outcome.
+
+    `first_ts = COALESCE(first_ts, excluded.first_ts)`: the first sighting of
+    a source is never overwritten by later runs, so `source_health` can report
+    how long a city has been collected.
+    """
+    conn.execute(
+        """
+        INSERT INTO sources (city, first_ts, last_ts, last_rows, last_usable, last_ok)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(city) DO UPDATE SET
+            first_ts = COALESCE(sources.first_ts, excluded.first_ts),
+            last_ts = excluded.last_ts,
+            last_rows = excluded.last_rows,
+            last_usable = excluded.last_usable,
+            last_ok = excluded.last_ok
+        """,
+        (city, newest_ts, observed_at, rows, usable, int(ok)),
+    )
+
+
+def source_health(conn: sqlite3.Connection) -> dict[str, dict]:
+    rows = conn.execute(
+        "SELECT city, first_ts, last_ts, last_rows, last_usable, last_ok FROM sources"
+    )
+    return {
+        city: {
+            "first_ts": first_ts,
+            "last_ts": last_ts,
+            "rows": rows_,
+            "usable": usable,
+            "ok": bool(ok),
+        }
+        for city, first_ts, last_ts, rows_, usable, ok in rows
+    }
+
+
+def latest_data_ts(conn: sqlite3.Connection, city: str | None = None) -> int | None:
+    if city is None:
+        return conn.execute("SELECT MAX(data_ts) FROM observations").fetchone()[0]
+    return conn.execute(
+        "SELECT MAX(data_ts) FROM observations WHERE city = ?", (city,)
+    ).fetchone()[0]
+
+
+def oldest_data_ts(conn: sqlite3.Connection, city: str | None = None) -> int | None:
+    if city is None:
+        return conn.execute("SELECT MIN(data_ts) FROM observations").fetchone()[0]
+    return conn.execute(
+        "SELECT MIN(data_ts) FROM observations WHERE city = ?", (city,)
+    ).fetchone()[0]
 
 
 def prune(conn: sqlite3.Connection, cutoff_ts: int) -> int:
