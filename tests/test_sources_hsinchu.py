@@ -1,6 +1,6 @@
 # Full live response on 2026-09-16: 34,308 bytes, 55 records, fetched via
 # curl GET to https://hispark.hccg.gov.tw/OpenData/GetParkInfo. Trimmed to
-# 18 records in fixtures/sources/hsinchu.json, keeping the bare top-level
+# 19 records in fixtures/sources/hsinchu.json, keeping the bare top-level
 # array -- see task-9-report.md for exactly which lots and why.
 import json
 from pathlib import Path
@@ -70,6 +70,19 @@ def test_car_and_motor_fields_are_independent():
     obs = _by_id(tick.snapshot.observations)["hsinchu:079"]
     assert obs.free_car == 0
     assert obs.free_motor == 889
+
+
+def test_a_real_zero_motor_count_survives_independently_of_car():
+    # Lot 009's motorcycle area is a real, live 0 (full) -- TOTALQUANTITYMOT
+    # is a genuine 196, so this is not "no motorcycle spaces exist" -- while
+    # its own FREEQUANTITY is a real, non-zero 72. This is lot 079's mirror
+    # image (car-zero/motor-real there, motor-zero/car-real here): a full
+    # motorcycle area must not collapse into None, and neither field's
+    # reading may suppress the other.
+    tick = hsinchu.parse(FIXTURE, now=NOW)
+    obs = _by_id(tick.snapshot.observations)["hsinchu:009"]
+    assert obs.free_motor == 0
+    assert obs.free_car == 72
 
 
 def test_missing_key_or_non_integer_maps_to_none_without_suppressing_the_other_field():
@@ -152,6 +165,23 @@ def test_a_lot_with_coordinates_outside_taiwan_under_either_ordering_is_dropped(
     assert not any(lot.id == "hsinchu:9001" for lot in tick.lots)
     by_id = _by_id(tick.snapshot.observations)
     assert by_id["hsinchu:9001"].free_car == 5
+
+
+def test_a_lot_with_swapped_coordinates_is_recovered_not_dropped():
+    # Synthetic: every one of the 55 live records puts LATITUDE=lat,
+    # LONGITUDE=lon correctly (see the module docstring and
+    # test_latitude_and_longitude_fields_hold_what_their_names_claim), so
+    # this feed never exercises _parse_coords's recovery branch on its own.
+    # Fixture id 9002 fabricates a reversed pair -- LATITUDE: "120.97",
+    # LONGITUDE: "24.80" -- the same kind of swap Kaohsiung's lat/lng and
+    # Taoyuan's wgsX/wgsY genuinely ship. The (lat, lon) ordering fails
+    # in_taiwan (120.97 is not a latitude); the swapped (lon, lat) ordering
+    # succeeds, so the lot must survive with its coordinates corrected, not
+    # be dropped.
+    tick = hsinchu.parse(FIXTURE, now=NOW)
+    lot = next(l for l in tick.lots if l.id == "hsinchu:9002")
+    assert lot.lat == 24.80
+    assert lot.lon == 120.97
 
 
 def test_capacity_zero_means_not_a_car_park_not_full():
