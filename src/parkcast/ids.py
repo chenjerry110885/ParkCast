@@ -28,13 +28,39 @@ def bare(lot_id: str) -> str:
     return raw
 
 
-# The city every un-namespaced id in the corpus belongs to. `store.connect`
-# migrates the hot store on startup, but the *cold* Parquet corpus is never
-# rewritten, so every day compacted before namespacing still holds bare
-# `TPE0001` ids -- and they are Taipei's for exactly the reason
+# The city every un-namespaced id in the corpus belongs to. The cold Parquet
+# corpus is never rewritten, so every day compacted before namespacing still
+# holds bare `TPE0001` ids -- and they are Taipei's for exactly the reason
 # `store.migrate_to_namespaced_ids` assumes: it was the only city ever
 # collected.
 LEGACY_CITY = "taipei"
+
+
+def as_stored(lot_id: str) -> str:
+    """One id in the convention the store uses today: namespaced.
+
+    Read a pre-namespacing Parquet file and you get `TPE0001` where the hot
+    store, the metadata roster and every lookup in the codebase say
+    `taipei:TPE0001`. Those are the same physical car park, and everything that
+    joins the two sides -- `forecast.Counts`, the publish roster filter
+    (`lot.id in history.counts.lot`), `evaluate`'s labels -- joins on the string.
+
+    Leaving them unequal does not fail; it *splits*. Measured on a cold day of
+    100 readings beside a hot day of 3 for one lot: `counts.lot` came back
+    holding both `TPE0001` (100 observations) and `taipei:TPE0001` (3), and
+    `Climatology.predict`, which is called with the namespaced `Lot.id`, saw
+    only the 3. The lot and bucket tiers silently lose the entire
+    pre-namespacing corpus -- the only long history this project has -- and
+    every lot drifts toward the citywide rate. Nothing looks wrong, because the
+    *global* tier still counts the cold rows, so the numbers stay plausible.
+
+    So normalising has to happen where the corpus is READ, before any of those
+    keys exist -- `forecast._read_parquet_day` and `evaluate.load_labels` --
+    not merely where they are partitioned afterwards. An id that already carries
+    a separator is returned untouched, so this is a no-op for every file written
+    since namespacing.
+    """
+    return lot_id if SEPARATOR in lot_id else qualify(LEGACY_CITY, lot_id)
 
 
 def city_of_stored(lot_id: str) -> str:
@@ -42,16 +68,17 @@ def city_of_stored(lot_id: str) -> str:
 
     `city_of` is the strict form and stays strict -- an id arriving from a feed
     adapter or a metadata parser without a namespace is a bug, and raising is
-    how it gets found. This is the form for ids read back out of the corpus,
-    where a pre-namespacing Parquet file is not a bug but history, and where
-    raising would take publishing down for every city at once: `run_forever`
-    catches the exception, logs it and carries on collecting, so the failure is
-    a site that silently stops updating while the collector looks healthy.
+    how it gets found. This is a BACKSTOP, for wherever a bare id might still
+    reach a caller that only needs to know whose it is: raising there would take
+    publishing down for every city at once, and `run_forever` catches the
+    exception, logs it and carries on collecting -- so the failure is a site
+    that silently stops updating while the collector looks perfectly healthy.
 
-    Attributing those ids to Taipei rather than dropping them also keeps
-    Taipei's published bytes where they are -- they already count toward its
-    climatology today, and a bare id matches no namespaced `Lot.id`, so this
-    changes which counts Taipei sees and nothing else.
+    It is not, and must not be treated as, the fix for a bare id in the corpus.
+    Attributing such an id to Taipei without rewriting it leaves it a *separate
+    key* from the namespaced form of the same lot, which splits that lot's
+    history in half -- see `as_stored`, which is what actually resolves it, at
+    the point the corpus is read.
     """
     city, sep, _ = lot_id.partition(SEPARATOR)
     return city if sep else LEGACY_CITY

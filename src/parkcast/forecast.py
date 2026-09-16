@@ -325,6 +325,15 @@ def _read_parquet_day(path: Path):
     A stem that is not an ISO date is not a day this project wrote, so it is
     skipped rather than parsed: one stray file in the cold directory must not be
     able to break a publish.
+
+    Ids come back in the store's convention via `ids.as_stored`, not as the file
+    spells them. Parquet is never rewritten, so every day compacted before ids
+    were namespaced still holds a bare `TPE0001` -- and this generator feeds
+    `Counts` (keyed by lot id), the backtest's tails, and through them the
+    publish roster filter. Normalising anywhere later than here leaves the cold
+    and hot halves of one lot's history under two different keys; see
+    `ids.as_stored` for what that measured out to. One call per (lot, day), not
+    per reading, which is why it is out here rather than in the slot loop.
     """
     import pyarrow.parquet as pq
 
@@ -336,9 +345,10 @@ def _read_parquet_day(path: Path):
         return
     start, _ = day_bounds(day)
     for row in pq.read_table(path, columns=["lot_id", "free_car"]).to_pylist():
+        lot_id = ids.as_stored(row["lot_id"])
         for slot, free in enumerate(row["free_car"]):
             if free is not None and slot < SLOTS_PER_DAY:
-                yield row["lot_id"], start + slot * SLOT_SECONDS, free
+                yield lot_id, start + slot * SLOT_SECONDS, free
 
 
 BUCKETS_PER_WEEK = 7 * 24 * 60 // config.CLIMATOLOGY_BUCKET_MIN

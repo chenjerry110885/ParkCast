@@ -433,6 +433,24 @@ def _seed(conn, day, lot="A", free=10, motor=None, city="taipei", at=None):
     )
 
 
+def _seed_legacy(conn, day, lot="A", free=10, at=None):
+    """One observation with a BARE lot id, straight into the table.
+
+    What the collector wrote before ids were namespaced. Compacted, this is what
+    the live cold corpus actually holds -- and Parquet is never rewritten, so it
+    holds it for good. A cold fixture built through `_seed` produces *namespaced*
+    Parquet, which is a file shape the live corpus does not contain, and is
+    blind to everything `ids.as_stored` exists for.
+    """
+    start, _ = day_bounds(day)
+    ts = start if at is None else at
+    conn.execute(
+        "INSERT INTO observations (lot_id, city, data_ts, observed_at, free_car,"
+        " free_motor, quality) VALUES (?, '', ?, ?, ?, NULL, 0)",
+        (lot, ts, ts + 200, free),
+    )
+
+
 def test_previous_day_is_compacted_when_the_taipei_day_rolls_over(monkeypatch):
     """The rollover is the only moment the finished day is both complete and unpruned."""
     archived = []
@@ -1190,7 +1208,10 @@ def test_publish_artifacts_keeps_a_lot_whose_history_is_only_in_the_cold_store(
     monkeypatch.setattr(config, "PARQUET_DIR", cold)
 
     src = store.connect(tmp_path / "src.sqlite")
-    _seed(src, date(2026, 9, 3), lot="COLDONLY")
+    # Bare, as a day compacted before namespacing holds it. `publish_city`
+    # keeps a lot with `lot.id in counts.lot`, and `Lot.id` is namespaced, so
+    # this lot is on the map only because the cold read normalises its id.
+    _seed_legacy(src, date(2026, 9, 3), lot="COLDONLY")
     compact_day(src, date(2026, 9, 3), cold)
     src.close()
 
@@ -1802,7 +1823,7 @@ def test_cities_json_keeps_the_entry_of_a_city_that_refused(tmp_path, pinned_clo
 
 
 def test_a_lot_with_an_unnamespaced_id_does_not_take_every_city_down(
-    tmp_path, pinned_clock
+    tmp_path, monkeypatch, pinned_clock
 ):
     """`Lot.id` has been namespaced since the metadata parser was fixed, so a
     bare one is a bug in whichever parser produced it. Grouping with the strict
@@ -1810,7 +1831,25 @@ def test_a_lot_with_an_unnamespaced_id_does_not_take_every_city_down(
     and carries on collecting, so the result is every city's artifacts frozen
     while the collector goes on looking perfectly healthy. Exactly the failure
     the per-city refusals above exist to prevent, one level up.
+
+    The cold corpus is what makes this test mean anything. Without it the stray
+    id matches no key in `counts.lot` and never gets far enough to be dangerous.
+    With a pre-namespacing Parquet day holding that very id, an un-normalised
+    cold read puts a BARE key in `counts.lot`, the stray `Lot` matches it,
+    survives the roster filter, and reaches `ids.bare` -- which raises, taking
+    Taipei's publish down with it. Normalising on read is what keeps the
+    outcome quiet: the cold key is `taipei:TPE9999`, the bare `Lot.id` matches
+    nothing, and the lot is filtered out like any other without history.
     """
+    from parkcast.compact import compact_day
+
+    cold = tmp_path / "cold"
+    monkeypatch.setattr(config, "PARQUET_DIR", cold)
+    src = store.connect(tmp_path / "src.sqlite")
+    _seed_legacy(src, date(2026, 9, 3), lot="TPE9999")
+    compact_day(src, date(2026, 9, 3), cold)
+    src.close()
+
     conn = store.connect(tmp_path / "t.sqlite")
     taipei_latest = _seed_taipei(conn)
     _seed_kaohsiung(conn, after=taipei_latest)

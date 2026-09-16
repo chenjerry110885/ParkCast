@@ -42,7 +42,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from parkcast import config, liveness
+from parkcast import config, ids, liveness
 from parkcast.compact import SLOTS_PER_DAY, SLOT_SECONDS, day_bounds
 from parkcast.forecast import Blend, Climatology, Persistence, load_history, week_bucket
 
@@ -127,9 +127,19 @@ def calibration(predictions: Sequence[Prediction], bins: int = 10) -> list[Bin]:
 def load_labels(conn: sqlite3.Connection, cold_dir: Path | None) -> dict[int, dict[str, int]]:
     """Every observation the corpus holds, as `{data_ts: {lot_id: free_car}}`.
 
-    Both stores, one timestamp convention. A reading present in both (cold owns
-    a day the hot window still covers) lands on the same key with the same
-    value, so the overlap is idempotent rather than double-counted.
+    Both stores, one timestamp convention AND one id convention. A reading
+    present in both (cold owns a day the hot window still covers) lands on the
+    same key with the same value, so the overlap is idempotent rather than
+    double-counted -- but only while the two sides spell the lot the same way.
+
+    Cold ids therefore go through `ids.as_stored`: Parquet is never rewritten,
+    so a day compacted before namespacing still says `TPE0001` where the hot
+    store says `taipei:TPE0001`. Without this the overlap stops being idempotent
+    and, worse, these labels are joined against `history.counts.lot` and handed
+    to `model.predict` -- so every backtest would be scored on half a corpus,
+    silently, with plausible numbers. Same normalisation, same reason, as
+    `forecast._read_parquet_day`; this reader is separate and would not inherit
+    it.
     """
     labels: dict[int, dict[str, int]] = {}
 
@@ -140,7 +150,7 @@ def load_labels(conn: sqlite3.Connection, cold_dir: Path | None) -> dict[int, di
         start, _ = day_bounds(day)
         table = pq.read_table(path, columns=["lot_id", "free_car"]).to_pylist()
         for row in table:
-            lot_id = row["lot_id"]
+            lot_id = ids.as_stored(row["lot_id"])
             for slot, free in enumerate(row["free_car"]):
                 if free is None or not 0 <= slot < SLOTS_PER_DAY:
                     continue
