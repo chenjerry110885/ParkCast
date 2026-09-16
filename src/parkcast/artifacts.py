@@ -1,11 +1,17 @@
-"""Encode and atomically publish the two static artifacts the client reads."""
+"""Encode and atomically publish the static artifacts the client reads.
+
+One pair per city -- `grid-{city}.bin` and `lots-{city}.json` -- plus a
+`cities.json` index naming them. Taipei's pair keeps the original unsuffixed
+names, because the deployed app already fetches them.
+"""
 import json
+import math
 import struct
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from parkcast import config
+from parkcast import config, ids
 from parkcast.metadata import Lot
 from parkcast.pricing import Price, parse_fare
 
@@ -14,6 +20,14 @@ VERSION = 1
 HEADER_FORMAT = "<4sBIIHBBI"         # magic, version, generated_at, base_data_ts,
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)   # n_lots, n_horizons,
                                                # horizon_step_min, roster_id
+
+CITIES_NAME = "cities.json"
+# The one city whose shard keeps the original, unsuffixed filenames. The live
+# site has been fetching grid.bin and lots.json since before there was a second
+# city, and every deployed client has those URLs baked in; moving them to
+# grid-taipei.bin would break every copy of the app in the wild for the sake of
+# symmetry. Sharding is additive on purpose -- see `publish`.
+UNSUFFIXED_CITY = "taipei"
 
 
 def roster_id(lot_ids: Sequence[str]) -> int:
@@ -34,6 +48,12 @@ def roster_id(lot_ids: Sequence[str]) -> int:
     One function, called by both encoders, because two copies of this
     computation could drift and a roster that disagrees with itself is worse
     than no roster at all.
+
+    The ids it hashes are the BARE, published ones (`ids.bare`), never the
+    store's namespaced form. A shard is always exactly one city, so a bare id is
+    already unique within the file this hash describes -- and hashing the
+    namespaced form would move Taipei's published `roster_id`, which the client
+    compares between grid.bin and lots.json, for no gain at all.
     """
     return zlib.crc32("\n".join(lot_ids).encode("utf-8")) & 0xFFFFFFFF
 
@@ -140,13 +160,23 @@ def build_lots_json(
     that reading; None means observed but reporting nothing. It is the one
     *observed* number on the card, and the client labels it with the reading's
     age so it is never mistaken for a forecast. Additive: `v` stays where it is.
+
+    `id` is the feed's own id, stripped of the store's city namespace. The file
+    is one city's shard and says so in its name, so the namespace would be a
+    constant prefix repeated on every row -- and, far more importantly, the
+    app's stored recents key on the id it already knows. A namespaced id here
+    would orphan every saved lot and change every published byte.
+
+    `not_updating` and `free` are keyed by the STORED (namespaced) id, because
+    that is what the store and `liveness` deal in. Only the published `id`
+    field and `roster_id` are bare.
     """
-    lot_ids = [lot.id for lot in lots]
+    lot_ids = [ids.bare(lot.id) for lot in lots]
     withheld = not_updating or {}
     rows = []
     for i, lot in enumerate(lots):
         row = {
-            "i": i, "id": lot.id, "n": lot.name, "a": lot.area,
+            "i": i, "id": lot_ids[i], "n": lot.name, "a": lot.area,
             "y": round(lot.lat, 5), "x": round(lot.lon, 5),
             "c": lot.capacity_car, "t": lot.lot_type,
             "p": _price_field(parse_fare(lot.fare_text)),
@@ -167,8 +197,25 @@ def build_lots_json(
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def publish(out_dir: Path, *, grid_blob: bytes, lots_blob: bytes) -> None:
-    """Write both artifacts, each via a temp file and rename.
+def grid_name(city: str) -> str:
+    """The published grid filename for one city's shard."""
+    return "grid.bin" if city == UNSUFFIXED_CITY else f"grid-{city}.bin"
+
+
+def lots_name(city: str) -> str:
+    """The published metadata filename for one city's shard."""
+    return "lots.json" if city == UNSUFFIXED_CITY else f"lots-{city}.json"
+
+
+def _write_atomic(out_dir: Path, name: str, blob: bytes) -> None:
+    """One file, via a temp file in the same directory and a rename."""
+    tmp = out_dir / f"{name}.tmp"
+    tmp.write_bytes(blob)
+    tmp.replace(out_dir / name)
+
+
+def publish(out_dir: Path, city: str, *, grid_blob: bytes, lots_blob: bytes) -> None:
+    """Write one city's two artifacts, each via a temp file and rename.
 
     A reader polling grid.bin must never observe a partial write. The pair is
     not atomic *together* -- a client can still fetch one file either side of a
@@ -176,10 +223,100 @@ def publish(out_dir: Path, *, grid_blob: bytes, lots_blob: bytes) -> None:
     compare: `generated_at` / `base_data_ts` say which publish each came from,
     and `roster_id` says whether that even matters, since a lots.json from an
     earlier tick with an identical roster pairs safely with this grid.
+
+    Nor is the *set* of shards atomic, which is the same property one notch up:
+    each city is written independently, so a tick can leave one city republished
+    and another still holding last tick's bytes. That is deliberate -- the
+    alternative is one city's collapse blocking every other city's publish --
+    and it is safe because a shard is self-describing: nothing in grid-tainan.bin
+    is interpreted against anything in grid.bin.
+
+    Taipei keeps the unsuffixed names; see `UNSUFFIXED_CITY`.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    for name, blob in (("grid.bin", grid_blob), ("lots.json", lots_blob)):
-        tmp = out_dir / f"{name}.tmp"
-        tmp.write_bytes(blob)
-        tmp.replace(out_dir / name)
+    for name, blob in ((grid_name(city), grid_blob), (lots_name(city), lots_blob)):
+        _write_atomic(out_dir, name, blob)
+
+
+def bbox(lots: Sequence[Lot]) -> list[float]:
+    """[west, south, east, north] over `lots`, rounded like their coordinates.
+
+    Rounded to the same 5 decimals `build_lots_json` rounds `y`/`x` to, so the
+    box cannot exclude a published lot by a rounding step: the min is rounded
+    down and the max up, never to nearest.
+    """
+    lats = [lot.lat for lot in lots]
+    lons = [lot.lon for lot in lots]
+    step = 10 ** 5
+    return [
+        math.floor(min(lons) * step) / step, math.floor(min(lats) * step) / step,
+        math.ceil(max(lons) * step) / step, math.ceil(max(lats) * step) / step,
+    ]
+
+
+def city_entry(city: str, lots: Sequence[Lot], *, base_data_ts: int) -> dict:
+    """One city's row in cities.json, derived from the shard just published.
+
+    `lots` is the exact roster written to that shard, so the count and the box
+    describe the file rather than the intention -- the same reason `n_lots` and
+    `roster_id` are derived inside the encoders.
+    """
+    return {
+        "city": city,
+        "lots": len(lots),
+        "base_data_ts": base_data_ts,
+        "bbox": bbox(lots),
+    }
+
+
+def build_cities_json(entries: Iterable[Mapping], *, generated_at: int) -> bytes:
+    """The index of published shards: which cities exist and where they are.
+
+    A client cannot discover grid-tainan.bin by guessing, and must not have the
+    list compiled into it -- a city added here would then need an app release
+    before anyone could see it. This is the one file it fetches without knowing
+    what is in it.
+
+    `bbox` is what makes it useful before anything is downloaded: the app can
+    tell from a location which shard (if any) covers it, and fetch only that
+    one, instead of pulling every city's lots.json to find out.
+
+    Sorted by city name so an unchanged set of shards produces an unchanged
+    list, leaving `generated_at` the only field that moves tick to tick.
+    """
+    payload = {
+        "v": VERSION,
+        "generated_at": generated_at,
+        "cities": sorted(entries, key=lambda entry: entry["city"]),
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def read_cities(path: Path) -> dict[str, dict]:
+    """The entries of an already-published cities.json, keyed by city.
+
+    Empty covers every "nothing trustworthy to carry forward" case -- no file,
+    unreadable, not JSON, or JSON of the wrong shape -- exactly as
+    `read_header` does for the grid, so a caller can treat a missing index as
+    "nothing to preserve" without knowing the format.
+    """
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        entries = payload["cities"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    if not isinstance(entries, list):
+        return {}
+    return {
+        entry["city"]: entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("city"), str)
+    }
+
+
+def publish_cities(out_dir: Path, blob: bytes) -> None:
+    """Write cities.json via a temp file and rename, like the shards."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _write_atomic(out_dir, CITIES_NAME, blob)

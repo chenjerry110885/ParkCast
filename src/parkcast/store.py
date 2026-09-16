@@ -201,13 +201,31 @@ def count_rows(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
 
 
-def free_at(conn: sqlite3.Connection, data_ts: int) -> dict[str, int | None]:
+def free_at(
+    conn: sqlite3.Connection, data_ts: int, city: str | None = None
+) -> dict[str, int | None]:
     """Each lot's validated free_car at one tick, keyed by lot id.
 
     Only lots observed at exactly `data_ts` appear. A NULL free_car -- the
     feed's -9 sentinel, or a reading `validate` refused -- maps to None rather
     than being dropped: "seen, reported nothing" and "not seen" are different
     facts, and the card shows them differently.
+
+    `city` narrows the tick to one source. Each city is published from its own
+    `data_ts` now (see `forecast.by_city`), and two cities can land on the same
+    second -- Kaohsiung and Taoyuan stamp `data_ts = now`, so it is a matter of
+    when the fetch returned. Nothing would be *misattributed* (lot ids are
+    namespaced, and the caller looks up its own), but the query would drag
+    another city's rows through for every shard. `(city, data_ts)` is exactly
+    `idx_obs_city_ts`.
     """
-    rows = conn.execute("SELECT lot_id, free_car FROM observations WHERE data_ts = ?", (data_ts,))
+    if city is None:
+        rows = conn.execute(
+            "SELECT lot_id, free_car FROM observations WHERE data_ts = ?", (data_ts,)
+        )
+    else:
+        rows = conn.execute(
+            "SELECT lot_id, free_car FROM observations WHERE city = ? AND data_ts = ?",
+            (city, data_ts),
+        )
     return {lot_id: free for lot_id, free in rows}

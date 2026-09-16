@@ -8,6 +8,7 @@ import pytest
 
 from parkcast import config, liveness, store
 from parkcast.feed import TS_FEED, FeedSnapshot, Observation
+from parkcast.ids import prefix_range, qualify
 from parkcast.liveness import (Run, Withholding, last_update, not_updating,
                                unchanged_run, withheld_since)
 
@@ -169,3 +170,72 @@ def test_withholding_answers_none_only_for_withheld_lots():
     forecaster = Withholding(Always(), {"FROZEN": T})
     assert forecaster.predict("FROZEN", T, 15) is None
     assert forecaster.predict("LIVE", T, 15) == 0.75
+
+
+# --- scoped to one city -----------------------------------------------------
+
+
+def write_city(conn, ts, city, readings):
+    """One city's tick. `readings` is {bare lot id: free_car or None}."""
+    obs = tuple(Observation(qualify(city, lot), free, None, ts, TS_FEED)
+                for lot, free in readings.items())
+    store.insert_snapshot(conn, FeedSnapshot(city, ts + 200, obs),
+                          {qualify(city, lot): 50 for lot in readings})
+
+
+def test_a_silent_lot_is_dated_to_its_own_citys_window(conn):
+    """`window_start` is "the latest it could have been" for a lot the window
+    never heard from. Globally it is the oldest moment in the STORE -- so a city
+    switched on twenty minutes ago would have its silent lots dated to Taipei's
+    26 hours and withheld on its first tick, on another city's history."""
+    for i, ts in enumerate(ticks(26)):
+        write_city(conn, ts, "taipei", {"A": i % 3})
+    for i in range(4):
+        write_city(conn, T + 600 + i * 300, "tainan", {"N1": i})
+
+    as_of = T + 600 + 3 * 300
+    assert not_updating(conn, ["tainan:N1", "tainan:SILENT"], as_of=as_of,
+                        city="tainan") == {}
+    # Unscoped, the same call reaches back to Taipei's window start.
+    assert set(not_updating(conn, ["tainan:N1", "tainan:SILENT"], as_of=as_of)) == {
+        "tainan:SILENT"
+    }
+
+
+def test_scoping_does_not_change_the_answer_for_the_oldest_city(conn):
+    """Taipei is the oldest corpus, so its own window start and the store's
+    coincide -- which is exactly why a single-city fixture cannot see the bug."""
+    for i, ts in enumerate(ticks(26)):
+        write_city(conn, ts, "taipei", {"FROZEN": 7, "LIVE": i % 5})
+    write_city(conn, T + 600, "kaohsiung", {"1": 3})
+
+    scoped = not_updating(conn, ["taipei:FROZEN", "taipei:LIVE"], as_of=T, city="taipei")
+    assert scoped == {"taipei:FROZEN": T - 26 * HOUR}
+    assert scoped == not_updating(conn, ["taipei:FROZEN", "taipei:LIVE"], as_of=T)
+
+
+def test_a_scoped_call_judges_only_the_lots_it_actually_scanned(conn):
+    """A scoped scan reads one city's key range. Asked about a lot outside it,
+    it would find no readings, fall through to `window_start` as "never heard
+    from", and withhold it -- a destructive claim (every horizon UNKNOWN) about
+    rows it never looked at. Out-of-scope ids are dropped instead."""
+    for i, ts in enumerate(ticks(26)):
+        write_city(conn, ts, "taipei", {"A": i % 5})
+        write_city(conn, ts, "tainan", {"1": 7})      # frozen, but not Taipei's
+    assert not_updating(conn, ["taipei:A", "tainan:1"], as_of=T, city="taipei") == {}
+    assert not_updating(conn, ["tainan:1"], as_of=T, city="tainan") == {
+        "tainan:1": T - 26 * HOUR
+    }, "the same lot, asked of its own city, is still frozen"
+
+
+def test_the_scoped_detector_also_walks_the_primary_key_without_a_sort(conn):
+    """The whole reason the scope is a primary-key range and not `city = ?`:
+    the column predicate takes SQLite to the non-covering `idx_obs_city_ts` and
+    makes it sort. Six bounded walks then cost what one full walk costs."""
+    write_city(conn, T, "taipei", {"A": 1})
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN " + liveness._CITY_READINGS_NEWEST_FIRST,
+        prefix_range("taipei"),
+    ).fetchall()
+    assert not any("TEMP B-TREE" in row[-1] for row in plan), plan
+    assert any("PRIMARY KEY" in row[-1] for row in plan), plan

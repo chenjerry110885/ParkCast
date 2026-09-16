@@ -12,10 +12,10 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from parkcast import artifacts, config, liveness, store
+from parkcast import artifacts, config, ids, liveness, store
 from parkcast.collector import TickResult, collect_all
 from parkcast.compact import compact_day, day_bounds
-from parkcast.forecast import Blend, load_history
+from parkcast.forecast import Blend, by_city, empty_history, load_history
 from parkcast.grid import build_grid
 from parkcast.report import build_report, format_report
 from parkcast.sources import SOURCES
@@ -74,8 +74,17 @@ def _first_day_to_archive(conn, today: date) -> date:
     return today if oldest is None else min(taipei_date(oldest), today)
 
 
-def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=None) -> None:
-    """Rebuild and republish grid.bin and lots.json from current history.
+def publish_city(
+    conn,
+    city: str,
+    lots,
+    out_dir: Path = config.ARTIFACT_DIR,
+    *,
+    history,
+    generated_at: int,
+    uploader=None,
+) -> dict | None:
+    """Rebuild and republish one city's shard. Returns its cities.json entry.
 
     Lots are ordered by id and filtered to those that take cars at all and have
     at least one usable observation, so grid rows and lots.json indices line up
@@ -84,15 +93,26 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=
     Refuses to publish a set that is empty, one that has collapsed to less than
     MIN_PUBLISH_LOT_FRACTION of what is already published, or one with no
     reading behind it to forecast from: stale artifacts beat artifacts that have
-    lost most of the city, and beat artifacts dated 1970.
+    lost most of the city, and beat artifacts dated 1970. Every one of those
+    judgements is made against THIS city's own published shard and THIS city's
+    own history -- a collapse in Tainan is not evidence about Taipei, and
+    measuring Tainan's roster against Taipei's published `n_lots` would refuse
+    every small city forever.
 
-    Every refusal returns rather than raises. Publishing sits downstream of
-    collection and must never be able to stop it.
+    Every refusal returns None rather than raising. Publishing sits downstream
+    of collection and must never be able to stop it -- and, one level down, one
+    city must never be able to stop another.
+
+    `history` is this city's own, from `forecast.by_city`: its own `latest_ts`,
+    its own `current`. See that function for what reading the store unscoped
+    silently did to Taipei.
+
+    `generated_at` is passed in rather than read here, so every shard in a tick
+    carries the same stamp and cities.json agrees with all of them.
 
     `uploader`, when given, receives the exact published bytes and never blocks
     (see `upload.Uploader`).
     """
-    history = load_history(conn, cold_dir=config.PARQUET_DIR)
     # `counts.lot`, not `recent`: the filter asks "has this lot ever produced a
     # usable observation", which is a question about the whole corpus. `recent`
     # is a two-hour tail, so filtering on it would drop any lot whose history
@@ -111,17 +131,19 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=
     if not ordered:
         # Reachable with a perfectly good `lots` argument too: an empty
         # `history` (e.g. right after a metadata-blob outage left `_lots`
-        # empty at startup, or a fresh store with no observations yet) makes
-        # every lot fail the history filter. Writing a header-only
-        # grid.bin and an empty lots.json would blank the whole site to zero
-        # parking lots until the next day-rollover refresh. Stale artifacts
-        # beat empty ones, so leave whatever is already published alone.
+        # empty at startup, a fresh store with no observations yet, or a city
+        # whose feed has been down long enough to be pruned out of the hot
+        # store) makes every lot fail the history filter. Writing a
+        # header-only grid.bin and an empty lots.json would blank this city to
+        # zero parking lots until the next day-rollover refresh. Stale
+        # artifacts beat empty ones, so leave whatever is already published
+        # alone.
         log.warning(
-            "no lots survived the history filter (%s candidate lots, %s with "
-            "history); leaving existing artifacts untouched",
-            len(lots), len(history.counts.lot),
+            "%s: no lots survived the history filter (%s candidate lots, %s with "
+            "history); leaving its existing artifacts untouched",
+            city, len(lots), len(history.counts.lot),
         )
-        return
+        return None
 
     if history.latest_ts == 0:
         # A full roster with nothing to forecast from. `ordered` is filtered on
@@ -133,13 +155,19 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=
         # every horizon against Thursday 1970-01-01 Taipei -- a real climatology
         # bucket, so the bytes look plausible -- and stamp `base_data_ts: 0` on
         # the result, telling every client the reading is 56 years stale.
+        #
+        # Per city, and it has to be: a global `latest_ts` is non-zero the
+        # moment ANY city has a reading, so a citywide -9 in Taipei would sail
+        # through this guard on the strength of Kaohsiung's clock and publish
+        # Taipei's roster stamped with a timestamp no Taipei lot was read at.
         log.error(
-            "no usable reading behind %s lots (latest_ts is 0: the hot window is "
-            "entirely NULL); leaving existing artifacts untouched", len(ordered),
+            "%s: no usable reading behind %s lots (latest_ts is 0: its hot window "
+            "is entirely NULL); leaving its existing artifacts untouched",
+            city, len(ordered),
         )
-        return
+        return None
 
-    published = artifacts.read_header(Path(out_dir) / "grid.bin")
+    published = artifacts.read_header(Path(out_dir) / artifacts.grid_name(city))
     if published is not None:
         floor = published["n_lots"] * config.MIN_PUBLISH_LOT_FRACTION
         if len(ordered) < floor:
@@ -148,20 +176,25 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=
             # yield a plausible-looking handful of lots; publishing it would take
             # most of the city's parking off the map until it recovers.
             log.error(
-                "refusing to publish %s lots over an existing %s-lot grid "
-                "(floor is %.0f, %.0f%% of published); leaving artifacts untouched",
-                len(ordered), published["n_lots"], floor,
+                "%s: refusing to publish %s lots over an existing %s-lot grid "
+                "(floor is %.0f, %.0f%% of published); leaving its artifacts untouched",
+                city, len(ordered), published["n_lots"], floor,
                 config.MIN_PUBLISH_LOT_FRACTION * 100,
             )
-            return
+            return None
 
-    # One list drives the grid's rows, the header's roster and lots.json alike,
-    # so the three cannot describe different sets of lots.
+    # One ordered roster drives the grid's rows, the header's roster and
+    # lots.json alike, so the three cannot describe different sets of lots. It
+    # has two spellings, both derived from that one list and never assembled
+    # separately: the stored namespaced id, which is what the store, `liveness`
+    # and the forecaster are keyed by, and the bare published id, which is what
+    # goes into the artifacts and into the roster hash (see `artifacts.roster_id`).
     lot_ids = [lot.id for lot in ordered]
+    published_ids = [ids.bare(lot.id) for lot in ordered]
     # A lot whose feed has stopped updating keeps its row, with no forecast in
     # it: a frozen reading published as 0% or 100% was the app telling drivers
     # something the data could not support. Publishing-only -- see `liveness`.
-    withheld = liveness.not_updating(conn, lot_ids, as_of=history.latest_ts)
+    withheld = liveness.not_updating(conn, lot_ids, as_of=history.latest_ts, city=city)
     forecaster = liveness.Withholding(Blend(history), withheld)
     grid = build_grid(forecaster, lot_ids, history.latest_ts)
     # One set of generation values for both files: the row order is recomputed
@@ -169,25 +202,108 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=
     # able to tell. `n_lots` and `roster_id` are derived inside each encoder
     # from the rows it is actually writing, so no stamp can outlive its rows.
     identity = {
-        "generated_at": int(time.time()),
+        "generated_at": generated_at,
         "base_data_ts": history.latest_ts,
     }
-    grid_blob = artifacts.encode_grid(grid, lot_ids=lot_ids, **identity)
+    grid_blob = artifacts.encode_grid(grid, lot_ids=published_ids, **identity)
     # The observed count behind each forecast row, from the same reading the
-    # grid was built from. `store.free_at` is one indexed query on data_ts.
-    free = store.free_at(conn, history.latest_ts)
+    # grid was built from -- this city's reading. `store.free_at` is one indexed
+    # query on (city, data_ts).
+    free = store.free_at(conn, history.latest_ts, city)
     lots_blob = artifacts.build_lots_json(ordered, not_updating=withheld, free=free, **identity)
-    artifacts.publish(out_dir, grid_blob=grid_blob, lots_blob=lots_blob)
+    artifacts.publish(out_dir, city, grid_blob=grid_blob, lots_blob=lots_blob)
     log.info(
-        "published %s lots x %s horizons, %s not updating",
-        len(ordered), config.HORIZON_COUNT, len(withheld),
+        "published %s: %s lots x %s horizons, %s not updating",
+        city, len(ordered), config.HORIZON_COUNT, len(withheld),
     )
     if uploader is not None:
         # The same bytes just written locally, handed to a thread that never
         # blocks this loop. Uploading is downstream of publishing, which is
         # downstream of collection.
         uploader.offer(grid_blob, lots_blob, base_data_ts=history.latest_ts,
-                       roster_id=artifacts.roster_id(lot_ids))
+                       roster_id=artifacts.roster_id(published_ids))
+    return artifacts.city_entry(city, ordered, base_data_ts=history.latest_ts)
+
+
+def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=None) -> None:
+    """Republish every city's shard from current history, then the index.
+
+    One `load_history` for the tick, split per city by `forecast.by_city`, then
+    one `publish_city` per city present in `lots`. The split is the load-bearing
+    part: read unscoped, `latest_ts` is a single maximum across every lot in the
+    store, and the cities that stamp `data_ts = now` always hold it -- so every
+    Taipei lot falls out of `current`, `Persistence` goes silent for all of
+    them, and `Blend` quietly becomes climatology-only. See `forecast.by_city`.
+
+    A city that refuses contributes nothing and stops nothing: the loop carries
+    on, and its entry in cities.json is left as it was, matching the shard still
+    sitting on disk. An entry is only ever replaced by a successful publish, so
+    the index can never claim a city that has no shard, nor drop one that has.
+    """
+    history = load_history(conn, cold_dir=config.PARQUET_DIR)
+    histories = by_city(history)
+
+    # Grouped with the total `city_of_stored`, not the strict `city_of`. A
+    # `Lot.id` without a namespace is a bug in whichever metadata parser
+    # produced it, but raising here would take *every* city's publish down with
+    # it -- for a tick, and for every tick after -- while the collector went on
+    # looking healthy. That is the exact failure this loop's per-city refusals
+    # exist to prevent. Filed under Taipei it simply fails the history filter
+    # below (the store's ids are namespaced), so the broken city goes quiet and
+    # says so in the log, and the other five publish.
+    lots_by_city: dict[str, list] = {}
+    for lot in lots:
+        lots_by_city.setdefault(ids.city_of_stored(lot.id), []).append(lot)
+
+    # One stamp for every shard and for the index, read once. Six shards each
+    # calling `time.time()` would disagree by a second or two, and a client
+    # comparing cities would see a difference that means nothing.
+    generated_at = int(time.time())
+
+    # Start from what is already indexed, so a city that refuses this tick --
+    # or one missing from `lots` entirely, e.g. its metadata fetch failed --
+    # keeps the entry describing the shard it still has on disk.
+    entries = artifacts.read_cities(Path(out_dir) / artifacts.CITIES_NAME)
+    for city in sorted(lots_by_city):
+        try:
+            entry = publish_city(
+                conn, city, lots_by_city[city], out_dir,
+                history=histories.get(city, empty_history()),
+                generated_at=generated_at,
+                # One pair, one endpoint: `upload.UPLOAD_PATH` is a single
+                # `/artifacts/latest`, and the deployed site serves Taipei.
+                # Offering six pairs to it would have five overwrite each other
+                # and burn the daily cap doing it. Uploading the other shards
+                # waits for the Worker to have somewhere to put them.
+                uploader=uploader if city == artifacts.UNSUFFIXED_CITY else None,
+            )
+        except Exception:
+            # `publish_city`'s guards are the expected ways a city declines, and
+            # they return. This is the net for the unexpected one -- a malformed
+            # id, a feed that produced something nothing anticipated. `run_forever`
+            # already nets the whole publish so a failure here cannot cost a tick
+            # of collection; this is the same reasoning one level finer, so a
+            # failure in Tainan cannot cost Taipei its publish either. The city's
+            # existing shard and its index entry both stay as they are.
+            log.exception("%s: publishing failed; leaving its artifacts untouched", city)
+            entry = None
+        if entry is not None:
+            entries[city] = entry
+
+    if not entries:
+        # Nothing published and nothing already indexed: the first tick of a
+        # store with no usable history. An index listing no cities would tell a
+        # client the service has no coverage anywhere, which is worse than no
+        # index at all -- one is a fact, the other is a missing file it already
+        # has to handle.
+        log.warning("no city published and no existing index to keep; leaving %s unwritten",
+                    artifacts.CITIES_NAME)
+        return
+    # `generated_at` here describes the index, not the readings: a carried-over
+    # entry keeps its own `base_data_ts`, which is the freshness a client reads.
+    artifacts.publish_cities(
+        out_dir, artifacts.build_cities_json(entries.values(), generated_at=generated_at)
+    )
 
 
 def run_forever(

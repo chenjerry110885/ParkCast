@@ -3,13 +3,16 @@ import struct
 
 import pytest
 
-from parkcast.artifacts import (HEADER_SIZE, MAGIC, VERSION, build_lots_json,
-                                decode_header, encode_grid, publish, roster_id)
+from parkcast.artifacts import (CITIES_NAME, HEADER_SIZE, MAGIC, VERSION,
+                                build_cities_json, build_lots_json, city_entry,
+                                decode_header, encode_grid, publish,
+                                publish_cities, read_cities, roster_id)
+from parkcast.ids import bare, qualify
 from parkcast.metadata import Lot
 
 
 def lot(i):
-    return Lot(id=f"TPE{i:04d}", name=f"停車場{i}", area="中正區", lot_type="立體",
+    return Lot(id=f"taipei:TPE{i:04d}", name=f"停車場{i}", area="中正區", lot_type="立體",
                capacity_car=50, lat=25.05 + i / 1000, lon=121.52 + i / 1000,
                service_time="00:00:00-23:59:59", fare_text="每小時30元")
 
@@ -177,20 +180,20 @@ def test_both_encoders_agree_on_the_roster_of_the_same_lots():
     able to compute different identities for the same rows."""
     lots = [lot(i) for i in (7, 3, 11)]
     grid = encode_grid(bytes(72), generated_at=5, base_data_ts=4,
-                       lot_ids=[l.id for l in lots])
+                       lot_ids=[bare(l.id) for l in lots])
     assert decode_header(grid)["roster_id"] == json.loads(lots_json(lots))["roster_id"]
 
 
 def test_publish_is_atomic(tmp_path):
-    publish(tmp_path, grid_blob=b"GRID", lots_blob=b"LOTS")
+    publish(tmp_path, "taipei", grid_blob=b"GRID", lots_blob=b"LOTS")
     assert (tmp_path / "grid.bin").read_bytes() == b"GRID"
     assert (tmp_path / "lots.json").read_bytes() == b"LOTS"
     assert list(tmp_path.glob("*.tmp")) == [], "temp files must not survive"
 
 
 def test_publish_overwrites_cleanly(tmp_path):
-    publish(tmp_path, grid_blob=b"OLD", lots_blob=b"OLD")
-    publish(tmp_path, grid_blob=b"NEW", lots_blob=b"NEW")
+    publish(tmp_path, "taipei", grid_blob=b"OLD", lots_blob=b"OLD")
+    publish(tmp_path, "taipei", grid_blob=b"NEW", lots_blob=b"NEW")
     assert (tmp_path / "grid.bin").read_bytes() == b"NEW"
 
 
@@ -198,7 +201,7 @@ def test_publish_overwrites_cleanly(tmp_path):
 
 
 def test_lots_json_carries_a_parsed_price():
-    lot = Lot(id="TPE0001", name="測試", area="中正區", lot_type="立體",
+    lot = Lot(id="taipei:TPE0001", name="測試", area="中正區", lot_type="立體",
               capacity_car=50, lat=25.05, lon=121.52,
               service_time="00:00:00-23:59:59",
               fare_text="計時：小型車100元/時。月租：小型車全日10,000元/月。")
@@ -208,7 +211,7 @@ def test_lots_json_carries_a_parsed_price():
 
 def test_an_unknown_price_carries_no_numbers_at_all():
     """The client must not be able to read a number that was never parsed."""
-    lot = Lot(id="TPE0002", name="測試", area="中正區", lot_type="立體",
+    lot = Lot(id="taipei:TPE0002", name="測試", area="中正區", lot_type="立體",
               capacity_car=50, lat=25.05, lon=121.52,
               service_time="", fare_text="洽公民眾30分鐘以下者免費。")
     doc = json.loads(build_lots_json([lot], generated_at=1, base_data_ts=1))
@@ -219,7 +222,7 @@ def test_an_unknown_price_carries_no_numbers_at_all():
 def test_the_raw_fare_text_is_not_shipped_to_the_client():
     """The browser gets numbers; parsing Chinese prose is the collector's job,
     and shipping ~57 chars x 1,756 lots would roughly double the artifact."""
-    lot = Lot(id="TPE0003", name="測試", area="中正區", lot_type="立體",
+    lot = Lot(id="taipei:TPE0003", name="測試", area="中正區", lot_type="立體",
               capacity_car=50, lat=25.05, lon=121.52,
               service_time="", fare_text="計時：小型車100元/時。")
     blob = build_lots_json([lot], generated_at=1, base_data_ts=1)
@@ -231,7 +234,7 @@ def test_the_raw_fare_text_is_not_shipped_to_the_client():
 
 def test_a_lot_that_is_not_updating_carries_its_last_update():
     doc = json.loads(build_lots_json([lot(1), lot(2)], generated_at=1, base_data_ts=1,
-                                     not_updating={"TPE0002": 1_788_900_000}))
+                                     not_updating={"taipei:TPE0002": 1_788_900_000}))
     assert "u" not in doc["lots"][0], "a live lot must carry no key to misread"
     assert doc["lots"][1]["u"] == 1_788_900_000
 
@@ -240,7 +243,7 @@ def test_not_updating_is_additive_and_leaves_the_schema_version_alone():
     """An older client ignores `u` and shows "no data" for the lot's UNKNOWN
     row -- still true -- so this is not a breaking change."""
     doc = json.loads(build_lots_json([lot(1)], generated_at=1, base_data_ts=1,
-                                     not_updating={"TPE0001": 5}))
+                                     not_updating={"taipei:TPE0001": 5}))
     assert doc["v"] == VERSION == 1
 
 
@@ -249,7 +252,7 @@ def test_not_updating_is_additive_and_leaves_the_schema_version_alone():
 
 def test_lots_json_carries_the_observed_free_count_at_the_reading():
     doc = json.loads(build_lots_json([lot(1), lot(2), lot(3)], generated_at=1, base_data_ts=1,
-                                     free={"TPE0001": 12, "TPE0002": None}))
+                                     free={"taipei:TPE0001": 12, "taipei:TPE0002": None}))
     rows = {r["id"]: r for r in doc["lots"]}
     assert rows["TPE0001"]["f"] == 12
     assert rows["TPE0002"]["f"] is None, "seen at the reading, reported nothing: null, not dropped"
@@ -258,7 +261,126 @@ def test_lots_json_carries_the_observed_free_count_at_the_reading():
 
 def test_free_count_is_additive_and_leaves_the_schema_version_alone():
     with_free = json.loads(build_lots_json([lot(1)], generated_at=1, base_data_ts=1,
-                                           free={"TPE0001": 3}))
+                                           free={"taipei:TPE0001": 3}))
     without = json.loads(build_lots_json([lot(1)], generated_at=1, base_data_ts=1))
     assert with_free["v"] == VERSION == without["v"]
     assert "f" not in without["lots"][0]
+
+
+# --- one shard per city -----------------------------------------------------
+#
+# The store namespaces every lot id by city so two feeds cannot collide on a
+# bare `1` or `010001`. The published files undo that: a shard is exactly one
+# city, its name says which, and the app's stored recents key on the id it
+# already knows.
+
+
+def test_lots_json_publishes_bare_ids():
+    blob = build_lots_json([lot(1)], generated_at=1, base_data_ts=1)
+    # The shard names the city; the row keeps the id the app already stores in
+    # its recents. A namespaced id here would change every published byte.
+    assert json.loads(blob)["lots"][0]["id"] == "TPE0001"
+
+
+def test_roster_id_is_unchanged_by_namespacing():
+    """The client pairs grid.bin with lots.json on this value, and Taipei's
+    published bytes must not move."""
+    assert roster_id(["TPE0001", "TPE0002"]) == roster_id(
+        [bare(qualify("taipei", "TPE0001")), bare(qualify("taipei", "TPE0002"))]
+    )
+
+
+def test_the_roster_hashes_what_lots_json_actually_wrote():
+    """Not the ids handed in -- the ones on the rows, which are bare."""
+    doc = json.loads(build_lots_json([lot(1), lot(2)], generated_at=1, base_data_ts=1))
+    assert doc["roster_id"] == roster_id(["TPE0001", "TPE0002"])
+    assert doc["roster_id"] != roster_id(["taipei:TPE0001", "taipei:TPE0002"])
+
+
+def test_taipei_keeps_its_filenames(tmp_path):
+    """Every deployed copy of the app already fetches these two URLs."""
+    publish(tmp_path, "taipei", grid_blob=b"g", lots_blob=b"l")
+    assert (tmp_path / "grid.bin").read_bytes() == b"g"
+    assert (tmp_path / "lots.json").read_bytes() == b"l"
+    assert not (tmp_path / "grid-taipei.bin").exists()
+    assert not (tmp_path / "lots-taipei.json").exists()
+
+
+def test_other_cities_are_sharded(tmp_path):
+    publish(tmp_path, "tainan", grid_blob=b"g", lots_blob=b"l")
+    assert (tmp_path / "grid-tainan.bin").read_bytes() == b"g"
+    assert (tmp_path / "lots-tainan.json").read_bytes() == b"l"
+    assert list(tmp_path.glob("*.tmp")) == [], "temp files must not survive"
+
+
+def test_one_citys_shard_does_not_disturb_anothers(tmp_path):
+    publish(tmp_path, "taipei", grid_blob=b"TPE", lots_blob=b"TPE-L")
+    publish(tmp_path, "tainan", grid_blob=b"TNN", lots_blob=b"TNN-L")
+    assert (tmp_path / "grid.bin").read_bytes() == b"TPE"
+    assert (tmp_path / "grid-tainan.bin").read_bytes() == b"TNN"
+
+
+# --- cities.json: the index that makes a shard discoverable -----------------
+
+
+def test_cities_json_lists_each_shard_with_its_box():
+    entry = city_entry("taipei", [lot(1), lot(5)], base_data_ts=1788537300)
+    doc = json.loads(build_cities_json([entry], generated_at=1788537600))
+    assert doc["v"] == VERSION
+    assert doc["generated_at"] == 1788537600
+    (city,) = doc["cities"]
+    assert city["city"] == "taipei"
+    assert city["lots"] == 2
+    assert city["base_data_ts"] == 1788537300
+    w, s, e, n = city["bbox"]
+    assert (w, s) == (121.521, 25.051) and (e, n) == (121.525, 25.055)
+
+
+def test_each_bbox_covers_only_its_own_shard():
+    """The client picks a shard from these boxes; one city's box must not
+    reach across another's lots."""
+    far = Lot(id="tainan:1", name="x", area="", lot_type="", capacity_car=10,
+              lat=22.99, lon=120.21, service_time="", fare_text="")
+    taipei = city_entry("taipei", [lot(1)], base_data_ts=1)["bbox"]
+    tainan = city_entry("tainan", [far], base_data_ts=1)["bbox"]
+    assert taipei[1] > tainan[3], "Taipei's south edge is north of Tainan's north edge"
+
+
+def test_a_bbox_contains_every_lot_it_describes():
+    """Rounded outward, never to nearest, so the box cannot exclude a row."""
+    lots = [lot(i) for i in range(1, 8)]
+    w, s, e, n = city_entry("taipei", lots, base_data_ts=1)["bbox"]
+    for l in lots:
+        assert w <= round(l.lon, 5) <= e and s <= round(l.lat, 5) <= n
+
+
+def test_cities_are_sorted_so_an_unchanged_set_produces_unchanged_bytes():
+    a = city_entry("taipei", [lot(1)], base_data_ts=1)
+    b = city_entry("tainan", [lot(2)], base_data_ts=2)
+    assert build_cities_json([a, b], generated_at=9) == build_cities_json(
+        [b, a], generated_at=9
+    )
+    assert [c["city"] for c in json.loads(build_cities_json([a, b], generated_at=9))
+            ["cities"]] == ["tainan", "taipei"]
+
+
+def test_read_cities_round_trips_what_publish_cities_wrote(tmp_path):
+    entries = [city_entry("taipei", [lot(1)], base_data_ts=5),
+               city_entry("tainan", [lot(2)], base_data_ts=6)]
+    publish_cities(tmp_path, build_cities_json(entries, generated_at=7))
+    back = read_cities(tmp_path / CITIES_NAME)
+    assert set(back) == {"taipei", "tainan"}
+    assert back["tainan"]["base_data_ts"] == 6
+    assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("content", [None, b"", b"not json at all", b"[]",
+                                     b'{"v":1}', b'{"cities":"nope"}',
+                                     b'{"cities":[{"lots":3}]}'])
+def test_read_cities_treats_anything_unusable_as_nothing_to_carry(tmp_path, content):
+    """Same contract as `read_header`: a caller must be able to treat a missing
+    or damaged index as "nothing to preserve" without knowing the format."""
+    path = tmp_path / CITIES_NAME
+    if content is not None:
+        path.write_bytes(content)
+    assert read_cities(path) == {}

@@ -6,10 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from parkcast import artifacts, config, scheduler, store
+from parkcast import artifacts, config, ids, scheduler, store
 from parkcast.collector import TickResult
 from parkcast.compact import day_bounds
 from parkcast.feed import TS_FEED, FeedSnapshot, Observation
+from parkcast.forecast import Climatology, Persistence, by_city, load_history
 from parkcast.grid import UNKNOWN
 from parkcast.metadata import Lot, capacity_map, parse_metadata
 from parkcast.quality import Q
@@ -412,10 +413,23 @@ def test_successful_refresh_fires_exactly_once_for_the_day(monkeypatch):
 # whole system a rolling two-day buffer that throws the training corpus away.
 
 
-def _seed(conn, day, lot="A", free=10, motor=None):
+def _seed(conn, day, lot="A", free=10, motor=None, city="taipei", at=None):
+    """One observation, namespaced the way the real adapters namespace theirs.
+
+    `lot` is the feed's own id -- the bare form every assertion below reads back
+    out of the published artifacts -- and `ids.qualify` puts it in the store the
+    way `sources.<city>.parse` does. Seeding bare ids here and pairing them with
+    a bare `_make_lot` would agree with itself and with nothing else: it is the
+    blind spot that let `Lot.id` and `Observation.lot_id` drift apart once
+    already (see the end-to-end test at the bottom of this file).
+    """
     start, _ = day_bounds(day)
+    ts = start if at is None else at
+    lot_id = ids.qualify(city, lot)
     store.insert_snapshot(
-        conn, FeedSnapshot("taipei", start + 200, (Observation(lot, free, motor, start, TS_FEED),)), {lot: 50}
+        conn,
+        FeedSnapshot(city, ts + 200, (Observation(lot_id, free, motor, ts, TS_FEED),)),
+        {lot_id: 50},
     )
 
 
@@ -897,9 +911,15 @@ def test_publish_failure_does_not_stop_collection(monkeypatch):
 
 
 def _make_lot(lot_id: str, *, serves_cars: bool = True,
-              capacity_car: int | None = 50) -> Lot:
-    return Lot(id=lot_id, name=f"lot {lot_id}", area="中正區", lot_type="立體",
-               capacity_car=capacity_car, lat=25.05, lon=121.52,
+              capacity_car: int | None = 50, city: str = "taipei",
+              lat: float = 25.05, lon: float = 121.52) -> Lot:
+    """A Lot with a namespaced id, as `metadata.parse_metadata` produces.
+
+    `lot_id` is the bare feed id, matching `_seed`'s: the two have to agree,
+    because `publish_city` filters lots with `lot.id in history.counts.lot`.
+    """
+    return Lot(id=ids.qualify(city, lot_id), name=f"lot {lot_id}", area="中正區",
+               lot_type="立體", capacity_car=capacity_car, lat=lat, lon=lon,
                service_time="00:00:00-23:59:59", fare_text="每小時30元",
                serves_cars=serves_cars)
 
@@ -1255,9 +1275,10 @@ def test_publish_artifacts_withholds_a_lot_that_is_not_updating(tmp_path):
         ts = start + i * 300
         store.insert_snapshot(
             conn,
-            FeedSnapshot("taipei", ts + 200, (Observation("FROZEN", 34, None, ts, TS_FEED),
-                                              Observation("LIVE", i % 7, None, ts, TS_FEED))),
-            {"FROZEN": 50, "LIVE": 50},
+            FeedSnapshot("taipei", ts + 200,
+                         (Observation("taipei:FROZEN", 34, None, ts, TS_FEED),
+                          Observation("taipei:LIVE", i % 7, None, ts, TS_FEED))),
+            {"taipei:FROZEN": 50, "taipei:LIVE": 50},
         )
     out_dir = tmp_path / "artifacts"
 
@@ -1396,3 +1417,519 @@ def test_publish_artifacts_end_to_end_with_the_real_taipei_adapters(tmp_path):
     doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
     assert doc["n_lots"] == len(doc["lots"]) == 1069
     assert doc["roster_id"] == header["roster_id"]
+
+
+# --- six cities in one store: one shard each, and Taipei's bytes unmoved -----
+#
+# Every test above this line models one city, and a single-city fixture is
+# structurally blind to the defect this section exists to pin. Publishing used
+# to read the store unscoped: `forecast.load_history` takes `latest_ts` as a
+# global maximum over every lot in the store, and Kaohsiung and Taoyuan stamp
+# `data_ts = now` (TS_FETCH -- their feeds carry no per-record timestamp), which
+# is always later than Taipei's feed timestamp. So with either of them
+# collecting, *no Taipei lot is ever at `latest_ts`*:
+#
+#   * `History.current` holds only their lots, so `Persistence.predict` returns
+#     None for all ~1,082 of Taipei's and `Blend` degrades to climatology-only
+#     at every horizon -- silently, because climatology produces entirely
+#     plausible bytes. The short-horizon signal the app exists to provide is
+#     simply gone.
+#   * `store.free_at(conn, latest_ts)` matches no Taipei row, so the observed
+#     count `f` disappears from all ~1,069 published lots.
+#   * `base_data_ts` is stamped with another city's clock, telling clients the
+#     reading is fresher than it is.
+#
+# None of that is visible with one city in the store, which is why it survived
+# review. Every fixture below therefore seeds a second, fetch-stamped city.
+
+PINNED_GENERATED_AT = 1_788_600_000
+SEED_DAY = date(2026, 9, 4)
+
+
+@pytest.fixture
+def pinned_clock(monkeypatch):
+    """Freeze `generated_at`.
+
+    It is the one published field that is not a function of the input, so two
+    publishes of identical data differ only here. Pinning it is what lets a
+    byte-for-byte comparison mean anything.
+    """
+    monkeypatch.setattr(scheduler.time, "time", lambda: PINNED_GENERATED_AT)
+    return PINNED_GENERATED_AT
+
+
+def _seed_taipei(conn) -> int:
+    """Two hours of Taipei's feed, ending on the tick where lot A fills up.
+
+    Feed-stamped, so every `data_ts` is the reading's own moment -- which is
+    exactly what makes Taipei lag the fetch-stamped cities below. A ends mostly
+    free and then hits 0, so its persistence answer (0.0) and its climatology
+    answer (nearly 1) are far apart: a grid that quietly lost persistence looks
+    different from one that did not.
+    """
+    start, _ = day_bounds(SEED_DAY)
+    for i in range(24):
+        _seed(conn, SEED_DAY, lot="A", free=9, at=start + i * 300)
+        _seed(conn, SEED_DAY, lot="B", free=4, at=start + i * 300)
+    latest = start + 24 * 300
+    _seed(conn, SEED_DAY, lot="A", free=0, at=latest)
+    _seed(conn, SEED_DAY, lot="B", free=6, at=latest)
+    return latest
+
+
+def _seed_kaohsiung(conn, *, after: int) -> int:
+    """Kaohsiung, stamped `data_ts = now`, strictly after Taipei's last reading."""
+    latest = after
+    for i in range(3):
+        latest = after + 600 + i * 300
+        _seed(conn, SEED_DAY, lot="K1", free=5, city="kaohsiung", at=latest)
+        _seed(conn, SEED_DAY, lot="K2", free=0, city="kaohsiung", at=latest)
+    return latest
+
+
+TAIPEI_LOTS = [_make_lot("A"), _make_lot("B")]
+KAOHSIUNG_LOTS = [_make_lot("K1", city="kaohsiung", lat=22.63, lon=120.30),
+                  _make_lot("K2", city="kaohsiung", lat=22.61, lon=120.35)]
+
+
+def test_taipei_shard_is_byte_identical_to_the_pre_change_artifacts(tmp_path, pinned_clock):
+    """The live site must not notice this refactor. Same lots, same history,
+    same generated_at -- the bytes must match what the single-city path wrote.
+
+    The multi-city store is the point: it is the only fixture in which a global
+    `latest_ts` diverges from Taipei's own, so it is the only one that can tell
+    a correctly scoped publish from a climatology-only one. If these bytes
+    differ, the refactor is wrong -- do not adjust the expectation.
+    """
+    multi = store.connect(tmp_path / "multi.sqlite")
+    taipei_latest = _seed_taipei(multi)
+    _seed_kaohsiung(multi, after=taipei_latest)
+    multi_dir = tmp_path / "multi"
+    scheduler.publish_artifacts(multi, TAIPEI_LOTS + KAOHSIUNG_LOTS, multi_dir)
+    multi.close()
+
+    solo = store.connect(tmp_path / "solo.sqlite")       # Taipei alone, as before
+    assert _seed_taipei(solo) == taipei_latest
+    solo_dir = tmp_path / "solo"
+    scheduler.publish_artifacts(solo, TAIPEI_LOTS, solo_dir)
+    solo.close()
+
+    assert (multi_dir / "grid.bin").read_bytes() == (solo_dir / "grid.bin").read_bytes()
+    assert (multi_dir / "lots.json").read_bytes() == (solo_dir / "lots.json").read_bytes()
+    # Not vacuously equal: both really published.
+    assert artifacts.decode_header((multi_dir / "grid.bin").read_bytes())["n_lots"] == 2
+
+
+def _publish_multi_city(tmp_path):
+    conn = store.connect(tmp_path / "multi.sqlite")
+    taipei_latest = _seed_taipei(conn)
+    kaohsiung_latest = _seed_kaohsiung(conn, after=taipei_latest)
+    out_dir = tmp_path / "artifacts"
+    scheduler.publish_artifacts(conn, TAIPEI_LOTS + KAOHSIUNG_LOTS, out_dir)
+    conn.close()
+    return out_dir, taipei_latest, kaohsiung_latest
+
+
+def test_each_city_is_stamped_with_its_own_reading(tmp_path, pinned_clock):
+    """`base_data_ts` says how stale the reading behind the forecast is. Stamped
+    from a global maximum it would carry whichever city fetched last."""
+    out_dir, taipei_latest, kaohsiung_latest = _publish_multi_city(tmp_path)
+
+    assert taipei_latest < kaohsiung_latest, "the fixture must reproduce the skew"
+    for grid, lots, expected in (("grid.bin", "lots.json", taipei_latest),
+                                 ("grid-kaohsiung.bin", "lots-kaohsiung.json",
+                                  kaohsiung_latest)):
+        header = artifacts.decode_header((out_dir / grid).read_bytes())
+        doc = json.loads((out_dir / lots).read_text(encoding="utf-8"))
+        assert header["base_data_ts"] == expected
+        assert doc["base_data_ts"] == expected, "the pair must agree"
+
+
+def test_the_observed_count_survives_a_second_citys_later_clock(tmp_path, pinned_clock):
+    """`f` is read at `base_data_ts`. Against a global maximum, `store.free_at`
+    matched no Taipei row at all and the count vanished from every card."""
+    out_dir, _, _ = _publish_multi_city(tmp_path)
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    rows = {row["id"]: row for row in doc["lots"]}
+    assert rows["A"]["f"] == 0, "A reported zero free at the published reading"
+    assert rows["B"]["f"] == 6
+
+
+def test_taipeis_grid_is_not_silently_climatology_only(tmp_path, pinned_clock):
+    """The failure this whole section is about produces a perfectly plausible
+    grid -- every byte in range, no exception, no empty file. The only way to
+    see it is to ask whether persistence contributed anything at all."""
+    conn = store.connect(tmp_path / "multi.sqlite")
+    taipei_latest = _seed_taipei(conn)
+    _seed_kaohsiung(conn, after=taipei_latest)
+    out_dir = tmp_path / "artifacts"
+    scheduler.publish_artifacts(conn, TAIPEI_LOTS + KAOHSIUNG_LOTS, out_dir)
+
+    history = by_city(load_history(conn, cold_dir=config.PARQUET_DIR))["taipei"]
+    conn.close()
+
+    assert history.latest_ts == taipei_latest
+    for lot in TAIPEI_LOTS:
+        assert Persistence(history).predict(lot.id, taipei_latest, 5) is not None, (
+            f"{lot.id} must still have a current reading of its own"
+        )
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    body = (out_dir / "grid.bin").read_bytes()[artifacts.HEADER_SIZE:]
+    row = {r["id"]: body[r["i"] * config.HORIZON_COUNT:(r["i"] + 1) * config.HORIZON_COUNT]
+           for r in doc["lots"]}
+
+    # A is 96% free across its history and full at the published reading, so
+    # climatology alone and the blend cannot agree at the nearest horizon.
+    climatology_only = Climatology(history).predict(
+        ids.qualify("taipei", "A"), taipei_latest + 300, 5
+    )
+    assert row["A"][0] != round(climatology_only * 100), (
+        "the +5 min byte is climatology alone -- persistence contributed nothing"
+    )
+    assert row["A"][0] < row["A"][-1], (
+        "a lot that just filled up must recover toward climatology across the horizon"
+    )
+
+
+def test_each_city_gets_its_own_shard_and_taipei_keeps_the_original_names(tmp_path, pinned_clock):
+    out_dir, _, _ = _publish_multi_city(tmp_path)
+
+    assert {p.name for p in out_dir.glob("*") if p.is_file()} == {
+        "grid.bin", "lots.json", "grid-kaohsiung.bin", "lots-kaohsiung.json",
+        artifacts.CITIES_NAME,
+    }
+    taipei = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    kaohsiung = json.loads((out_dir / "lots-kaohsiung.json").read_text(encoding="utf-8"))
+    assert [l["id"] for l in taipei["lots"]] == ["A", "B"], "published ids are bare"
+    assert [l["id"] for l in kaohsiung["lots"]] == ["K1", "K2"]
+    assert taipei["roster_id"] != kaohsiung["roster_id"]
+
+
+def test_cities_json_indexes_every_shard_with_its_own_box(tmp_path, pinned_clock):
+    out_dir, taipei_latest, kaohsiung_latest = _publish_multi_city(tmp_path)
+
+    doc = json.loads((out_dir / artifacts.CITIES_NAME).read_text(encoding="utf-8"))
+    assert doc["generated_at"] == PINNED_GENERATED_AT
+    entries = {c["city"]: c for c in doc["cities"]}
+    assert set(entries) == {"taipei", "kaohsiung"}
+    assert entries["taipei"]["lots"] == entries["kaohsiung"]["lots"] == 2
+    assert entries["taipei"]["base_data_ts"] == taipei_latest
+    assert entries["kaohsiung"]["base_data_ts"] == kaohsiung_latest
+    # The south edge of Taipei's box is north of Kaohsiung's north edge: a
+    # client picking a shard by location must not be handed both.
+    assert entries["taipei"]["bbox"][1] > entries["kaohsiung"]["bbox"][3]
+
+
+def test_only_taipeis_bytes_are_offered_to_the_uploader(tmp_path, pinned_clock):
+    """`upload.UPLOAD_PATH` is a single `/artifacts/latest`, and the deployed
+    site serves Taipei. Six pairs would overwrite each other and spend the
+    daily cap doing it."""
+    conn = store.connect(tmp_path / "multi.sqlite")
+    taipei_latest = _seed_taipei(conn)
+    _seed_kaohsiung(conn, after=taipei_latest)
+    out_dir = tmp_path / "artifacts"
+    up = _RecordingUploader()
+
+    scheduler.publish_artifacts(conn, TAIPEI_LOTS + KAOHSIUNG_LOTS, out_dir, uploader=up)
+    conn.close()
+
+    assert len(up.offers) == 1
+    grid, lots, base_data_ts, _ = up.offers[0]
+    assert grid == (out_dir / "grid.bin").read_bytes()
+    assert lots == (out_dir / "lots.json").read_bytes()
+    assert base_data_ts == taipei_latest
+
+
+# --- every refusal is judged per city ---------------------------------------
+
+
+def test_one_citys_collapse_does_not_stop_another_publishing(tmp_path, pinned_clock, caplog):
+    """A partial restore, or a feed that came back with a handful of lots, is a
+    fact about one source. Refusing the whole tick would take every other city's
+    fresh reading off the map with it."""
+    start, _ = day_bounds(SEED_DAY)
+    taipei_ids = [f"T{i:03d}" for i in range(10)]
+    kaohsiung_ids = [f"K{i:03d}" for i in range(10)]
+
+    healthy = store.connect(tmp_path / "healthy.sqlite")
+    for lot_id in taipei_ids:
+        _seed(healthy, SEED_DAY, lot=lot_id, at=start)
+    for lot_id in kaohsiung_ids:
+        _seed(healthy, SEED_DAY, lot=lot_id, city="kaohsiung", at=start + 600)
+    out_dir = tmp_path / "artifacts"
+    lots = ([_make_lot(i) for i in taipei_ids]
+            + [_make_lot(i, city="kaohsiung") for i in kaohsiung_ids])
+    scheduler.publish_artifacts(healthy, lots, out_dir)
+    healthy.close()
+    good_kaohsiung = (out_dir / "grid-kaohsiung.bin").read_bytes()
+
+    # Kaohsiung collapses to 3 of 10; Taipei is fine and gains a lot.
+    thin = store.connect(tmp_path / "thin.sqlite")
+    for lot_id in [*taipei_ids, "T010"]:
+        _seed(thin, SEED_DAY, lot=lot_id, at=start + 900)
+    for lot_id in kaohsiung_ids[:3]:
+        _seed(thin, SEED_DAY, lot=lot_id, city="kaohsiung", at=start + 1500)
+    thin_lots = ([_make_lot(i) for i in [*taipei_ids, "T010"]]
+                 + [_make_lot(i, city="kaohsiung") for i in kaohsiung_ids[:3]])
+    with caplog.at_level(logging.ERROR, logger="parkcast.scheduler"):
+        scheduler.publish_artifacts(thin, thin_lots, out_dir)
+    thin.close()
+
+    assert (out_dir / "grid-kaohsiung.bin").read_bytes() == good_kaohsiung, (
+        "the collapsed city must keep its good shard"
+    )
+    assert "kaohsiung: refusing to publish 3 lots" in caplog.text
+    assert artifacts.decode_header((out_dir / "grid.bin").read_bytes())["n_lots"] == 11, (
+        "Taipei must publish regardless of what happened to Kaohsiung"
+    )
+    assert list(out_dir.glob("*.tmp")) == []
+
+
+def test_a_small_citys_roster_is_measured_against_its_own_published_shard(tmp_path, pinned_clock):
+    """The floor is a fraction of what THIS city already published. Read from
+    the wrong header -- Taipei's, under the shared `grid.bin` name -- every
+    small city would be refused forever for the crime of being small."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    start, _ = day_bounds(SEED_DAY)
+    taipei_ids = [f"T{i:03d}" for i in range(100)]
+    tainan_ids = ("N1", "N2", "N3", "N4")
+    for lot_id in taipei_ids:
+        _seed(conn, SEED_DAY, lot=lot_id, at=start)
+    for lot_id in tainan_ids:
+        _seed(conn, SEED_DAY, lot=lot_id, city="tainan", at=start)
+    lots = ([_make_lot(i) for i in taipei_ids]
+            + [_make_lot(i, city="tainan") for i in tainan_ids])
+    out_dir = tmp_path / "artifacts"
+    scheduler.publish_artifacts(conn, lots, out_dir)
+
+    for lot_id in tainan_ids:            # a later tick, the same four lots
+        _seed(conn, SEED_DAY, lot=lot_id, city="tainan", at=start + 300)
+    scheduler.publish_artifacts(conn, lots, out_dir)
+    conn.close()
+
+    header = artifacts.decode_header((out_dir / "grid-tainan.bin").read_bytes())
+    assert header["n_lots"] == 4
+    assert header["base_data_ts"] == start + 300, (
+        "Tainan's four lots are 4% of Taipei's roster and 100% of their own"
+    )
+
+
+def test_a_city_with_no_usable_reading_refuses_alone(tmp_path, monkeypatch, caplog):
+    """A citywide -9 leaves one city's hot window entirely NULL. Judged against
+    a global `latest_ts`, that city would sail through on another city's clock
+    and publish its roster stamped with a timestamp none of its lots was read
+    at -- the 1970 failure, wearing a plausible date."""
+    from parkcast.compact import compact_day
+
+    cold = tmp_path / "cold"
+    monkeypatch.setattr(config, "PARQUET_DIR", cold)
+    src = store.connect(tmp_path / "src.sqlite")
+    for lot_id in ("A", "B"):                     # Taipei's corpus survives in cold
+        _seed(src, date(2026, 9, 3), lot=lot_id)
+    compact_day(src, date(2026, 9, 3), cold)
+    src.close()
+
+    conn = store.connect(tmp_path / "t.sqlite")
+    start, _ = day_bounds(SEED_DAY)
+    for lot_id in ("A", "B"):                     # the feed said -9 for all of Taipei
+        _seed(conn, SEED_DAY, lot=lot_id, free=None, at=start)
+    _seed(conn, SEED_DAY, lot="K1", free=5, city="kaohsiung", at=start + 600)
+    out_dir = tmp_path / "artifacts"
+
+    with caplog.at_level(logging.ERROR, logger="parkcast.scheduler"):
+        scheduler.publish_artifacts(
+            conn, TAIPEI_LOTS + [_make_lot("K1", city="kaohsiung")], out_dir
+        )
+    conn.close()
+
+    assert not (out_dir / "grid.bin").exists(), "Taipei must refuse, not publish 1970"
+    assert "taipei: no usable reading" in caplog.text
+    assert artifacts.decode_header(
+        (out_dir / "grid-kaohsiung.bin").read_bytes()
+    )["base_data_ts"] == start + 600, "Kaohsiung is fine and must publish"
+
+
+def test_a_city_whose_lots_all_fail_the_history_filter_refuses_alone(
+    tmp_path, pinned_clock, caplog
+):
+    conn = store.connect(tmp_path / "t.sqlite")
+    taipei_latest = _seed_taipei(conn)
+    out_dir = tmp_path / "artifacts"
+
+    # Tainan is in the metadata roster but has never been collected.
+    with caplog.at_level(logging.WARNING, logger="parkcast.scheduler"):
+        scheduler.publish_artifacts(
+            conn, TAIPEI_LOTS + [_make_lot("N1", city="tainan")], out_dir
+        )
+    conn.close()
+
+    assert "tainan: no lots survived the history filter" in caplog.text
+    assert not (out_dir / "grid-tainan.bin").exists()
+    assert artifacts.decode_header(
+        (out_dir / "grid.bin").read_bytes()
+    )["base_data_ts"] == taipei_latest
+    indexed = json.loads((out_dir / artifacts.CITIES_NAME).read_text(encoding="utf-8"))
+    assert [c["city"] for c in indexed["cities"]] == ["taipei"]
+
+
+def test_cities_json_keeps_the_entry_of_a_city_that_refused(tmp_path, pinned_clock):
+    """The refusing city's shard is still on disk and still good. Dropping its
+    entry would hide a file the client can perfectly well use."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    taipei_latest = _seed_taipei(conn)
+    kaohsiung_latest = _seed_kaohsiung(conn, after=taipei_latest)
+    out_dir = tmp_path / "artifacts"
+    scheduler.publish_artifacts(conn, TAIPEI_LOTS + KAOHSIUNG_LOTS, out_dir)
+    conn.close()
+
+    # Next tick: Kaohsiung's metadata is missing entirely, so it is not even a
+    # candidate. Its shard has not moved.
+    later = store.connect(tmp_path / "later.sqlite")
+    _seed_taipei(later)
+    _seed(later, SEED_DAY, lot="A", free=3, at=taipei_latest + 300)
+    _seed(later, SEED_DAY, lot="B", free=3, at=taipei_latest + 300)
+    scheduler.publish_artifacts(later, TAIPEI_LOTS, out_dir)
+    later.close()
+
+    doc = json.loads((out_dir / artifacts.CITIES_NAME).read_text(encoding="utf-8"))
+    entries = {c["city"]: c for c in doc["cities"]}
+    assert set(entries) == {"taipei", "kaohsiung"}
+    assert entries["kaohsiung"]["base_data_ts"] == kaohsiung_latest, "carried forward"
+    assert entries["taipei"]["base_data_ts"] == taipei_latest + 300, "republished"
+    assert (out_dir / "grid-kaohsiung.bin").exists()
+
+
+def test_a_lot_with_an_unnamespaced_id_does_not_take_every_city_down(
+    tmp_path, pinned_clock
+):
+    """`Lot.id` has been namespaced since the metadata parser was fixed, so a
+    bare one is a bug in whichever parser produced it. Grouping with the strict
+    `ids.city_of` would raise on it -- and `run_forever` catches that, logs it
+    and carries on collecting, so the result is every city's artifacts frozen
+    while the collector goes on looking perfectly healthy. Exactly the failure
+    the per-city refusals above exist to prevent, one level up.
+    """
+    conn = store.connect(tmp_path / "t.sqlite")
+    taipei_latest = _seed_taipei(conn)
+    _seed_kaohsiung(conn, after=taipei_latest)
+    stray = Lot(id="TPE9999", name="bare", area="", lot_type="", capacity_car=10,
+                lat=25.05, lon=121.52, service_time="", fare_text="")
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(conn, [*TAIPEI_LOTS, *KAOHSIUNG_LOTS, stray], out_dir)
+    conn.close()
+
+    assert artifacts.decode_header((out_dir / "grid.bin").read_bytes())["n_lots"] == 2
+    assert artifacts.decode_header(
+        (out_dir / "grid-kaohsiung.bin").read_bytes()
+    )["n_lots"] == 2
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert [l["id"] for l in doc["lots"]] == ["A", "B"], (
+        "the stray lot has no namespaced history, so it is filtered out, not published"
+    )
+
+
+def test_one_citys_unexpected_failure_does_not_cost_the_others_their_tick(
+    tmp_path, pinned_clock, caplog
+):
+    """The per-city guards cover the ways a city is *expected* to decline. This
+    is the net for the other kind -- and it has to be per city for the same
+    reason `run_forever` nets the whole publish: a fresh reading missed is not
+    recoverable, and one city's bug is no reason to spend five others' ticks."""
+    real = scheduler.publish_city
+
+    def explode(conn, city, *args, **kwargs):
+        if city == "kaohsiung":
+            raise RuntimeError("something nothing anticipated")
+        return real(conn, city, *args, **kwargs)
+
+    conn = store.connect(tmp_path / "t.sqlite")
+    taipei_latest = _seed_taipei(conn)
+    _seed_kaohsiung(conn, after=taipei_latest)
+    out_dir = tmp_path / "artifacts"
+
+    with caplog.at_level(logging.ERROR, logger="parkcast.scheduler"):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(scheduler, "publish_city", explode)
+            scheduler.publish_artifacts(conn, TAIPEI_LOTS + KAOHSIUNG_LOTS, out_dir)
+    conn.close()
+
+    assert "kaohsiung: publishing failed" in caplog.text
+    assert not (out_dir / "grid-kaohsiung.bin").exists()
+    assert artifacts.decode_header(
+        (out_dir / "grid.bin").read_bytes()
+    )["base_data_ts"] == taipei_latest, "Taipei must still have published"
+    indexed = json.loads((out_dir / artifacts.CITIES_NAME).read_text(encoding="utf-8"))
+    assert [c["city"] for c in indexed["cities"]] == ["taipei"]
+
+
+def test_nothing_publishable_leaves_the_index_unwritten(tmp_path, pinned_clock):
+    """An index listing no cities tells a client there is no coverage anywhere,
+    which is worse than the missing file it already has to handle."""
+    conn = store.connect(tmp_path / "t.sqlite")        # no observations at all
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(conn, TAIPEI_LOTS, out_dir)
+    conn.close()
+
+    assert not (out_dir / artifacts.CITIES_NAME).exists()
+
+
+def test_a_citys_liveness_window_is_its_own(tmp_path, monkeypatch, pinned_clock):
+    """`window_start` is what a lot with NO reading in the window is dated to --
+    "the latest it could have been". Taken globally it is the oldest moment in
+    the STORE, so a city collecting for twenty minutes beside Taipei's 26 hours
+    would have its silent lots dated 26 hours back and withheld on its very
+    first tick, on the strength of another city's history.
+
+    N2 is the lot that reaches the branch: it has corpus history, so it is on
+    the roster, and its feed has returned -9 since Tainan was switched on, so
+    `unchanged_run` has nothing to measure and `last_update` falls through to
+    the window.
+    """
+    from parkcast.compact import compact_day
+
+    cold = tmp_path / "cold"
+    monkeypatch.setattr(config, "PARQUET_DIR", cold)
+    src = store.connect(tmp_path / "src.sqlite")
+    _seed(src, date(2026, 9, 3), lot="N2", free=5, city="tainan")
+    compact_day(src, date(2026, 9, 3), cold)
+    src.close()
+
+    conn = store.connect(tmp_path / "t.sqlite")
+    conn.execute("PRAGMA synchronous=OFF")    # 313 ticks; durability is not under test
+    start, _ = day_bounds(SEED_DAY)
+    for i in range(26 * 12 + 1):              # Taipei: 26 hours of hot window
+        _seed(conn, SEED_DAY, lot="A", free=i % 7, at=start + i * 300)
+    taipei_latest = start + 26 * 12 * 300
+    assert taipei_latest - start > config.NOT_UPDATING_AFTER_SEC, (
+        "Taipei's window must be old enough to withhold on, or this proves nothing"
+    )
+    # Tainan is switched on twenty minutes before the publish. N1 reports; N2's
+    # feed has said -9 every tick since.
+    for i in range(4):
+        at = taipei_latest + 600 + i * 300
+        _seed(conn, SEED_DAY, lot="N1", free=2 + i, city="tainan", at=at)
+        _seed(conn, SEED_DAY, lot="N2", free=None, city="tainan", at=at)
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(
+        conn,
+        [_make_lot("A"), _make_lot("N1", city="tainan"), _make_lot("N2", city="tainan")],
+        out_dir,
+    )
+    conn.close()
+
+    doc = json.loads((out_dir / "lots-tainan.json").read_text(encoding="utf-8"))
+    rows = {row["id"]: row for row in doc["lots"]}
+    assert set(rows) == {"N1", "N2"}, "N2 has cold history, so it belongs on the map"
+    body = (out_dir / "grid-tainan.bin").read_bytes()[artifacts.HEADER_SIZE:]
+    n = config.HORIZON_COUNT
+    assert "u" not in rows["N2"], (
+        "a lot from a city collecting for twenty minutes cannot be 26 hours stale"
+    )
+    assert UNKNOWN not in body[rows["N2"]["i"] * n:(rows["N2"]["i"] + 1) * n], (
+        "withheld on another city's window, N2 would have no forecast at all"
+    )

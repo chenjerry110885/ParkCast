@@ -7,7 +7,9 @@ import pytest
 from parkcast import config, store
 from parkcast.compact import compact_day, day_bounds
 from parkcast.feed import TS_FEED, FeedSnapshot, Observation
-from parkcast.forecast import Blend, Climatology, Persistence, load_history, week_bucket
+from parkcast.forecast import (Blend, Climatology, Persistence, by_city,
+                               empty_history, load_history, week_bucket)
+from parkcast.ids import qualify
 
 
 @pytest.fixture
@@ -1035,3 +1037,128 @@ def test_a_backtest_cutoff_does_not_poison_the_serving_cache(conn, tmp_path):
     load_history(conn, cold_dir=tmp_path, before_ts=start + 300)
     full = load_history(conn, cold_dir=tmp_path)
     assert full.counts.glob[1] == 3, "the serving path must still see every observation"
+
+
+# --- by_city: one load, one history per city --------------------------------
+#
+# `latest_ts` is a single global maximum and `current` is the set of lots
+# sitting exactly on it. Correct for one city; wrong for six, because Kaohsiung
+# and Taoyuan stamp `data_ts = now` and are therefore always later than a
+# feed-stamped city. Read unscoped, Taipei loses `current` entirely and every
+# `Persistence.predict` for it returns None -- so `Blend` becomes
+# climatology-only without anything failing.
+
+
+def write_city(conn, ts, city, lot, free=5, capacity=50):
+    lot_id = qualify(city, lot)
+    store.insert_snapshot(
+        conn,
+        FeedSnapshot(city, ts + 200, (Observation(lot_id, free, None, ts, TS_FEED),)),
+        {lot_id: capacity},
+    )
+
+
+def test_by_city_gives_each_city_its_own_latest_reading(conn):
+    write_city(conn, 1000, "taipei", "A", free=9)
+    write_city(conn, 1300, "taipei", "A", free=2)
+    write_city(conn, 5000, "kaohsiung", "1", free=7)   # fetch-stamped: always later
+
+    histories = by_city(load_history(conn))
+
+    assert load_history(conn).latest_ts == 5000, "the global maximum is Kaohsiung's"
+    assert histories["taipei"].latest_ts == 1300
+    assert histories["kaohsiung"].latest_ts == 5000
+
+
+def test_by_city_keeps_a_current_reading_for_the_lagging_city(conn):
+    """The defect, stated directly: unscoped, `current` holds only the city
+    that fetched last and Persistence goes silent for everyone else."""
+    write_city(conn, 1300, "taipei", "A", free=2)
+    write_city(conn, 5000, "kaohsiung", "1", free=7)
+
+    histories = by_city(load_history(conn))
+
+    assert Persistence(load_history(conn)).predict("taipei:A", 1300, 5) is None
+    assert Persistence(histories["taipei"]).predict("taipei:A", 1300, 5) == 1.0
+
+
+def test_by_city_shard_matches_a_store_holding_only_that_city(conn, tmp_path):
+    """The identity that makes Taipei's published bytes safe: a city's slice of
+    a six-city load must equal what a store holding only that city would load.
+
+    `glob` is the field that could quietly differ -- Climatology's top tier
+    shrinks toward it, so a global spanning six cities would move every
+    published probability without changing a single count anyone looks at.
+    """
+    solo = store.connect(tmp_path / "solo.sqlite")
+    for i in range(20):
+        write_city(conn, 1000 + i * 300, "taipei", "A", free=i % 3)
+        write_city(solo, 1000 + i * 300, "taipei", "A", free=i % 3)
+        write_city(conn, 90000 + i * 300, "kaohsiung", "1", free=5)
+
+    shard = by_city(load_history(conn))["taipei"]
+    alone = load_history(solo)
+    solo.close()
+
+    assert shard.latest_ts == alone.latest_ts
+    assert shard.current == alone.current
+    assert shard.recent == alone.recent
+    assert shard.counts.glob == alone.counts.glob
+    assert dict(shard.counts.lot) == dict(alone.counts.lot)
+    assert dict(shard.counts.bucket) == dict(alone.counts.bucket)
+    target = shard.latest_ts + 300
+    assert (Climatology(shard).predict("taipei:A", target, 5)
+            == Climatology(alone).predict("taipei:A", target, 5))
+
+
+def test_by_city_climatology_still_spans_the_whole_corpus(conn, tmp_path):
+    """`counts` is re-keyed, never recomputed. Narrowing it to `recent` -- the
+    two-hour tail -- would silently shrink climatology to the hot window."""
+    day = date(2026, 9, 1)
+    start, _ = day_bounds(day)
+    cold_src = store.connect(tmp_path / "src.sqlite")
+    for i in range(50):
+        write_city(cold_src, start + i * 300, "taipei", "A", free=1)
+    cold_dir = tmp_path / "cold"
+    compact_day(cold_src, day, cold_dir)
+    cold_src.close()
+
+    write_city(conn, start + 10 * 86400, "taipei", "A", free=0)
+    write_city(conn, start + 10 * 86400 + 5, "kaohsiung", "1", free=0)
+
+    shard = by_city(load_history(conn, cold_dir=cold_dir))["taipei"]
+
+    assert shard.counts.lot["taipei:A"][1] == 51, (
+        "50 cold observations plus the hot one -- the whole corpus, for this city"
+    )
+    assert len(shard.recent["taipei:A"]) == 1, "the tail is still just the tail"
+
+
+def test_by_city_files_a_pre_namespacing_cold_id_under_taipei(conn):
+    """The cold corpus is never rewritten, so days compacted before namespacing
+    still hold bare ids. They are Taipei's, and they must not raise."""
+    write_city(conn, 1000, "taipei", "A", free=5)
+    conn.execute(
+        "INSERT INTO observations (lot_id, city, data_ts, observed_at, free_car,"
+        " free_motor, quality) VALUES ('TPE0001', '', 900, 900, 5, NULL, 0)"
+    )
+
+    histories = by_city(load_history(conn))
+
+    assert set(histories) == {"taipei"}
+    assert "TPE0001" in histories["taipei"].counts.lot
+
+
+def test_by_city_of_an_empty_store_is_empty(conn):
+    assert by_city(load_history(conn)) == {}
+
+
+def test_empty_history_forecasts_nothing_and_is_never_shared():
+    """`by_city` has nothing for a city the corpus has never seen, and the
+    caller needs a History rather than a None to hand to its guards."""
+    first, second = empty_history(), empty_history()
+    assert first.latest_ts == 0 and first.current == {} and first.recent == {}
+    assert Climatology(first).predict("taipei:A", 1000, 5) is None
+    assert Persistence(first).predict("taipei:A", 1000, 5) is None
+    first.counts.add("taipei:A", 1000, 5)
+    assert second.counts.glob == [0, 0], "a shared instance would have been filled in"

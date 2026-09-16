@@ -29,7 +29,7 @@ from heapq import heappush, heappushpop
 from pathlib import Path
 from typing import Protocol
 
-from parkcast import config
+from parkcast import config, ids
 
 log = logging.getLogger("parkcast.forecast")
 
@@ -176,6 +176,96 @@ def load_history(
         if series[-1][0] == latest_ts
     }
     return History(latest_ts, current, recent, cold_counts.combined(hot_counts))
+
+
+def empty_history() -> History:
+    """A history with nothing in it: no reading, no lots, no counts.
+
+    What `by_city` has for a city the corpus has never seen -- a feed added to
+    the registry before its first successful fetch, or one down long enough for
+    prune to have taken its last row. A fresh instance each call rather than a
+    module-level constant, because `Counts` is mutable and one shared empty
+    history could be quietly filled in by a caller that assumed otherwise.
+    """
+    return History(0, {}, {}, Counts())
+
+
+def by_city(history: History) -> dict[str, History]:
+    """Split one loaded history into an independent `History` per city.
+
+    Why this exists
+    ---------------
+    `latest_ts` is a single global maximum over every lot in the store, and
+    `current` is the set of lots sitting exactly on it. That was correct while
+    the store held one city. It is not correct for six: Kaohsiung and Taoyuan
+    stamp every observation `data_ts = now` (TS_FETCH -- their feeds carry no
+    per-record timestamp), which is always later than Taipei's feed timestamp,
+    so with those cities collecting *no Taipei lot is ever at `latest_ts`*.
+    `current` comes back holding only their lots, `Persistence.predict` returns
+    None for all ~1,082 of Taipei's, and `Blend` degrades to climatology-only at
+    every horizon -- silently, because a climatology-only grid is full of
+    perfectly plausible numbers. The short-horizon signal the app exists to
+    provide simply disappears, and `base_data_ts` tells clients the reading is
+    as fresh as another city's clock.
+
+    So every city is published from its own `latest_ts` and its own `current`.
+
+    Why partition rather than load per city
+    ---------------------------------------
+    One `load_history` per city would re-scan the hot store six times (0.067 s
+    -> 0.4 s on a synthetic 180,000-row store) and re-merge the cold counts six
+    times, and a `city = ?` predicate on that scan would push the planner off
+    the covering table scan onto `idx_obs_data_ts` -- the 11.19 s vs 0.16 s plan
+    this module's queries are shaped to avoid. The load is already one pass; the
+    split below is a second pass over the accumulated keys, which is the same
+    order of work `Counts.combined` already does every tick.
+
+    What is *not* narrowed
+    ----------------------
+    `counts` still spans the whole corpus for that city, cold and hot alike --
+    the counters are re-keyed, never recomputed -- so climatology keeps the
+    depth it had. Only which lots belong to whom changes.
+
+    `glob` is summed from that city's own lot counters, which is exactly what a
+    single-city store would have accumulated: `Counts.add` increments the lot
+    counter and the global one on the same observation, so the per-city sum is
+    identical to the total that city would have produced on its own. That is
+    what makes a city's shard byte-identical to what a store holding only that
+    city would publish -- Climatology's top tier shrinks toward `glob`, so a
+    global spanning six cities would move every published probability.
+
+    The counter lists are shared with `history`, not copied (36k buckets on the
+    live store); `Climatology` only ever reads them.
+    """
+    recent: dict[str, dict[str, list[tuple[int, int]]]] = {}
+    for lot_id, series in history.recent.items():
+        recent.setdefault(ids.city_of_stored(lot_id), {})[lot_id] = series
+
+    counts: dict[str, Counts] = {}
+    for key, counter in history.counts.bucket.items():
+        counts.setdefault(ids.city_of_stored(key[0]), Counts()).bucket[key] = counter
+    for lot_id, counter in history.counts.lot.items():
+        city_counts = counts.setdefault(ids.city_of_stored(lot_id), Counts())
+        city_counts.lot[lot_id] = counter
+        city_counts.glob[0] += counter[0]
+        city_counts.glob[1] += counter[1]
+
+    out: dict[str, History] = {}
+    for city in recent.keys() | counts.keys():
+        series_by_lot = recent.get(city, {})
+        # The same derivation `load_history` does, over one city's tail only.
+        latest_ts = max((s[-1][0] for s in series_by_lot.values()), default=0)
+        current = {
+            lot_id: series[-1][1]
+            for lot_id, series in series_by_lot.items()
+            if series[-1][0] == latest_ts
+        }
+        # A city can appear in `recent` and not in `counts`: the hot scan fills
+        # the tail for every row but skips counting a day the cold store owns.
+        city_counts = counts.get(city)
+        out[city] = History(latest_ts, current, series_by_lot,
+                            Counts() if city_counts is None else city_counts)
+    return out
 
 
 def _keep_newest(heap: list[tuple[int, int]], ts: int, free: int) -> None:

@@ -123,6 +123,31 @@ def test_free_at_returns_each_lots_count_at_one_tick(tmp_path):
     assert store.free_at(conn, 999) == {}
 
 
+def test_free_at_can_be_scoped_to_one_city(tmp_path):
+    """Each city is published from its own `data_ts` now, and two can land on
+    the same second -- the fetch-stamped cities date a reading by when the
+    request came back. Nothing is misattributed without the scope (lot ids are
+    namespaced, and each shard looks up its own), but every shard would drag
+    five other cities' rows through the query to find its own."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    store.insert_snapshot(
+        conn,
+        FeedSnapshot("taipei", 1200, (Observation("taipei:A", 12, None, 1000, TS_FEED),)),
+        {"taipei:A": 50},
+    )
+    store.insert_snapshot(
+        conn,
+        FeedSnapshot("kaohsiung", 1150, (Observation("kaohsiung:1", 3, None, 1000, TS_FEED),)),
+        {"kaohsiung:1": 50},
+    )
+
+    assert store.free_at(conn, 1000, "taipei") == {"taipei:A": 12}
+    assert store.free_at(conn, 1000, "kaohsiung") == {"kaohsiung:1": 3}
+    assert store.free_at(conn, 1000) == {"taipei:A": 12, "kaohsiung:1": 3}
+    assert store.free_at(conn, 1000, "tainan") == {}
+    conn.close()
+
+
 def test_migration_namespaces_every_row_once(tmp_path):
     conn = store.connect(tmp_path / "hot.sqlite")
     conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at, free_car, free_motor, quality)"
