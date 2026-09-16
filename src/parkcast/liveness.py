@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from itertools import groupby
 from operator import itemgetter
 
-from parkcast import config, store
+from parkcast import config, ids, store
 
 SLOT_SECONDS = config.POLL_PERIOD_MIN * 60
 
@@ -57,6 +57,18 @@ SLOT_SECONDS = config.POLL_PERIOD_MIN * 60
 _READINGS_NEWEST_FIRST = (
     "SELECT lot_id, data_ts, free_car FROM observations "
     "WHERE free_car IS NOT NULL ORDER BY lot_id DESC, data_ts DESC"
+)
+
+# The same walk, bounded to one city. `ids.prefix_range` bounds the PRIMARY KEY
+# itself, so this stays the backwards key walk above with a narrower start and
+# end -- a `city = ?` predicate would instead take SQLite to the non-covering
+# `idx_obs_city_ts` and add a temp B-tree for the ORDER BY. Six bounded walks
+# therefore cost what one full walk costs (measured: 0.069 s vs 0.067 s over a
+# synthetic 180,000-row six-city store), not six times it (0.4 s).
+_CITY_READINGS_NEWEST_FIRST = (
+    "SELECT lot_id, data_ts, free_car FROM observations "
+    "WHERE free_car IS NOT NULL AND lot_id >= ? AND lot_id < ? "
+    "ORDER BY lot_id DESC, data_ts DESC"
 )
 
 
@@ -113,20 +125,48 @@ def withheld_since(run: Run | None, *, as_of: int, window_start: int) -> int | N
     return updated if as_of - updated >= config.NOT_UPDATING_AFTER_SEC else None
 
 
-def not_updating(conn, lot_ids: Collection[str], *, as_of: int) -> dict[str, int]:
+def not_updating(
+    conn, lot_ids: Collection[str], *, as_of: int, city: str | None = None
+) -> dict[str, int]:
     """{lot_id: last update} for each of `lot_ids` that has not updated in time.
 
     `as_of` is the reading being published, `History.latest_ts`. Readings after
     it are skipped here rather than filtered in SQL: a `data_ts` predicate
     tempts the planner onto `idx_obs_data_ts`, the slow non-covering plan
     `forecast.load_history` documents.
+
+    `city` scopes the window this judges against, and it is the part that
+    matters: `window_start` is what a lot with no reading at all is dated to --
+    "the latest it could have been" -- and a global `MIN(data_ts)` is the
+    oldest moment in the *store*, not in this city's feed. A city collecting
+    for two hours beside Taipei's 48 hours would have every one of its silent
+    lots dated 48 hours back and withheld on its first tick, on the strength of
+    another city's history. `oldest_data_ts(conn, city)` asks the question the
+    rule is actually about.
+
+    The scan is narrowed for the same reason it is narrowed by primary key
+    rather than by the `city` column -- see `_CITY_READINGS_NEWEST_FIRST`. The
+    `wanted` filter below already made the *result* per-city; this makes the
+    work per-city too.
     """
-    window_start = store.oldest_data_ts(conn)
+    window_start = store.oldest_data_ts(conn, city)
     if window_start is None:
         return {}
     wanted = set(lot_ids)
+    if city is None:
+        reading_rows = conn.execute(_READINGS_NEWEST_FIRST)
+    else:
+        lo, hi = ids.prefix_range(city)
+        # Judge only what was actually scanned. A lot id from another city would
+        # find no readings inside this range, fall through to `window_start` as
+        # "the window never heard from it", and be withheld -- a destructive
+        # claim (every horizon goes UNKNOWN) about rows this call never looked
+        # at. Unreachable from `publish_city`, whose roster is one city by
+        # construction, and dropped here so it stays unreachable.
+        wanted = {lot_id for lot_id in wanted if lo <= lot_id < hi}
+        reading_rows = conn.execute(_CITY_READINGS_NEWEST_FIRST, (lo, hi))
     runs: dict[str, Run | None] = {}
-    for lot_id, rows in groupby(conn.execute(_READINGS_NEWEST_FIRST), key=itemgetter(0)):
+    for lot_id, rows in groupby(reading_rows, key=itemgetter(0)):
         if lot_id in wanted:
             runs[lot_id] = unchanged_run((ts, free) for _, ts, free in rows if ts <= as_of)
     withheld = {}

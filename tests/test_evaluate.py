@@ -22,7 +22,7 @@ from parkcast.evaluate import (
     skill,
     withheld_at,
 )
-from parkcast.feed import FeedSnapshot, Observation
+from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 from parkcast.liveness import not_updating
 from datetime import date
 
@@ -38,7 +38,7 @@ def conn(tmp_path):
 
 def write(conn, ts, lot="A", free=5, capacity=50):
     store.insert_snapshot(
-        conn, FeedSnapshot(ts, ts + 200, (Observation(lot, free, None),)), {lot: capacity}
+        conn, FeedSnapshot("taipei", ts + 200, (Observation(lot, free, None, ts, TS_FEED),)), {lot: capacity}
     )
 
 
@@ -99,22 +99,53 @@ def test_labels_from_cold_reconstruct_the_true_timestamp(conn, tmp_path):
     day = date(2026, 9, 6)
     start, _ = day_bounds(day)
     ts = start + 300 * 100 + 180          # slot 100, on the feed's phase
-    write(conn, ts, free=7)
+    write(conn, ts, lot="taipei:A", free=7)
     compact_day(conn, day, tmp_path)
 
     labels = load_labels(conn, tmp_path)
-    assert labels[ts]["A"] == 7, "a cold slot must map back to the reading's real data_ts"
+    assert labels[ts]["taipei:A"] == 7, (
+        "a cold slot must map back to the reading's real data_ts"
+    )
 
 
 def test_a_day_in_both_stores_is_not_counted_twice(conn, tmp_path):
     day = date(2026, 9, 6)
     start, _ = day_bounds(day)
     ts = start + 300 * 50 + 180
-    write(conn, ts, free=3)
+    write(conn, ts, lot="taipei:A", free=3)
     compact_day(conn, day, tmp_path)      # now in cold AND still in hot
 
     labels = load_labels(conn, tmp_path)
-    assert labels[ts] == {"A": 3}, "the overlap must be idempotent, not duplicated"
+    assert labels[ts] == {"taipei:A": 3}, "the overlap must be idempotent, not duplicated"
+
+
+def test_a_pre_namespacing_cold_label_is_keyed_the_way_the_model_is_asked(conn, tmp_path):
+    """`load_labels` reads Parquet on its own -- it does not go through
+    `forecast._read_parquet_day` -- so it needs the same `ids.as_stored`
+    normalisation, and would not inherit it.
+
+    Everything downstream joins on this key: `withheld_at` against
+    `liveness`, `hard_lots` against `history.counts.lot`, and `model.predict`,
+    which is called with the label's own key. A bare cold id splits the lot in
+    two, so a backtest would be scored on half a corpus -- silently, with
+    entirely plausible numbers, which is the one failure mode the evaluation
+    cannot afford.
+    """
+    day = date(2026, 9, 6)
+    start, _ = day_bounds(day)
+    ts = start + 300 * 50 + 180
+    legacy = store.connect(tmp_path / "legacy.sqlite")     # bare, as on disk
+    legacy.execute(
+        "INSERT INTO observations (lot_id, city, data_ts, observed_at, free_car,"
+        " free_motor, quality) VALUES ('TPE0001', '', ?, ?, 3, NULL, 0)",
+        (ts, ts + 200),
+    )
+    compact_day(legacy, day, tmp_path)
+    legacy.close()
+
+    labels = load_labels(conn, tmp_path)                   # conn is empty
+
+    assert labels[ts] == {"taipei:TPE0001": 3}
 
 
 def test_missing_slots_are_absent_rather_than_zero(conn, tmp_path):

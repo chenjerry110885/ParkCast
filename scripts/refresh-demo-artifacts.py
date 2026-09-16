@@ -44,6 +44,7 @@ from parkcast.artifacts import HEADER_FORMAT, HEADER_SIZE            # noqa: E40
 from parkcast.collector import collect_once, fetch_json              # noqa: E402
 from parkcast.metadata import capacity_map, parse_metadata           # noqa: E402
 from parkcast.scheduler import publish_artifacts                     # noqa: E402
+from parkcast.sources.taipei import Source as TaipeiSource            # noqa: E402
 
 
 def describe(path: Path) -> str:
@@ -80,7 +81,7 @@ def main() -> int:
         lots = parse_metadata(raw_meta)
 
         conn = store.connect(config.DB_PATH)
-        result = collect_once(conn, capacity_map(lots))
+        result = collect_once(conn, TaipeiSource(), capacity_map(lots))
         reading = datetime.fromtimestamp(result.data_ts, config.TAIPEI_TZ)
         print(f"  data_ts {reading:%H:%M} Taipei, {result.rows_written} rows, "
               f"{len(lots)} lots in metadata")

@@ -6,8 +6,10 @@ import pytest
 
 from parkcast import config, store
 from parkcast.compact import compact_day, day_bounds
-from parkcast.feed import FeedSnapshot, Observation
-from parkcast.forecast import Blend, Climatology, Persistence, load_history, week_bucket
+from parkcast.feed import TS_FEED, FeedSnapshot, Observation
+from parkcast.forecast import (Blend, Climatology, Persistence, by_city,
+                               empty_history, load_history, week_bucket)
+from parkcast.ids import qualify
 
 
 @pytest.fixture
@@ -18,7 +20,7 @@ def conn(tmp_path):
 
 
 def write(conn, ts, lot="A", free=5, capacity=50):
-    store.insert_snapshot(conn, FeedSnapshot(ts, ts + 200, (Observation(lot, free, None),)), {lot: capacity})
+    store.insert_snapshot(conn, FeedSnapshot("taipei", ts + 200, (Observation(lot, free, None, ts, TS_FEED),)), {lot: capacity})
 
 
 def test_history_separates_current_from_past(conn):
@@ -86,19 +88,19 @@ def test_recent_is_sorted_across_the_cold_hot_boundary(conn, tmp_path):
     for slot in range(5):
         store.insert_snapshot(
             other,
-            FeedSnapshot(start + slot * 300 + 180, start + slot * 300 + 380,
-                         (Observation("A", 5, None),)),
-            {"A": 50},
+            FeedSnapshot("taipei", start + slot * 300 + 380,
+                         (Observation("taipei:A", 5, None, start + slot * 300 + 180, TS_FEED),)),
+            {"taipei:A": 50},
         )
     compact_day(other, day, tmp_path)
     other.close()
 
     later, _ = day_bounds(date(2026, 9, 4))
     for slot in range(5):
-        write(conn, later + slot * 300 + 180, free=3)
+        write(conn, later + slot * 300 + 180, free=3, lot="taipei:A")
 
     h = load_history(conn, cold_dir=tmp_path, before_ts=later + 86400)
-    stamps = [ts for ts, _ in h.recent["A"]]
+    stamps = [ts for ts, _ in h.recent["taipei:A"]]
     assert stamps == sorted(stamps)
     assert len(stamps) == 10
 
@@ -161,16 +163,16 @@ def test_before_ts_filters_the_cold_store_too(conn, tmp_path):
     for slot in range(10):
         store.insert_snapshot(
             other,
-            FeedSnapshot(start + slot * 300, start + slot * 300 + 200,
-                         (Observation("A", 5, None),)),
-            {"A": 50},
+            FeedSnapshot("taipei", start + slot * 300 + 200,
+                         (Observation("taipei:A", 5, None, start + slot * 300, TS_FEED),)),
+            {"taipei:A": 50},
         )
     compact_day(other, day, tmp_path)
     other.close()
 
     cutoff = start + 5 * 300
     h = load_history(conn, cold_dir=tmp_path, before_ts=cutoff)   # conn is empty
-    assert [ts for ts, _ in h.recent["A"]] == [start + i * 300 for i in range(5)]
+    assert [ts for ts, _ in h.recent["taipei:A"]] == [start + i * 300 for i in range(5)]
 
 
 # --- latest_ts and current must follow the history, not the hot store --------
@@ -182,15 +184,20 @@ def test_before_ts_filters_the_cold_store_too(conn, tmp_path):
 # with no error, exactly the asymmetry `before_ts` exists to remove.
 
 
-def _cold_day(tmp_path, day, *, lot="A", free=5, slots=10):
-    """Write one Parquet day and return its slot timestamps."""
+def _cold_day(tmp_path, day, *, lot="taipei:A", free=5, slots=10):
+    """Write one Parquet day and return its slot timestamps.
+
+    Namespaced, because that is what `compact_day` writes from the store as it
+    is today -- see the pre-namespacing section at the bottom of this file for
+    the other shape the cold corpus holds, and for why the difference matters.
+    """
     start, _ = day_bounds(day)
-    other = store.connect(tmp_path / f"src-{day}-{lot}.sqlite")
+    other = store.connect(tmp_path / f"src-{day}-{lot.replace(':', '-')}.sqlite")
     for slot in range(slots):
         store.insert_snapshot(
             other,
-            FeedSnapshot(start + slot * 300, start + slot * 300 + 200,
-                         (Observation(lot, free, None),)),
+            FeedSnapshot("taipei", start + slot * 300 + 200,
+                         (Observation(lot, free, None, start + slot * 300, TS_FEED),)),
             {lot: 50},
         )
     compact_day(other, day, tmp_path)
@@ -211,8 +218,8 @@ def test_current_is_populated_from_a_cold_only_backtest(conn, tmp_path):
     # conn is empty: pruned past 48h, as it is for every cutoff Plan 4 will use.
     h = load_history(conn, cold_dir=tmp_path, before_ts=stamps[-1] + 1)
     assert h.latest_ts == stamps[-1], "the newest cold reading, not 0"
-    assert h.current == {"A": 5}
-    assert Persistence(h).predict("A", stamps[-1] + 600, 10) == 1.0, (
+    assert h.current == {"taipei:A": 5}
+    assert Persistence(h).predict("taipei:A", stamps[-1] + 600, 10) == 1.0, (
         "the persistence baseline must not evaporate for a historical cutoff"
     )
 
@@ -225,8 +232,8 @@ def test_before_ts_still_governs_current_over_a_cold_only_history(conn, tmp_path
 
     h = load_history(conn, cold_dir=tmp_path, before_ts=cutoff)
     assert h.latest_ts == stamps[4], "latest_ts must stop strictly before the cutoff"
-    assert h.current == {"A": 5}
-    assert max(ts for ts, _ in h.recent["A"]) < cutoff
+    assert h.current == {"taipei:A": 5}
+    assert max(ts for ts, _ in h.recent["taipei:A"]) < cutoff
 
 
 def test_current_matches_the_hot_store_query_it_replaced(conn):
@@ -544,8 +551,8 @@ def test_read_cold_round_trips_through_compact_day(conn, tmp_path):
     h = load_history(hot, cold_dir=cold_dir, before_ts=start + 600)
     hot.close()
 
-    assert h.recent["A"] == [(start, 5), (start + 300, 3)]
-    assert h.counts.lot["A"] == [2, 2]
+    assert h.recent["taipei:A"] == [(start, 5), (start + 300, 3)]
+    assert h.counts.lot["taipei:A"] == [2, 2]
 
 
 def test_blend_is_persistence_at_the_shortest_horizon(conn):
@@ -608,12 +615,12 @@ def test_cold_observations_covered_by_the_hot_store_are_not_counted_twice(conn, 
     start, _ = day_bounds(day)
     # True feed timestamps sit at slot boundary + 180s, exactly as the real feed does.
     for slot in range(10):
-        write(conn, start + slot * 300 + 180, free=5)
+        write(conn, start + slot * 300 + 180, free=5, lot="taipei:A")
     compact_day(conn, day, tmp_path)
 
     hot_only = load_history(conn)
     with_cold = load_history(conn, cold_dir=tmp_path)
-    assert with_cold.counts.lot["A"] == hot_only.counts.lot["A"] == [10, 10], (
+    assert with_cold.counts.lot["taipei:A"] == hot_only.counts.lot["taipei:A"] == [10, 10], (
         "a day held by both stores must be counted once, not twice"
     )
 
@@ -633,15 +640,15 @@ def test_cold_observations_older_than_the_hot_window_are_kept(conn, tmp_path):
     for slot in range(10):
         store.insert_snapshot(
             other,
-            FeedSnapshot(older_start + slot * 300 + 180, older_start + slot * 300 + 380,
-                         (Observation("A", 5, None),)),
-            {"A": 50},
+            FeedSnapshot("taipei", older_start + slot * 300 + 380,
+                         (Observation("taipei:A", 5, None, older_start + slot * 300 + 180, TS_FEED),)),
+            {"taipei:A": 50},
         )
     compact_day(other, older, tmp_path)
     other.close()
 
     h = load_history(conn, cold_dir=tmp_path)
-    assert h.counts.lot["A"] == [20, 20], "10 hot + 10 genuinely older cold"
+    assert h.counts.lot["taipei:A"] == [20, 20], "10 hot + 10 genuinely older cold"
 
 
 def test_taipei_day_start_agrees_with_day_bounds():
@@ -690,7 +697,7 @@ def test_hot_rows_on_a_day_cold_owns_are_counted_once_and_only_once(conn, tmp_pa
     compact_day(conn, day, tmp_path)
 
     h = load_history(conn, cold_dir=tmp_path)
-    assert h.counts.lot["A"] == [3, 3], "the cold copy counts; the hot one does not"
+    assert h.counts.lot["taipei:A"] == [3, 3], "the cold copy counts; the hot one does not"
     assert h.counts.glob == [3, 3]
 
 
@@ -731,17 +738,17 @@ def test_a_cold_only_lot_keeps_its_counts_but_has_no_recent_tail(conn, tmp_path)
     for slot in range(10):
         store.insert_snapshot(
             other,
-            FeedSnapshot(start + slot * 300 + 180, start + slot * 300 + 380,
-                         (Observation("A", 5, None),)),
-            {"A": 50},
+            FeedSnapshot("taipei", start + slot * 300 + 380,
+                         (Observation("taipei:A", 5, None, start + slot * 300 + 180, TS_FEED),)),
+            {"taipei:A": 50},
         )
     compact_day(other, day, tmp_path)
     other.close()
 
     h = load_history(conn, cold_dir=tmp_path)  # conn is empty
-    assert h.counts.lot["A"] == [10, 10], "climatology still sees the cold corpus"
+    assert h.counts.lot["taipei:A"] == [10, 10], "climatology still sees the cold corpus"
     assert h.recent == {}, "the tail comes from the hot store, which is empty"
-    assert Climatology(h).predict("A", start, 30) is not None
+    assert Climatology(h).predict("taipei:A", start, 30) is not None
 
 
 from parkcast.forecast import Counts
@@ -795,7 +802,7 @@ def _write_parquet_day(tmp_path, day, free_by_slot, lot="A"):
     for slot, free in free_by_slot.items():
         ts = start + slot * 300 + 180
         store.insert_snapshot(
-            src, FeedSnapshot(ts, ts + 200, (Observation(lot, free, None),)), {lot: 50}
+            src, FeedSnapshot("taipei", ts + 200, (Observation(lot, free, None, ts, TS_FEED),)), {lot: 50}
         )
     compact_day(src, day, tmp_path)
     src.close()
@@ -1035,3 +1042,247 @@ def test_a_backtest_cutoff_does_not_poison_the_serving_cache(conn, tmp_path):
     load_history(conn, cold_dir=tmp_path, before_ts=start + 300)
     full = load_history(conn, cold_dir=tmp_path)
     assert full.counts.glob[1] == 3, "the serving path must still see every observation"
+
+
+# --- by_city: one load, one history per city --------------------------------
+#
+# `latest_ts` is a single global maximum and `current` is the set of lots
+# sitting exactly on it. Correct for one city; wrong for six, because Kaohsiung
+# and Taoyuan stamp `data_ts = now` and are therefore always later than a
+# feed-stamped city. Read unscoped, Taipei loses `current` entirely and every
+# `Persistence.predict` for it returns None -- so `Blend` becomes
+# climatology-only without anything failing.
+
+
+def write_legacy(conn, ts, lot, free=5):
+    """One observation with a BARE lot id, straight into the table.
+
+    What the collector wrote before ids were namespaced. Compacted, this is what
+    the live cold corpus actually holds -- and Parquet is never rewritten, so it
+    holds it for good. Every cold fixture that means to exercise the legacy
+    corpus has to be written this way; one built through `write_city` and
+    `compact_day` produces namespaced Parquet, which is a file shape the live
+    corpus does not contain, and is blind to the whole failure.
+    """
+    conn.execute(
+        "INSERT INTO observations (lot_id, city, data_ts, observed_at, free_car,"
+        " free_motor, quality) VALUES (?, '', ?, ?, ?, NULL, 0)",
+        (lot, ts, ts + 200, free),
+    )
+
+
+def write_city(conn, ts, city, lot, free=5, capacity=50):
+    lot_id = qualify(city, lot)
+    store.insert_snapshot(
+        conn,
+        FeedSnapshot(city, ts + 200, (Observation(lot_id, free, None, ts, TS_FEED),)),
+        {lot_id: capacity},
+    )
+
+
+def test_by_city_gives_each_city_its_own_latest_reading(conn):
+    write_city(conn, 1000, "taipei", "A", free=9)
+    write_city(conn, 1300, "taipei", "A", free=2)
+    write_city(conn, 5000, "kaohsiung", "1", free=7)   # fetch-stamped: always later
+
+    histories = by_city(load_history(conn))
+
+    assert load_history(conn).latest_ts == 5000, "the global maximum is Kaohsiung's"
+    assert histories["taipei"].latest_ts == 1300
+    assert histories["kaohsiung"].latest_ts == 5000
+
+
+def test_by_city_keeps_a_current_reading_for_the_lagging_city(conn):
+    """The defect, stated directly: unscoped, `current` holds only the city
+    that fetched last and Persistence goes silent for everyone else."""
+    write_city(conn, 1300, "taipei", "A", free=2)
+    write_city(conn, 5000, "kaohsiung", "1", free=7)
+
+    histories = by_city(load_history(conn))
+
+    assert Persistence(load_history(conn)).predict("taipei:A", 1300, 5) is None
+    assert Persistence(histories["taipei"]).predict("taipei:A", 1300, 5) == 1.0
+
+
+def test_by_city_shard_matches_a_store_holding_only_that_city(conn, tmp_path):
+    """The identity that makes Taipei's published bytes safe: a city's slice of
+    a six-city load must equal what a store holding only that city would load.
+
+    `glob` is the field that could quietly differ -- Climatology's top tier
+    shrinks toward it, so a global spanning six cities would move every
+    published probability without changing a single count anyone looks at.
+    """
+    solo = store.connect(tmp_path / "solo.sqlite")
+    for i in range(20):
+        write_city(conn, 1000 + i * 300, "taipei", "A", free=i % 3)
+        write_city(solo, 1000 + i * 300, "taipei", "A", free=i % 3)
+        write_city(conn, 90000 + i * 300, "kaohsiung", "1", free=5)
+
+    shard = by_city(load_history(conn))["taipei"]
+    alone = load_history(solo)
+    solo.close()
+
+    assert shard.latest_ts == alone.latest_ts
+    assert shard.current == alone.current
+    assert shard.recent == alone.recent
+    assert shard.counts.glob == alone.counts.glob
+    assert dict(shard.counts.lot) == dict(alone.counts.lot)
+    assert dict(shard.counts.bucket) == dict(alone.counts.bucket)
+    target = shard.latest_ts + 300
+    assert (Climatology(shard).predict("taipei:A", target, 5)
+            == Climatology(alone).predict("taipei:A", target, 5))
+
+
+def test_by_city_climatology_still_spans_the_whole_corpus(conn, tmp_path):
+    """`counts` is re-keyed, never recomputed. Narrowing it to `recent` -- the
+    two-hour tail -- would silently shrink climatology to the hot window."""
+    day = date(2026, 9, 1)
+    start, _ = day_bounds(day)
+    cold_src = store.connect(tmp_path / "src.sqlite")
+    for i in range(50):
+        write_legacy(cold_src, start + i * 300, "A", free=1)    # bare, as on disk
+    cold_dir = tmp_path / "cold"
+    compact_day(cold_src, day, cold_dir)
+    cold_src.close()
+
+    write_city(conn, start + 10 * 86400, "taipei", "A", free=0)
+    write_city(conn, start + 10 * 86400 + 5, "kaohsiung", "1", free=0)
+
+    shard = by_city(load_history(conn, cold_dir=cold_dir))["taipei"]
+
+    assert shard.counts.lot["taipei:A"][1] == 51, (
+        "50 cold observations plus the hot one -- the whole corpus, for this city"
+    )
+    assert "A" not in shard.counts.lot, (
+        "the cold half must not sit under a second key of its own"
+    )
+    assert len(shard.recent["taipei:A"]) == 1, "the tail is still just the tail"
+
+
+# --- the pre-namespacing cold corpus ----------------------------------------
+#
+# Ids were namespaced by city partway through this project's life. The hot store
+# rolls over every 48 hours, so it is entirely namespaced by now -- but Parquet
+# is never rewritten, and the cold corpus still holds every day compacted before
+# that as bare `TPE0001`. That is the only long history this project has, and
+# every join between cold and hot is a string comparison on the lot id.
+
+
+def _legacy_cold_day(tmp_path, day, lot, *, free, readings, name="cold"):
+    """A Parquet day holding BARE ids, the way the live cold corpus holds them."""
+    start, _ = day_bounds(day)
+    src = store.connect(tmp_path / f"{name}-src.sqlite")
+    for i in range(readings):
+        write_legacy(src, start + i * 300, lot, free=free)
+    cold_dir = tmp_path / name
+    compact_day(src, day, cold_dir)
+    src.close()
+    return cold_dir
+
+
+def test_a_pre_namespacing_cold_id_is_read_in_its_stored_form(conn, tmp_path):
+    """Parquet is never rewritten, so a day compacted before ids were namespaced
+    still says `TPE0001`. Everything that joins cold to hot joins on the string,
+    so the file's spelling has to be normalised as it is read -- not carried
+    into `Counts` and sorted out afterwards."""
+    day = date(2026, 9, 1)
+    cold_dir = _legacy_cold_day(tmp_path, day, "TPE0001", free=1, readings=10)
+
+    counts = load_history(conn, cold_dir=cold_dir).counts
+
+    assert "taipei:TPE0001" in counts.lot
+    assert "TPE0001" not in counts.lot, "the file's own spelling must not survive"
+    assert counts.lot["taipei:TPE0001"] == [10, 10]
+
+
+def test_the_cold_and_hot_halves_of_one_lot_are_one_history(conn, tmp_path):
+    """The defect this test exists for, measured before the fix: a cold day of
+    100 readings for `TPE0001` beside a hot day of 3 for `taipei:TPE0001` left
+    `counts.lot` holding BOTH keys -- [100, 100] and [0, 3] -- and
+    `Climatology.predict`, which is called with the namespaced `Lot.id`, saw
+    only the 3 (0.8403, against 0.9968 for the whole corpus).
+
+    Nothing failed. The *global* tier still counted the cold rows, so every
+    number stayed plausible while the lot and bucket tiers quietly lost the
+    entire pre-namespacing corpus -- the only long history this project has.
+    """
+    day = date(2026, 9, 1)
+    start, _ = day_bounds(day)
+    cold_dir = _legacy_cold_day(tmp_path, day, "TPE0001", free=1, readings=100)
+    hot_start = start + 10 * 86400
+    for i in range(3):
+        write_city(conn, hot_start + i * 300, "taipei", "TPE0001", free=0)
+
+    merged = by_city(load_history(conn, cold_dir=cold_dir))["taipei"]
+
+    assert sorted(merged.counts.lot) == ["taipei:TPE0001"], "one lot, one key"
+    assert merged.counts.lot["taipei:TPE0001"] == [100, 103], (
+        "100 cold observations and 3 hot ones, under the id the roster uses"
+    )
+
+    # The same corpus with cold written after namespacing: the two spellings
+    # describe one car park, so they must forecast identically.
+    native_dir = tmp_path / "native"
+    native_src = store.connect(tmp_path / "native-src.sqlite")
+    for i in range(100):
+        write_city(native_src, start + i * 300, "taipei", "TPE0001", free=1)
+    compact_day(native_src, day, native_dir)
+    native_src.close()
+    native = by_city(load_history(conn, cold_dir=native_dir))["taipei"]
+
+    target = merged.latest_ts + 300
+    predicted = Climatology(merged).predict("taipei:TPE0001", target, 5)
+    assert predicted == Climatology(native).predict("taipei:TPE0001", target, 5)
+
+    # And it is not the same answer as losing the cold half. The control holds
+    # the identical 100 cold readings under a DIFFERENT lot, so the global tier
+    # -- the one that kept the split looking plausible -- is unchanged, and only
+    # this lot's own history is missing.
+    split_dir = _legacy_cold_day(tmp_path, day, "TPE0002", free=1,
+                                 readings=100, name="split")
+    split = by_city(load_history(conn, cold_dir=split_dir))["taipei"]
+    assert Climatology(split).predict("taipei:TPE0001", target, 5) < predicted
+
+
+def test_a_cold_only_lot_is_found_under_the_id_the_roster_uses(conn, tmp_path):
+    """`scheduler.publish_city` keeps a lot with `lot.id in counts.lot`, and
+    `Lot.id` is namespaced. A lot whose only usable history predates namespacing
+    would otherwise miss that test and be dropped from the map entirely."""
+    cold_dir = _legacy_cold_day(tmp_path, date(2026, 9, 1), "TPE0001",
+                                free=1, readings=10)
+    write_city(conn, 1_788_000_000, "taipei", "A", free=2)
+
+    counts = by_city(load_history(conn, cold_dir=cold_dir))["taipei"].counts
+
+    assert "taipei:TPE0001" in counts.lot, "the roster filter looks it up like this"
+
+
+def test_by_city_backstops_a_bare_id_that_still_reaches_it(conn):
+    """`ids.as_stored` is what resolves a legacy id, at the point the corpus is
+    read. `city_of_stored` is only the backstop for one that gets past it --
+    it must file the id rather than raise, because raising here stops publishing
+    for every city at once while the collector goes on looking healthy."""
+    write_city(conn, 1000, "taipei", "A", free=5)
+    conn.execute(                                   # never migrated, never read
+        "INSERT INTO observations (lot_id, city, data_ts, observed_at, free_car,"
+        " free_motor, quality) VALUES ('TPE0001', '', 900, 900, 5, NULL, 0)"
+    )
+
+    histories = by_city(load_history(conn))         # must not raise
+
+    assert set(histories) == {"taipei"}
+
+
+def test_by_city_of_an_empty_store_is_empty(conn):
+    assert by_city(load_history(conn)) == {}
+
+
+def test_empty_history_forecasts_nothing_and_is_never_shared():
+    """`by_city` has nothing for a city the corpus has never seen, and the
+    caller needs a History rather than a None to hand to its guards."""
+    first, second = empty_history(), empty_history()
+    assert first.latest_ts == 0 and first.current == {} and first.recent == {}
+    assert Climatology(first).predict("taipei:A", 1000, 5) is None
+    assert Persistence(first).predict("taipei:A", 1000, 5) is None
+    first.counts.add("taipei:A", 1000, 5)
+    assert second.counts.glob == [0, 0], "a shared instance would have been filled in"

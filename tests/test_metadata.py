@@ -86,18 +86,22 @@ def test_zero_car_lots_are_still_parsed_collected_and_stored(tmp_path):
     manufacture a discontinuity inside the training data.
     """
     from parkcast import store
-    from parkcast.feed import FeedSnapshot, Observation
+    from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 
     lots = parse_metadata(_one(id="TPE1697", totalcar="0"))
-    assert [lot.id for lot in lots] == ["TPE1697"], "still parsed"
+    assert [lot.id for lot in lots] == ["taipei:TPE1697"], "still parsed, namespaced"
 
     caps = capacity_map(lots)
-    assert caps == {"TPE1697": None}, "still in the capacity map, with no bound"
+    assert caps == {"taipei:TPE1697": None}, "still in the capacity map, with no bound"
 
     conn = store.connect(tmp_path / "t.sqlite")
     snapshot = FeedSnapshot(
-        data_ts=1788484980, observed_at=1788485010,
-        observations=(Observation("TPE1697", free_car=27, free_motor=3),),
+        city="taipei", observed_at=1788485010,
+        # The same namespaced id `capacity_map` produced above -- this is what
+        # `sources.taipei.parse` actually stamps on every observation, and it
+        # is what `caps.get(obs.lot_id)` must match for the lookup to find it.
+        observations=(Observation("taipei:TPE1697", free_car=27, free_motor=3,
+                                   data_ts=1788484980, ts_kind=TS_FEED),),
     )
     store.insert_snapshot(conn, snapshot, caps)
     stored = conn.execute("SELECT free_car FROM observations").fetchone()

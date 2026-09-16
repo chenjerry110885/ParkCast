@@ -1,5 +1,13 @@
-"""Normalisation and quality flagging for raw feed counts."""
+"""Normalisation and quality flagging for raw feed values.
+
+Counts come in through `clean_count`, timestamps through `data_ts_plausible`.
+Both exist for the same reason: a feed is a stranger's process, and a value it
+sends that cannot be true must be recognised as such at the point of entry,
+not discovered later by whatever reads the corpus.
+"""
 from enum import IntFlag
+
+from parkcast import config
 
 
 class Q(IntFlag):
@@ -32,6 +40,27 @@ def clean_count(raw: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return None if value < 0 else value
+
+
+def data_ts_plausible(data_ts: int, observed_at: int) -> bool:
+    """Could a reading fetched at `observed_at` honestly be stamped `data_ts`?
+
+    The window is `config.DATA_TS_MAX_AGE_SEC` back and
+    `config.DATA_TS_MAX_AHEAD_SEC` forward, both inclusive; see those constants
+    for the live measurements that motivate each bound.
+
+    Note what this is NOT: a freshness check. A stamp inside the window may
+    still be hours old, and `liveness` is what decides whether that lot's
+    forecast may be published. This asks only whether the stamp can be a
+    timestamp at all -- whether the corpus can key a row on it without
+    inventing the fact. A `0` count is a real reading and a stale stamp is a
+    real fact; a stamp 400 days in the future is neither.
+    """
+    return (
+        observed_at - config.DATA_TS_MAX_AGE_SEC
+        <= data_ts
+        <= observed_at + config.DATA_TS_MAX_AHEAD_SEC
+    )
 
 
 def validate(free: int | None, capacity: int | None) -> tuple[int | None, Q]:

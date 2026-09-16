@@ -6,7 +6,7 @@ import pytest
 
 from parkcast import store
 from parkcast.compact import ARRAY_COLUMNS, compact_day, day_bounds
-from parkcast.feed import FeedSnapshot, Observation
+from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 from parkcast.quality import Q
 
 
@@ -21,7 +21,7 @@ def _compact_one(conn, out_dir):
     """Write a single observation for 2026-09-04 and compact that day."""
     start, _ = day_bounds(date(2026, 9, 4))
     store.insert_snapshot(
-        conn, FeedSnapshot(start, start + 200, (Observation("A", 10, 3),)), {"A": 50}
+        conn, FeedSnapshot("taipei", start + 200, (Observation("A", 10, 3, start, TS_FEED),)), {"A": 50}
     )
     return compact_day(conn, date(2026, 9, 4), out_dir)
 
@@ -37,7 +37,7 @@ def test_compaction_produces_288_slots_per_lot(conn, tmp_path):
     for i in (0, 1, 5):
         ts = start + i * 300
         store.insert_snapshot(
-            conn, FeedSnapshot(ts, ts + 200, (Observation("A", 10 + i, None),)), {"A": 50}
+            conn, FeedSnapshot("taipei", ts + 200, (Observation("A", 10 + i, None, ts, TS_FEED),)), {"A": 50}
         )
 
     path = compact_day(conn, date(2026, 9, 4), tmp_path)
@@ -55,7 +55,7 @@ def test_gaps_are_null_never_interpolated(conn, tmp_path):
     for i in (0, 5):
         ts = start + i * 300
         store.insert_snapshot(
-            conn, FeedSnapshot(ts, ts + 200, (Observation("A", 10 + i, None),)), {"A": 50}
+            conn, FeedSnapshot("taipei", ts + 200, (Observation("A", 10 + i, None, ts, TS_FEED),)), {"A": 50}
         )
 
     row = pq.read_table(compact_day(conn, date(2026, 9, 4), tmp_path)).to_pylist()[0]
@@ -90,7 +90,7 @@ def test_free_motor_is_preserved_with_its_own_nulls(conn, tmp_path):
     for slot, motor in ((0, 7), (1, None), (2, 0)):
         ts = start + slot * 300
         store.insert_snapshot(
-            conn, FeedSnapshot(ts, ts + 200, (Observation("A", 10, motor),)), {"A": 50}
+            conn, FeedSnapshot("taipei", ts + 200, (Observation("A", 10, motor, ts, TS_FEED),)), {"A": 50}
         )
 
     row = pq.read_table(compact_day(conn, date(2026, 9, 4), tmp_path)).to_pylist()[0]
@@ -105,7 +105,7 @@ def test_lag_is_observed_at_minus_data_ts(conn, tmp_path):
     for slot, lag in ((0, 184), (1, 502)):
         ts = start + slot * 300
         store.insert_snapshot(
-            conn, FeedSnapshot(ts, ts + lag, (Observation("A", 10, None),)), {"A": 50}
+            conn, FeedSnapshot("taipei", ts + lag, (Observation("A", 10, None, ts, TS_FEED),)), {"A": 50}
         )
 
     row = pq.read_table(compact_day(conn, date(2026, 9, 4), tmp_path)).to_pylist()[0]
@@ -123,7 +123,7 @@ def test_absurd_lag_is_clamped_rather_than_blocking_the_day(conn, tmp_path):
     start, _ = day_bounds(date(2026, 9, 4))
     store.insert_snapshot(
         conn,
-        FeedSnapshot(start, start + 90_000, (Observation("A", 10, None),)),
+        FeedSnapshot("taipei", start + 90_000, (Observation("A", 10, None, start, TS_FEED),)),
         {"A": 50},
     )
     row = pq.read_table(compact_day(conn, date(2026, 9, 4), tmp_path)).to_pylist()[0]
@@ -154,7 +154,7 @@ def test_quality_flags_are_index_aligned_with_free_car(conn, tmp_path):
     for slot, (free_car, _expected_q) in cases.items():
         ts = start + slot * 300
         store.insert_snapshot(
-            conn, FeedSnapshot(ts, ts + 200, (Observation("A", free_car, None),)), capacities
+            conn, FeedSnapshot("taipei", ts + 200, (Observation("A", free_car, None, ts, TS_FEED),)), capacities
         )
 
     row = pq.read_table(compact_day(conn, date(2026, 9, 4), tmp_path)).to_pylist()[0]

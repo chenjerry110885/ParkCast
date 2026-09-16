@@ -5,12 +5,18 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from parkcast import ids
 from parkcast.geo import resolve_latlon
 from parkcast.quality import clean_count
 
 
 @dataclass(frozen=True, slots=True)
 class Lot:
+    # Namespaced the same way `sources.<city>.parse` namespaces
+    # `Observation.lot_id` (`ids.qualify`) -- see `parse_metadata`. Every
+    # consumer that joins a `Lot` against the store (capacity validation,
+    # `scheduler.publish_artifacts`'s `lot.id in history.counts.lot` filter,
+    # `liveness.not_updating`) depends on the two conventions agreeing.
     id: str
     name: str
     area: str
@@ -43,19 +49,31 @@ def _serves_cars(raw: object) -> bool:
         return True
 
 
-def parse_metadata(payload: dict) -> tuple[Lot, ...]:
-    """Lots without usable coordinates are dropped: they cannot be ranked by distance."""
+def parse_metadata(payload: dict, city: str = "taipei") -> tuple[Lot, ...]:
+    """Lots without usable coordinates are dropped: they cannot be ranked by distance.
+
+    This parses Taipei's own `TCMSV_alldesc.json` -- `city` defaults to
+    `"taipei"` rather than being hard-coded, so it names the convention
+    instead of repeating the string. Every `Lot.id` is namespaced through
+    `ids.qualify(city, raw_id)`, exactly like `sources.<city>.parse`
+    namespaces `Observation.lot_id`: the two have to agree, because
+    `capacity_map`'s output is looked up by `obs.lot_id` in
+    `store.insert_snapshot`, and `scheduler.publish_artifacts` filters lots
+    with `lot.id in history.counts.lot`, which is keyed by the *stored*
+    (namespaced) lot_id. A bare `Lot.id` there matches nothing, silently
+    dropping every lot and freezing publishing entirely.
+    """
     lots: list[Lot] = []
     seen: set[str] = set()
 
     for entry in payload["data"]["park"]:
-        lot_id = entry.get("id")
-        if not lot_id or lot_id in seen:
+        raw_id = entry.get("id")
+        if not raw_id or raw_id in seen:
             continue
         position = resolve_latlon(entry)
         if position is None:
             continue
-        seen.add(lot_id)
+        seen.add(raw_id)
 
         # Read the raw value twice, deliberately: `clean_count` maps -9 to None
         # and `capacity or None` maps 0 to None, so by the time capacity_car is
@@ -65,7 +83,7 @@ def parse_metadata(payload: dict) -> tuple[Lot, ...]:
         capacity = clean_count(raw_capacity)
         lots.append(
             Lot(
-                id=lot_id,
+                id=ids.qualify(city, raw_id),
                 name=entry.get("name", ""),
                 area=entry.get("area", ""),
                 lot_type=entry.get("type2", ""),
