@@ -103,13 +103,23 @@ def migrate_to_namespaced_ids(conn: sqlite3.Connection, city: str = "taipei") ->
     One transaction: a half-migrated store has two id conventions in one table
     and every later query silently reads half the corpus. Idempotent, because
     the collector may restart mid-day and this runs at startup.
+
+    The predicate is a prefix check, not `instr(lot_id, ':') = 0`: a feed id
+    that itself contains a colon (see ids.bare's docstring -- a hypothetical
+    `kaohsiung:PL:0001`) would otherwise look already-migrated on the very
+    first run and be skipped forever, leaving exactly the cross-city id
+    collision namespacing exists to prevent. `LIKE` treats `_` and `%` as
+    wildcards, so this is only safe because city names are plain lowercase
+    ASCII containing neither character; a future city name with an
+    underscore would need escaping here.
     """
     conn.execute("BEGIN IMMEDIATE")
     try:
+        prefix = f"{city}{ids.SEPARATOR}"
         cursor = conn.execute(
             "UPDATE observations SET lot_id = ? || lot_id, city = ? "
-            "WHERE instr(lot_id, ?) = 0",
-            (f"{city}{ids.SEPARATOR}", city, ids.SEPARATOR),
+            "WHERE lot_id NOT LIKE ? || '%'",
+            (prefix, city, prefix),
         )
         rewritten = cursor.rowcount
     except BaseException:

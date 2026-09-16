@@ -135,8 +135,34 @@ def test_migration_namespaces_every_row_once(tmp_path):
     assert conn.execute("SELECT lot_id FROM observations").fetchone()[0] == "taipei:TPE0001"
 
 
+def test_migration_handles_a_bare_feed_id_that_itself_contains_a_colon(tmp_path):
+    """`instr(lot_id, ':') = 0` would misread this row as already-migrated on
+    the very first run (it contains a colon before migration too) and skip it
+    forever -- exactly the cross-city id collision namespacing exists to
+    prevent. The prefix check must migrate it once, like any other row."""
+    conn = store.connect(tmp_path / "hot.sqlite")
+    conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at, free_car, free_motor, quality)"
+                 " VALUES ('PL:0001', '', 100, 100, 5, NULL, 0)")
+    assert store.migrate_to_namespaced_ids(conn, city="kaohsiung") == 1
+    row = conn.execute("SELECT lot_id, city FROM observations").fetchone()
+    assert row == ("kaohsiung:PL:0001", "kaohsiung")
+    # Idempotent: a second run must not double-prefix, and must recognize the
+    # row as already migrated even though its lot_id still contains a colon.
+    assert store.migrate_to_namespaced_ids(conn, city="kaohsiung") == 0
+    assert conn.execute("SELECT lot_id FROM observations").fetchone()[0] == "kaohsiung:PL:0001"
+
+
 def test_source_health_round_trips(tmp_path):
     conn = store.connect(tmp_path / "hot.sqlite")
     store.record_source_health(conn, "tainan", observed_at=200, rows=268, usable=190, newest_ts=199, ok=True)
     health = store.source_health(conn)["tainan"]
     assert (health["rows"], health["usable"], health["ok"]) == (268, 190, True)
+
+
+def test_source_health_keeps_the_first_sighting_across_later_ticks(tmp_path):
+    conn = store.connect(tmp_path / "hot.sqlite")
+    store.record_source_health(conn, "tainan", observed_at=200, rows=268, usable=190, newest_ts=199, ok=True)
+    store.record_source_health(conn, "tainan", observed_at=500, rows=270, usable=200, newest_ts=499, ok=False)
+    health = store.source_health(conn)["tainan"]
+    assert health["first_ts"] == 199, "the first sighting must not be overwritten by a later tick"
+    assert (health["last_ts"], health["rows"], health["usable"], health["ok"]) == (500, 270, 200, False)
