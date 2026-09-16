@@ -100,25 +100,52 @@ def insert_snapshot(
 def migrate_to_namespaced_ids(conn: sqlite3.Connection, city: str = "taipei") -> int:
     """Prefix every un-namespaced row's id, once. Returns rows rewritten.
 
+    Called from `__main__.main` at startup, immediately after `connect` and
+    before anything reads the store. It has to run there and not lazily: the
+    first tick after a deploy writes namespaced ids, so until this has run the
+    hot window holds both conventions for the same physical car park -- and
+    `forecast.load_history` keys `current` and `counts` on the string, so that
+    lot's history is split in half. In the hot store that is the half feeding
+    `Persistence` and `store.free_at`: the short-horizon signal and the observed
+    count on every card, degraded for as long as the split lasts, and plausible
+    the whole time. See `ids.as_stored` for the same failure in the cold half,
+    which Parquet keeps forever and which is resolved on read instead.
+
     One transaction: a half-migrated store has two id conventions in one table
     and every later query silently reads half the corpus. Idempotent, because
-    the collector may restart mid-day and this runs at startup.
+    the collector may restart mid-day and this runs on every boot -- the second
+    and every later run rewrite 0 rows.
 
-    The predicate is a prefix check, not `instr(lot_id, ':') = 0`: a feed id
-    that itself contains a colon (see ids.bare's docstring -- a hypothetical
-    `kaohsiung:PL:0001`) would otherwise look already-migrated on the very
-    first run and be skipped forever, leaving exactly the cross-city id
-    collision namespacing exists to prevent. `LIKE` treats `_` and `%` as
-    wildcards, so this is only safe because city names are plain lowercase
-    ASCII containing neither character; a future city name with an
-    underscore would need escaping here.
+    WHICH ROWS ARE UN-NAMESPACED is decided by `city = ''`, the column's
+    ALTER-TABLE default, i.e. "this row predates the city column" -- which is
+    exactly "this row predates namespacing", because `connect` added the column
+    in the same change that introduced `ids.qualify`. It is a recorded fact
+    rather than a guess from the id's shape, and that matters now the store
+    holds six cities: the original predicate was `lot_id NOT LIKE 'taipei:%'`,
+    written when Taipei was the only source, and against today's store it
+    rewrites every Kaohsiung, Tainan, Taoyuan, New Taipei and Hsinchu row to
+    `taipei:kaohsiung:PL0001` and stamps `city = 'taipei'` on all of them.
+    In place, in one transaction, on the first boot after deploying. Five
+    cities' hot windows, unrecoverable.
+
+    Reading the column also keeps the property the prefix check was chosen for:
+    a feed id that itself contains a colon (`ids.bare`'s hypothetical
+    `PL:0001`) is migrated like any other row rather than looking
+    already-namespaced, which `instr(lot_id, ':') = 0` would have got wrong.
+
+    The `NOT LIKE` clause stays as a second, narrower guard. It cannot be what
+    identifies a legacy row, but it makes double-prefixing unrepresentable
+    rather than merely unreachable, and a doubled prefix is not recoverable
+    either. `LIKE` treats `_` and `%` as wildcards, so it is only safe because
+    city names are plain lowercase ASCII containing neither; a future city name
+    with an underscore would need escaping here.
     """
     conn.execute("BEGIN IMMEDIATE")
     try:
         prefix = f"{city}{ids.SEPARATOR}"
         cursor = conn.execute(
             "UPDATE observations SET lot_id = ? || lot_id, city = ? "
-            "WHERE lot_id NOT LIKE ? || '%'",
+            "WHERE city = '' AND lot_id NOT LIKE ? || '%'",
             (prefix, city, prefix),
         )
         rewritten = cursor.rowcount

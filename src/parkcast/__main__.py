@@ -32,6 +32,23 @@ def main() -> None:
 
     conn = store.connect(config.DB_PATH)
 
+    # Before anything reads the store. The first tick below writes namespaced
+    # ids, so any row still carrying a pre-namespacing one would sit in the same
+    # hot window as the namespaced rows for the same physical car park -- and
+    # `forecast.load_history` keys `current` and `counts` on that string, so the
+    # lot's history splits in two. That is the half feeding `Persistence` and
+    # `store.free_at`: the short-horizon forecast and the observed count on
+    # every card, wrong for as long as the split lasts and entirely plausible
+    # throughout. Waiting for prune to age the old rows out would mean two days
+    # of it on the only corpus this project has.
+    #
+    # Logged at INFO every boot, including the 0: the first run after the
+    # migration lands reports a large one-off number worth seeing, and every
+    # later run reporting 0 is the signal that it is idempotent and has nothing
+    # left to do.
+    rewritten = store.migrate_to_namespaced_ids(conn)
+    log.info("id migration rewrote %s pre-namespacing row(s)", rewritten)
+
     # The metadata blob is 2.85 MB and separate from the availability blob, so
     # it can be unavailable while collection would be perfectly fine. Dying
     # here costs ticks that cannot be re-fetched; starting with no capacities

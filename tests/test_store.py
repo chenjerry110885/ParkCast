@@ -177,6 +177,44 @@ def test_migration_handles_a_bare_feed_id_that_itself_contains_a_colon(tmp_path)
     assert conn.execute("SELECT lot_id FROM observations").fetchone()[0] == "kaohsiung:PL:0001"
 
 
+def test_migration_leaves_every_other_citys_rows_alone(tmp_path):
+    """The predicate was written when Taipei was the only source, as
+    `lot_id NOT LIKE 'taipei:%'`. Against today's six-city store that matches
+    every Kaohsiung, Tainan, Taoyuan, New Taipei and Hsinchu row, rewrites each
+    to `taipei:kaohsiung:PL0001` and stamps `city = 'taipei'` on it -- in place,
+    in one transaction, on the first boot after deploying. Unrecoverable.
+
+    So what marks a row as un-namespaced is `city = ''`, the column's
+    ALTER-TABLE default: a recorded fact about when the row was written, not a
+    guess from the shape of its id.
+    """
+    conn = store.connect(tmp_path / "hot.sqlite")
+    conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at,"
+                 " free_car, free_motor, quality)"
+                 " VALUES ('TPE0001', '', 100, 100, 5, NULL, 0)")
+    for city, raw in (("kaohsiung", "PL0001"), ("newtaipei", "010001"),
+                      ("tainan", "1"), ("taoyuan", "TY01"), ("hsinchu", "HC9")):
+        store.insert_snapshot(
+            conn,
+            FeedSnapshot(city, 300,
+                         (Observation(f"{city}:{raw}", 3, None, 200, TS_FEED),)),
+            {},
+        )
+
+    assert store.migrate_to_namespaced_ids(conn) == 1, "only the legacy row"
+
+    rows = dict(conn.execute("SELECT lot_id, city FROM observations"))
+    assert rows == {
+        "taipei:TPE0001": "taipei",
+        "kaohsiung:PL0001": "kaohsiung",
+        "newtaipei:010001": "newtaipei",
+        "tainan:1": "tainan",
+        "taoyuan:TY01": "taoyuan",
+        "hsinchu:HC9": "hsinchu",
+    }
+    conn.close()
+
+
 def test_source_health_round_trips(tmp_path):
     conn = store.connect(tmp_path / "hot.sqlite")
     store.record_source_health(conn, "tainan", observed_at=200, rows=268, usable=190, newest_ts=199, ok=True)
