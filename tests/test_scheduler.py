@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -9,8 +10,10 @@ from parkcast.collector import TickResult
 from parkcast.compact import day_bounds
 from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 from parkcast.grid import UNKNOWN
-from parkcast.metadata import Lot
+from parkcast.metadata import Lot, capacity_map, parse_metadata
+from parkcast.quality import Q
 from parkcast.scheduler import next_poll_ts, taipei_date
+from parkcast.sources import taipei
 
 
 @pytest.fixture(autouse=True)
@@ -1180,3 +1183,74 @@ def test_publish_artifacts_stamps_each_lots_free_count_at_the_reading(tmp_path):
 
     doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
     assert doc["lots"][0]["f"] == 12
+
+
+# --- end-to-end: real adapters and real metadata through publish_artifacts --
+#
+# Every test above builds both sides -- the seeded observations and the Lot
+# list -- from the same hand-written bare id (`_seed(conn, ..., lot="A")`
+# paired with `_make_lot("A")`). That is internally consistent and therefore
+# structurally blind to an id-*convention* split between the two: it cannot
+# distinguish "ids agree because they're both right" from "ids agree because
+# the test typed the same string twice." `sources.taipei.parse` has namespaced
+# `Observation.lot_id` since Task 4 (`ids.qualify("taipei", raw_id)`);
+# `metadata.parse_metadata` produced bare `Lot.id` until this fix, so
+# `publish_artifacts`'s `lot.id in history.counts.lot` filter (scheduler.py:108)
+# matched nothing, `ordered` came back empty, the "no lots survived" guard
+# fired, and publishing silently stopped on every real tick -- while the
+# collector process kept running and looked perfectly healthy. This test
+# drives both sides through the real production code paths instead.
+
+AVAIL_FIXTURE = Path(__file__).parent / "fixtures" / "avail_sample.json"
+DESC_FIXTURE = Path(__file__).parent / "fixtures" / "desc_sample.json"
+
+
+def test_publish_artifacts_end_to_end_with_the_real_taipei_adapters(tmp_path):
+    """Observations from the real availability parser, lots from the real
+    metadata parser -- not the same hand-typed id on both sides."""
+    avail_payload = json.loads(AVAIL_FIXTURE.read_text(encoding="utf-8"))
+    tick = taipei.parse(avail_payload, now=1788485010)
+
+    desc_payload = json.loads(DESC_FIXTURE.read_text(encoding="utf-8"))
+    lots = parse_metadata(desc_payload)
+    caps = capacity_map(lots)
+
+    # The capacity map must actually resolve a known lot, not silently default
+    # every one of them to NO_CAPACITY the way a bare/namespaced mismatch
+    # would (every lookup below would miss and this would read None). TPE0001
+    # is a real lot present in both fixtures, with a real, non-null capacity.
+    assert caps["taipei:TPE0001"] == 17, "a known lot's capacity must be found, not defaulted"
+
+    conn = store.connect(tmp_path / "hot.sqlite")
+    written = store.insert_snapshot(conn, tick.snapshot, caps)
+    assert written == len(tick.snapshot.observations) == 1174
+
+    # Confirms the capacity actually joined during the insert, not just that
+    # the dict has the right key: TPE0001 reports 9 free against a capacity
+    # of 17 (comfortably inside bounds), so its stored quality must be plain
+    # OK -- neither NO_CAPACITY (the map missed it) nor CLAMPED (it would take
+    # a coincidence to produce that from an unrelated mismatch).
+    quality = conn.execute(
+        "SELECT quality FROM observations WHERE lot_id = 'taipei:TPE0001'"
+    ).fetchone()[0]
+    assert Q(quality) == Q.OK
+
+    out_dir = tmp_path / "artifacts"
+    scheduler.publish_artifacts(conn, lots, out_dir)
+    conn.close()
+
+    # Before the fix this returned with nothing written at all -- the "no
+    # lots survived the history filter" guard refuses silently rather than
+    # publishing an empty grid, so the failure mode is a missing file, not a
+    # wrong one. 1069 is every lot from this tick that reported a real
+    # free_car, is present in the metadata roster, and serves cars -- computed
+    # by running this exact path once against the fixtures and pinned here so
+    # a future regression shows up as a row-count change, not just "empty".
+    grid_path = out_dir / "grid.bin"
+    assert grid_path.exists(), "publishing must not have refused"
+    header = artifacts.decode_header(grid_path.read_bytes())
+    assert header["n_lots"] == 1069
+
+    doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    assert doc["n_lots"] == len(doc["lots"]) == 1069
+    assert doc["roster_id"] == header["roster_id"]
