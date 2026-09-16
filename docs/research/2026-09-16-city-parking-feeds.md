@@ -17,7 +17,7 @@ No files under `D:\Projects\ParkCast\data\` were read. No other repo files were 
 | 基隆市 Keelung | `https://e-traffic.klcg.gov.tw/KeelungTraffic/pages/park.jsp/` (server-rendered **HTML table**, not JSON) | 2nd column (unlabelled, "剩餘停車格") | none | none (name only) | per-row timestamp, ~1–5 min | ~42 | none stated (page has no licence notice) |
 | 新竹市 Hsinchu City | `https://hispark.hccg.gov.tw/OpenData/GetParkInfo` | `FREEQUANTITY` / `TOTALQUANTITY` | `FREEQUANTITYMOT` / `TOTALQUANTITYMOT` — populated on 17/55 lots | `PARKNO` | live, per-record `UPDATETIME` | 55 | 政府資料開放授權條款-第1版 (per data.gov.tw mirror, dataset 129136) |
 | 嘉義市 Chiayi City | `https://iparking.chiayi.gov.tw/car/open` (server-rendered **HTML table**, not JSON) | "剩餘" column, format `NN成滿（count）` / `尚有空位（count）` / `滿場` | none | none (name only) | per-row timestamp, ~1 min | ~85 | none stated |
-| 新北市 New Taipei | `POST https://www.parkinginfo.ntpc.gov.tw/parkinginfo/public/getSpot.ashx` (empty body, `Content-Length: 0` required) | `NowCarSpace` (live) | none live — `motoNum` is *capacity* only | `parkingLotId` | per-record `recdate`/`rectime`, ~1 min | 3,824 (1,920 with a live car count) | none stated (site's own endpoint; no robots.txt) |
+| 新北市 New Taipei | `POST https://www.parkinginfo.ntpc.gov.tw/parkinginfo/public/getSpot.ashx` (empty body, `Content-Length: 0` required) | `NowCarSpace` (live) | none live — `motoNum` is *capacity* only | `parkingLotId` | per-record `recdate`/`rectime`, ~1 min | 1,373 distinct lots in 3,824 records (416 with a live car count) | none stated (site's own endpoint; no robots.txt) |
 
 7 of the 8 rows above (all but New Taipei) were fetched successfully and returned live, current-timestamped data at test time. New Taipei's URL pattern and field names are confirmed correct from the platform's own dataset catalogue, but the file itself could not be retrieved (see the New Taipei section).
 
@@ -50,7 +50,7 @@ POST https://www.parkinginfo.ntpc.gov.tw/parkinginfo/public/getSpot.ashx
 Content-Length: 0        # required -- without it the server answers 411
 ```
 
-HTTP 200, 500,802 bytes, `text/plain; charset=utf-8`, a JSON array of **3,824 records**. Optional `?town=<district>` narrows it; no argument returns the whole city.
+HTTP 200, 500,802 bytes, `text/plain; charset=utf-8`, a JSON array of **3,824 records, holding 1,373 distinct `parkingLotId`s** -- a lot recurs up to 12 times, so the record count is not a lot count (measured 2026-09-16 through the shipped adapter; the first version of this document mistook one for the other). Optional `?town=<district>` narrows it; no argument returns the whole city.
 
 Fields: `parkingLotId`, `parkingLotName`, `owner`, `parkinglotAddress`, **`NowCarSpace`**, `businessHours`, `chargingstandard`, `RemarkRate`, `operationType`, **`recdate`** (ROC date, e.g. `1150916`), **`rectime`** (`HHMMSS`), **`Lat`**, **`Lng`** (WGS84 strings, no projection needed), `companyTel`, `message`, `parkingLotTel`, `dimensionType`, `parkingFee`, **`carNum`**, **`motoNum`**, `drawLots`, `titleHolder`, `company`.
 
@@ -58,7 +58,7 @@ Fields: `parkingLotId`, `parkingLotName`, `owner`, `parkinglotAddress`, **`NowCa
 - `carNum` / `motoNum` are **capacity**, not availability — present on all 3,824. So New Taipei gives motorcycle *capacity* but no live motorcycle count.
 - `message` carries a capacity breakdown string including 機車位, 身障機車位, 重型機車位, 充電式機車位.
 - `recdate`/`rectime` are **per record**, and were current at fetch time (09:45 for a 09:45 fetch) — better than Taipei, which has one timestamp for the whole feed.
-- This is more coverage than the delisted dataset (3,824 records vs 1,249), because it includes private as well as public lots.
+- This is still more coverage than the delisted dataset (1,373 distinct lots vs 1,249), because it includes private as well as public lots.
 - No `robots.txt` on the host (404). No licence stated on the endpoint; the equivalent open dataset is 政府資料開放授權條款-第1版.
 
 **Static metadata** (still on the open-data platform, active, fetches fine):

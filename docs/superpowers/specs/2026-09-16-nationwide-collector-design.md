@@ -15,13 +15,13 @@ This spec covers **collection and storage only**. Showing other cities in the ap
 | City | Lots | Live car counts | Live 機車 counts |
 |---|---|---|---|
 | 臺北市 | 1,165 | yes | **yes** (471 lots) |
-| 新北市 | 3,824 | yes (1,920) | no — capacity only |
+| 新北市 | 1,373 | yes (416) | no — capacity only |
 | 高雄市 | 1,447 | yes | **yes** (120 lots) |
 | 臺南市 | 268 | yes | **yes** (20 lots) |
 | 桃園市 | 246 | yes | no |
 | 新竹市 | 55 | yes | **yes** (17 lots) |
 
-Roughly **7,000 lots, ~5,000 reporting live** — against 1,090 today.
+Roughly **4,550 lots** — against 1,090 today. (The first draft of this table said ~7,000, having read New Taipei's 3,824 *records* as 3,824 lots; it holds 1,373 distinct ones. Corrected 2026-09-16 from measurements through the shipped adapters.)
 
 **Deliberately excluded.** 臺中市: its `AvailableCarRGB` / `AvailableMotorRGB` are traffic-light colours, never counts; storing a three-level status in an integer column would quietly poison the corpus. 基隆市 and 嘉義市: real live data, but server-rendered HTML with no lot id, coordinates or capacity — scraping worth doing only once the JSON cities are in. On-street 路邊停車格 everywhere: a different data model.
 
