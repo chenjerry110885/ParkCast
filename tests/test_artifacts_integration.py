@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from parkcast import config, store
+from parkcast import config, ids, store
 from parkcast.artifacts import HEADER_SIZE, build_lots_json, decode_header, encode_grid
 from parkcast.forecast import Blend, load_history
 from parkcast.grid import UNKNOWN, build_grid
@@ -43,17 +43,30 @@ def test_end_to_end_over_real_observations(tmp_path):
     assert history.latest_ts > 0
     assert len(history.recent) > 500, "expected a citywide history"
 
+    # Three id conventions meet here, exactly as they do in `publish_city`, and
+    # the live snapshot may be either side of the startup migration:
+    #   * `history.recent` is keyed however the store holds it -- bare on a
+    #     pre-migration snapshot, namespaced after -- so the grid's lookups use
+    #     those keys verbatim;
+    #   * a `Lot.id` is always namespaced, which is what `as_stored` guarantees
+    #     for a key that may still be legacy;
+    #   * the published roster is always bare, on both sides of the pair.
+    # Hashing the bare form on both sides is what makes the assertion below a
+    # statement about the roster rather than about which convention it is
+    # spelled in.
     lot_ids = sorted(history.recent)
+    namespaced = [ids.as_stored(i) for i in lot_ids]
+    published = [ids.bare(i) for i in namespaced]
     grid = build_grid(Blend(history), lot_ids, history.latest_ts)
     blob = encode_grid(grid, generated_at=history.latest_ts + 30,
-                       base_data_ts=history.latest_ts, lot_ids=lot_ids)
+                       base_data_ts=history.latest_ts, lot_ids=published)
 
     header = decode_header(blob)
     assert header["n_lots"] == len(lot_ids)
     assert len(blob) == HEADER_SIZE + len(lot_ids) * 24
     doc = json.loads(build_lots_json(
         [Lot(id=i, name=i, area="", lot_type="", capacity_car=None,
-             lat=25.0, lon=121.5, service_time="", fare_text="") for i in lot_ids],
+             lat=25.0, lon=121.5, service_time="", fare_text="") for i in namespaced],
         generated_at=history.latest_ts + 30, base_data_ts=history.latest_ts,
     ))
     assert doc["roster_id"] == header["roster_id"], (
