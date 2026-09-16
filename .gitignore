@@ -21,6 +21,7 @@ web/.dev-artifacts/
 .superpowers/
 # Isolated worktrees for in-progress plans
 .claude/worktrees/
+.worktrees/
 
 # Web app
 web/node_modules/
