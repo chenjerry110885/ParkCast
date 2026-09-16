@@ -333,7 +333,7 @@ do today.
    are done**; steps 2, 4 and 5 remain.
 
    **Done, 2026-09-16 21:34–21:56 Taipei.** Backup at
-   `D:\Projects\parkcast-backups6-09-16-2134-before-nationwide` (all three WAL files, 43 MB).
+   `D:\Projects\parkcast-backups\2026-09-16-2134-before-nationwide` (all three WAL files, 43 MB).
    The migration **rewrote 669,564 rows and dropped 0 twins** — 0 is the right answer for a clean
    whole-branch deploy, since twins only arise from a partial one. It took **11 minutes 43 seconds**,
    not the ~47 s a reviewer measured on a synthetic store: every row of a `WITHOUT ROWID` table moves
