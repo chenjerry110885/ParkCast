@@ -21,7 +21,7 @@
  *     rebuilt at a different resolution or a stale reading moves the strip
  *     with it instead of offering a time the model never forecast.
  */
-import { useEffect, useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, type KeyboardEvent } from "react";
 import { formatClock, relativeMinutes } from "../arrival";
 import { fillTemplate, t, type Lang } from "../i18n";
 
@@ -46,7 +46,6 @@ export interface ArrivalStripProps {
 export function ArrivalStrip({ options, value, nowSec, onChange, expired, lang }: ArrivalStripProps) {
   const s = t(lang);
   const stripRef = useRef<HTMLDivElement>(null);
-  const sweeping = useRef(false);
   const show = !expired && options.length > 0;
 
   // Keep the selected chip in view -- and, if focus was already inside the strip
@@ -67,24 +66,6 @@ export function ArrivalStrip({ options, value, nowSec, onChange, expired, lang }
     if (next !== undefined) onChange(next);
   }
 
-  // A sweep: press anywhere on the strip and drag; the chip under the pointer becomes the selection.
-  function chipUnder(event: PointerEvent<HTMLDivElement>): number | undefined {
-    const el = typeof document.elementFromPoint === "function"
-      ? document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-ts]")
-      : null;
-    return el ? Number(el.dataset["ts"]) : undefined;
-  }
-  function onPointerDown(event: PointerEvent<HTMLDivElement>) {
-    if (event.pointerType === "mouse" && event.button !== 0) return;
-    sweeping.current = true;
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-  }
-  function onPointerMove(event: PointerEvent<HTMLDivElement>) {
-    if (!sweeping.current) return;
-    const ts = chipUnder(event);
-    if (ts !== undefined && ts !== value) onChange(ts);
-  }
-  function onPointerUp() { sweeping.current = false; }
 
   return (
     <div className="arrival">
@@ -97,8 +78,7 @@ export function ArrivalStrip({ options, value, nowSec, onChange, expired, lang }
           below is a sentence about what lies past the last chip, and a non-radio
           child of a `radiogroup` is a child assistive tech has to guess at. It
           still scrolls with the chips, because the scroller is the wrapper. */}
-      <div className="arrival__strip" ref={stripRef}
-        onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}>
+      <div className="arrival__strip" ref={stripRef}>
         <div className="arrival__chips" role="radiogroup" aria-label={s.arrivalGroupLabel}>
           {show && options.map((ts, index) => (
             <button key={ts} type="button" role="radio" aria-checked={ts === value} className="chip" data-ts={ts}

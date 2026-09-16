@@ -80,6 +80,8 @@ const HALO_OPACITY_DIM = 0.2;
 const HOVER_HALO_OPACITY = 0.5;
 /** One breath per second, each one slower than a blink: noticeable, not busy. */
 const PULSE_EVERY_MS = 1000;
+/** Half-beats: three dim-and-back cycles, then the halo holds still. */
+const PULSE_STEPS = 6;
 const PULSE_FADE_MS = 900;
 /** The glide to a lot the driver tapped in the list. */
 const CENTRE_MS = 600;
@@ -381,9 +383,14 @@ export default function MapView({
     });
   }, [map, centerNonce]);
 
-  // The best pick breathes: one slow fade of its own halo's stroke, forever, so
-  // the dot the ranking chose can be found on a city of dots without being the
-  // only thing on the screen that moves fast. Opacity and not radius, because a
+  // The best pick announces itself with three slow beats of its own halo's
+  // stroke and then holds still. Forever was the first version, and it cost
+  // more than it looked: each paint change re-renders the whole map, so a
+  // 1 s pulse with a 900 ms transition keeps MapLibre redrawing every tile and
+  // label at 60 fps for as long as the tab is open -- on a large display, a
+  // constant CPU load in aid of an animation nobody is still watching. Three
+  // beats is enough to find the dot; after that the halo is a static ring,
+  // which is what actually marks it. Opacity and not radius, because a
   // changing radius reads as a changing *value* on a map whose circles already
   // mean something. Only the best layer is touched -- the selection's ring is
   // steady, because the driver is not waiting to be convinced about it.
@@ -394,10 +401,13 @@ export default function MapView({
       if (map.getLayer(LOTS_BEST_HALO_LAYER) === undefined) return;
       map.setPaintProperty(LOTS_BEST_HALO_LAYER, "circle-stroke-opacity", opacity);
     };
-    let dim = false;
+    let step = 0;
     const timer = window.setInterval(() => {
-      dim = !dim;
-      fade(dim ? HALO_OPACITY_DIM : HALO_OPACITY);
+      step += 1;
+      fade(step % 2 === 1 ? HALO_OPACITY_DIM : HALO_OPACITY);
+      // Stops itself rather than waiting for unmount: a new best pick restarts
+      // the effect, and nothing else needs the timer alive.
+      if (step >= PULSE_STEPS) window.clearInterval(timer);
     }, PULSE_EVERY_MS);
     return () => {
       window.clearInterval(timer);

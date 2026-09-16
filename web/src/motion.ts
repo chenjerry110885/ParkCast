@@ -82,7 +82,14 @@ export function measureRects(entries: Iterable<[string, Element]>): Map<string, 
  * (`previous` undefined -- first render), when the move is sub-pixel, when
  * `Element.animate` isn't available, or under reduced motion.
  */
-export function flipMove(el: Element, previous: DOMRect | undefined, durationMs: number): void {
+/** The two fields `flipMove` reads. A `DOMRect` satisfies it; so does a rect a
+ *  caller has rebased into another coordinate space (see `LotList`). */
+export interface Corner {
+  left: number;
+  top: number;
+}
+
+export function flipMove(el: Element, previous: Corner | undefined, durationMs: number): void {
   if (previous === undefined || prefersReducedMotion()) return;
   const animate = (el as Element & { animate?: Element["animate"] }).animate;
   if (typeof animate !== "function") return;

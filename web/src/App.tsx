@@ -582,7 +582,7 @@ export default function App() {
    * halo, the centred view and the card's selected state can never disagree
    * about which lot is current.
    */
-  function selectLot(id: string) {
+  const selectLot = useCallback((id: string) => {
     const lot = artifacts?.lots.lots.find((l) => l.id === id);
     setSelectedLotId(id);
     // The nonce, not the coordinates, is what makes the map move: tapping the
@@ -591,7 +591,9 @@ export default function App() {
     // On a phone the sheet is covering the half of the map the lot just moved
     // into; opening it a step is what makes the selection visible at all.
     if (!desktop && snap === "peek") setSnap("half");
-  }
+    // Stable across a hover-only render, which is what lets `LotList`'s memo
+    // hold: a fresh closure here would defeat it on every mouse move.
+  }, [artifacts, desktop, snap]);
 
   /**
    * A place chosen by name. Straight into the one destination path a map tap

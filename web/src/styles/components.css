@@ -86,11 +86,16 @@
 
 /* ------------------------------------------------------------ freshness badge */
 .fresh { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--accent); border-radius: var(--radius-pill); padding: 4px 8px; }
-.fresh__dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; animation: breathe 2.4s ease-in-out infinite; }
+/* No idle animation. A dot that breathes forever keeps the compositor
+   producing frames for as long as the tab is open, which on a large screen is
+   real CPU spent saying nothing; it now beats once, with the badge, when a
+   fresher reading actually lands. */
+.fresh__dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 .fresh--warn { color: var(--warn); }
 .fresh--expired { color: var(--unknown); }
 .fresh--expired .fresh__dot { animation: none; }
 .fresh--flash { animation: flash 700ms var(--ease-out) 1; }
+.fresh--flash .fresh__dot { animation: breathe 700ms var(--ease-out) 1; }
 
 /* ------------------------------------------------------------ search */
 .search { position: relative; }
@@ -180,12 +185,16 @@
 .fact__label { display: block; font-size: 11px; color: var(--muted); }
 
 /* ------------------------------------------------------------ ring */
-.ring { position: relative; width: 64px; height: 64px; flex: 0 0 auto; display: grid; place-items: center; border-radius: 50%; }
+/* `align-content` as well as `place-items`: without it the two rows stretch to
+   fill the 64px box, which pushed the number to the top half and the label onto
+   the stroke at the bottom. The side padding keeps a wide label (`有車位`) off
+   the arc. */
+.ring { position: relative; width: 64px; height: 64px; flex: 0 0 auto; display: grid; place-items: center; align-content: center; padding: 0 7px; border-radius: 50%; }
 .ring__svg { position: absolute; inset: 0; transform: rotate(-90deg); }
 .ring__track { fill: none; stroke: var(--unknown-soft); stroke-width: 6; }
 .ring__arc { fill: none; stroke: var(--ring-colour, var(--accent)); stroke-width: 6; stroke-linecap: round; transition: stroke var(--dur-base); }
 .ring__value { position: relative; font-size: 17px; font-weight: 800; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1; }
-.ring__label { position: relative; font-size: 9px; font-weight: 600; color: var(--muted); margin-top: 2px; }
+.ring__label { position: relative; font-size: 9px; font-weight: 600; line-height: 1.1; white-space: nowrap; color: var(--muted); margin-top: 1px; }
 .ring--unknown .ring__value { font-size: 11px; color: var(--unknown); font-weight: 700; }
 .ring--unknown .ring__arc { display: none; }
 .ring--glow { box-shadow: 0 0 0 4px var(--accent-soft), 0 6px 16px rgba(15, 181, 165, 0.25); }

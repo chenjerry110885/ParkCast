@@ -20,5 +20,5 @@ button { user-select: none; -webkit-tap-highlight-color: transparent; cursor: po
 /* Frosted glass, with a solid fallback where backdrop-filter is unsupported. */
 .glass { background: var(--glass-solid); }
 @supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
-  .glass { background: var(--glass); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
+  .glass { background: var(--glass); -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
 }

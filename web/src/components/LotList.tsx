@@ -10,9 +10,9 @@
  * by lot id so a card's identity survives the reorder rather than being
  * decided by array position.
  */
-import { useLayoutEffect, useRef } from "react";
+import { memo, useLayoutEffect, useRef } from "react";
 import type { Lang } from "../i18n";
-import { DURATION, flipMove, measureRects } from "../motion";
+import { DURATION, flipMove, measureRects, type Corner } from "../motion";
 import type { Ranked } from "../rank";
 import { LotCard } from "./LotCard";
 
@@ -36,7 +36,7 @@ export interface LotListProps {
   onHover?: (id: string | null) => void;
 }
 
-export function LotList({
+function LotListInner({
   rows,
   lang,
   baseDataTs,
@@ -49,23 +49,51 @@ export function LotList({
   onHover,
 }: LotListProps) {
   const listRef = useRef<HTMLOListElement>(null);
-  const previous = useRef<Map<string, DOMRect>>(new Map());
+  const previous = useRef<Map<string, Corner>>(new Map());
+  const order = useRef("");
 
-  // FLIP: measure before React commits the new order (the ref holds last commit's rects), play after.
+  // FLIP, under two conditions the first version of this was missing -- both of
+  // which showed up as cards sliding around under a mouse that was only
+  // scrolling past them.
+  //
+  //   - **Only when the order actually changed.** This effect runs after every
+  //     commit, and a commit is not the same thing as a reorder: hovering a card
+  //     re-renders the list (the map's hover halo is driven from here), and
+  //     replaying the move on a commit that moved nothing is how a pointer
+  //     crossing the list came to drag it.
+  //   - **Measured against the list, not the viewport.**
+  //     `getBoundingClientRect` is viewport-relative, so scrolling between two
+  //     commits shifts every stored rect by the scroll distance and the
+  //     "correction" faithfully plays that distance back. Storing each card's
+  //     offset *within* the list makes the measurement scroll-invariant; it is
+  //     rebased onto the list's current origin at play time, which is the frame
+  //     `flipMove` measures in.
   useLayoutEffect(() => {
     const list = listRef.current;
     if (list === null) return;
     const items = [...list.querySelectorAll<HTMLElement>("[data-lot-id]")].map(
       (el): [string, HTMLElement] => [el.dataset["lotId"] ?? "", el],
     );
+    const ids = items.map(([id]) => id).join(",");
+    // Not on the first commit: every card is new, there is nowhere to play from.
+    const reordered = order.current !== "" && ids !== order.current;
+    order.current = ids;
+
     // Measured *before* anything is played: `flipMove` puts a transform on the
     // element it animates, and `getBoundingClientRect` reports the transformed
     // box -- so measuring afterwards would store each card's old position as the
-    // baseline for the next reorder, and the one after this would play from the
-    // wrong place. Measure the new layout, then play, then keep what was
-    // measured.
-    const current = measureRects(items);
-    for (const [id, el] of items) flipMove(el, previous.current.get(id), DURATION.base);
+    // baseline for the next reorder.
+    const origin = list.getBoundingClientRect();
+    const current = new Map<string, Corner>();
+    for (const [id, box] of measureRects(items)) {
+      current.set(id, { left: box.left - origin.left, top: box.top - origin.top });
+    }
+    if (reordered) {
+      for (const [id, el] of items) {
+        const was = previous.current.get(id);
+        flipMove(el, was && { left: was.left + origin.left, top: was.top + origin.top }, DURATION.base);
+      }
+    }
     previous.current = current;
   });
 
@@ -90,3 +118,10 @@ export function LotList({
     </ol>
   );
 }
+
+/**
+ * Memoised, because `App` re-renders on every hover: the hovered lot id lives up
+ * there (the map needs it), and without this each mouse move across the list
+ * re-rendered all twenty-five cards and re-ran the layout effect above.
+ */
+export const LotList = memo(LotListInner);

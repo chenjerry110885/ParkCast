@@ -554,6 +554,35 @@ describe("the map's selection, padding and taps", () => {
     }
   });
 
+  it("stops pulsing the best pick's halo after a few beats", () => {
+    // The pulse used to run for as long as the tab was open. Every paint change
+    // re-renders the whole map, so that was a permanent 60 fps redraw of every
+    // tile and label in aid of an animation nobody is still watching.
+    vi.useFakeTimers();
+    try {
+      render(
+        <MapView
+          lots={MAP_LOTS}
+          destination={null}
+          lang="en"
+          selectedId={null}
+          bestId="TPE_C"
+          centerRequest={null}
+          padding={NO_PADDING}
+        />,
+      );
+
+      vi.advanceTimersByTime(10_000);
+      const settled = (shared.map?.setPaintProperty.mock.calls ?? []).length;
+      expect(settled).toBeGreaterThan(0);
+
+      vi.advanceTimersByTime(60_000);
+      expect((shared.map?.setPaintProperty.mock.calls ?? []).length).toBe(settled);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not take a tap on a dot as a tap on the city", () => {
     const onPick = vi.fn();
     render(

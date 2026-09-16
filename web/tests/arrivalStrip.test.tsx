@@ -41,6 +41,20 @@ describe("ArrivalStrip", () => {
     expect(onChange).toHaveBeenLastCalledWith(BASE + 720);
   });
 
+  it("does not change the selection when a pointer is dragged across it", () => {
+    // It used to: pressing anywhere on the strip and moving selected whatever chip
+    // the pointer passed over, which on a desktop made a row of buttons behave like
+    // a slider nobody had asked for. Chips are chosen by clicking one.
+    const onChange = vi.fn();
+    render(<ArrivalStrip options={options} value={options[0]!} nowSec={NOW} onChange={onChange} expired={false} lang="en" />);
+    const first = screen.getByRole("radio", { name: "15:00" });
+    const last = screen.getByRole("radio", { name: "15:15" });
+    fireEvent.pointerDown(first, { clientX: 10, clientY: 10, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(last, { clientX: 300, clientY: 10, pointerId: 1 });
+    fireEvent.pointerUp(last, { clientX: 300, clientY: 10, pointerId: 1 });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("ends with the honest tail and renders no chips once the forecast has expired", () => {
     const { rerender } = render(<ArrivalStrip options={options} value={options[0]!} nowSec={NOW} onChange={() => {}} expired={false} lang="zh" />);
     expect(screen.getByText(t("zh").noForecastBeyond)).toBeInTheDocument();
