@@ -463,6 +463,88 @@ the first and last of those, `LotCard.tsx` the second, `ArrivalStrip.tsx` the th
   the probability, the walking time and the price as three tiles a driver can weigh for themselves,
   exactly as before the redesign.
 
+### The nationwide collector (built 2026-09-16, on `feat/nationwide-collector`, not yet live)
+
+The collector is no longer one feed. `src/parkcast/sources/__init__.py` defines a `Source` protocol
+(`city: str`, `fetch(*, now: int) -> SourceTick`) and one adapter module per city under
+`src/parkcast/sources/` — `taipei.py`, `newtaipei.py`, `kaohsiung.py`, `tainan.py`, `taoyuan.py`,
+`hsinchu.py` — registered in `SOURCES: dict[str, Source]`. Each owns its own transport, field names
+and not-reporting sentinel; none of that leaks into a shared module. Full per-city reference,
+including every sentinel and quirk below: [`docs/sources.md`](docs/sources.md).
+
+**Every adapter parses by rule, not by enumerated sentinel.** `quality.clean_count` maps any negative
+int and any non-numeric value to `None`; each city's own sentinel (Taipei's `-9`, New Taipei's
+`null`/`-1`/`-2`, Kaohsiung's `-1`/`-2`) rides that one rule rather than being special-cased. It paid
+off twice on this branch with zero adapter changes: Kaohsiung's `motorcycleVacancy` also uses `-3`
+(undocumented anywhere), and Taoyuan puts the literal status text `開放中` ("open") in `surplusSpace`
+on roughly a fifth of its 246 lots instead of a count — `int("開放中")` raises exactly like a missing
+key, so `clean_count` absorbed it for free. **Taoyuan's usable yield is about 80%, not 100%**, as a
+result. Enumerating each city's known sentinels instead would have missed both and published a
+fabricated count.
+
+**Two cities' coordinate fields contradict their own names.** Tainan's `lnglat` holds latitude first
+despite the name; Taoyuan's `wgsY` holds the longitude. Tainan, Taoyuan and Hsinchu (whose own field
+names are correct, but are not trusted just for that) resolve the ordering at runtime: each parses
+both candidate values and asks `sources.geo.in_taiwan` which ordering, if either, lands inside the
+bounding box, dropping the lot only if neither does — nothing hard-codes an ordering from a field's
+name in those three adapters. New Taipei and Kaohsiung validate one expected ordering directly, with
+no swap attempt; their `Lat`/`Lng` and `lat`/`lng` fields are unambiguous and were live-verified
+correct, but a seventh city should not be assumed to get the same dual-check without checking its own
+adapter. (Taipei's own metadata path has needed
+similar discipline since before this branch — see `geo.py`'s `_from_entrance`, *"Despite the names,
+Xcod is LATITUDE and Ycod is LONGITUDE"* — but hard-codes the known swap rather than testing for it.)
+A silent swap would not raise; it would put a whole city's lots in the sea and rank them by nonsense
+distances, which is worse than a dropped lot.
+
+**Identity.** Lot ids are namespaced `"{city}:{feed id}"` (`ids.qualify`/`ids.bare`/`ids.city_of`,
+`SEPARATOR = ":"`) everywhere inside the store, the forecaster and `liveness` — New Taipei and Tainan
+both use bare numeric feed ids, so an unqualified id cannot name a lot uniquely. Published artifacts
+strip the namespace back off with `ids.bare` (`artifacts.build_lots_json`'s `id` field, and
+`roster_id`): a shard is always exactly one city, so the namespace would be dead weight on every row,
+and — more importantly — the app's stored "recent lots" key on the bare id it already knows, so a
+namespaced id there would orphan every saved lot.
+
+**Per-city artifacts.** `artifacts.grid_name`/`lots_name` shard by city: `grid-{city}.bin` /
+`lots-{city}.json`, except Taipei, which **keeps the original unsuffixed `grid.bin`/`lots.json`**
+(`artifacts.UNSUFFIXED_CITY`) because the deployed app and every cached copy already fetch those exact
+URLs. `cities.json` (`artifacts.build_cities_json`) is the index: which shards exist, each with its
+lot count, `base_data_ts` and bounding box, so the app can discover a city without a release.
+`scheduler.publish_city` publishes each city independently — one city's empty or collapsed publish
+leaves its own shard and its own `cities.json` entry untouched, and cannot touch any other city's.
+
+**`data_ts` is per observation, not per tick**, and carries which of three kinds produced it
+(`feed.TS_FEED` / `TS_RECORD` / `TS_FETCH`, on `Observation.ts_kind`): Taipei stamps the whole feed
+once (`TS_FEED`); New Taipei, Tainan and Hsinchu stamp every record (`TS_RECORD`, falling back to
+`TS_FETCH` when a record's own timestamp is missing or unparseable); Kaohsiung and Taoyuan carry no
+timestamp anywhere and always take the fetch time (`TS_FETCH`). A fetch-time stamp is an assumption,
+not a reading, and a backtest must be able to exclude it — `ts_kind` is what lets it.
+
+**The startup migration.** `store.migrate_to_namespaced_ids`, called from `__main__.main` immediately
+after `connect` and before anything else reads the store, prefixes every pre-namespacing row
+(identified by `city = ''`, the column's own `ALTER TABLE` default — a recorded fact, not a guess from
+the id's shape) with `taipei:` in one transaction. It is idempotent (every run after the first
+rewrites 0 rows) and deduplicates legacy/namespaced twins of the same `(lot_id, data_ts)` — deleting
+the legacy copy and keeping the namespaced reading, because `(lot_id, data_ts)` is the primary key and
+cannot hold both. The cost: the legacy copy's `observed_at`, which was the truthful first-sighting
+time under `insert_snapshot`'s "first sighting wins" rule, is lost, so `lag` is very slightly
+overstated for those rows. **It has never run in production. `data/hot.sqlite` should be backed up
+before the first boot of this code** — see "What to do next" in `docs/state-of-play.md`. A failure
+logs and lets collection continue rather than killing the process (a split id window for a few hours
+costs precision; a collector that cannot boot costs every tick until someone runs SQL by hand).
+
+**The daily report cannot measure per-lot coverage for New Taipei, Tainan or Hsinchu.**
+`report.TICK_STAMPED_CITIES` is `{taipei, kaohsiung, taoyuan}` — cities where one collector fetch
+produces one `data_ts` for the whole tick, so `COUNT(DISTINCT data_ts)` is a meaningful tick count and
+a lot short of it is a lot a tick actually missed. The other three stamp `data_ts` per record, and
+`insert_snapshot`'s primary key is `(lot_id, data_ts)`, so a sensor whose reading has not changed
+writes no new row at all — a healthy slow sensor and a lot a tick genuinely missed are
+indistinguishable in the stored data. `report.CityCoverage` reports `tick_based=False` and leaves
+`ticks_seen`/`ticks_expected`/`lots_with_gaps` as `None` for those three rather than printing a number
+that would look like the others but measure something else; `polls_seen` (the collector's own fetch
+count) stands in as evidence the collector kept asking, without claiming to be a per-lot check.
+Lifting this would need each of those three feeds to distinguish "still X" from "not answering,"
+which none of them do today.
+
 ---
 
 # Workflow Orchestration
@@ -529,6 +611,14 @@ the first and last of those, `LotCard.tsx` the second, `ArrivalStrip.tsx` the th
   held-out data. A clean negative result is an acceptable, reportable outcome.
 - Deterministic and testable over clever. The evaluation section of the spec is protected
   from scope cuts.
+- **A test fixture that builds both sides of a comparison can only prove they agree with each
+  other.** Two near-misses on the nationwide-collector branch, both caught only by review, not by
+  the suite that claimed to cover them: `metadata.parse_metadata` kept emitting bare lot ids after
+  `Observation.lot_id` became namespaced, and every publish test passed anyway because it built both
+  `lots` and `observations` from the same bare id; separately, the tests for the cold-Parquet id fix
+  wrote *namespaced* cold fixtures, which the real pre-namespacing corpus does not contain. Build the
+  two sides of an id (or format, or convention) boundary from genuinely different sources, or from
+  the real production shape — never from one shared literal.
 
 ## Stack
 

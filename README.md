@@ -61,13 +61,17 @@ Figures at the time of writing (2026-09-14):
 | Lots withheld as *not updating* | **112** at the first live publish (2026-09-14 09:11); 133 on a snapshot at 01:13 — the count moves as feeds freeze and recover (see the limitations) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **34.5 KB gzipped**, both files |
-| Tests | **355** Python (3 skipped) · **288** web · **66** Worker · **50** scripts |
+| Tests | **527** Python (3 skipped) · **288** web · **66** Worker · **50** scripts |
 
 Plans 1 through 3e are complete: the collector, the forecast grid, the ranked list, a map-first
 installable offline-capable app with place search, and — 3e — no forecast at all for a car park
-whose feed has stopped updating. **The forecast has been evaluated three times**; see the
-limitations below for what that found. A *trained* model is still to come, and deliberately so: the
-corpus needs weeks more before beating the baselines would mean anything.
+whose feed has stopped updating. The **nationwide collector** — six cities' feeds behind one
+`Source` protocol, namespaced lot ids, per-city artifacts (`docs/sources.md`) — is code-complete and
+tested on `feat/nationwide-collector`, staged for a live rollout one city at a time; the app itself
+still shows Taipei only until that rollout finishes and a following spec teaches it to read the other
+cities' shards. **The forecast has been evaluated three times**; see the limitations below for what
+that found. A *trained* model is still to come, and deliberately so: the corpus needs weeks more
+before beating the baselines would mean anything.
 
 ## The app
 

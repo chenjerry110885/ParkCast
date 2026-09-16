@@ -16,10 +16,12 @@ needs the explicit glob — a bare directory runs nothing on this Node). **The a
 uploads each forecast to one KV key, and the app, the basemap tiles and the label fonts are static assets.
 See [`docs/deploy.md`](deploy.md).
 
-The three newest things in this document: the collector's first unbroken days on the desktop turned up
+The four newest things in this document: the collector's first unbroken days on the desktop turned up
 **car parks whose readings never move**, which the app was publishing as certainties; a second and
-third evaluation **reversed the first one's verdict** on long horizons; and the app is now **map-first**
-after a UI/UX redesign shipped the same day as deployment — see "UI redesign — 2026-09-15" below.
+third evaluation **reversed the first one's verdict** on long horizons; the app is now **map-first**
+after a UI/UX redesign shipped the same day as deployment — see "UI redesign — 2026-09-15" below; and
+a **nationwide collector** for five more cities is code-complete and tested on a branch, not yet live
+— see "Nationwide collection" below.
 
 ## Which machine is which
 
@@ -231,6 +233,67 @@ transparent pseudo-element carrying the target.
 
 ---
 
+## Nationwide collection — built 2026-09-16 on `feat/nationwide-collector`, not yet live
+
+Twelve tasks against [`docs/superpowers/specs/2026-09-16-nationwide-collector-design.md`](superpowers/specs/2026-09-16-nationwide-collector-design.md)
+took the collector from one feed to six: 臺北市, 新北市, 高雄市, 臺南市, 桃園市, 新竹市, each behind its
+own adapter under `src/parkcast/sources/` (`CLAUDE.md`'s "The nationwide collector" section; per-feed
+detail in the new [`docs/sources.md`](sources.md)). It is code-complete and tested on the branch —
+**527 Python tests, 3 skipped**, measured by running `./.venv/Scripts/python.exe -m pytest -q` in
+this worktree. The web, Worker and script suites are untouched by this branch and could not be run
+here (a fresh worktree has no `node_modules` in `web/` or `worker/`), so their figures above —
+**288 web · 66 Worker · 50 scripts** — are carried forward from the last real run, unchanged, not
+re-measured.
+
+**Nothing about this is live.** The deployed site still serves Taipei alone; the branch adds the
+collector and storage side only, per the spec's own scope, and turning cities on is a separate,
+staged operation the user runs against the live collector — see "What to do next" below. **Disk
+growth is deliberately not asserted here.** The spec's 150–400 MB/month estimate for the new load is
+explicitly the weakest number in it and is measured, not guessed, during the rollout: run New Taipei
+alone for a day, read the real `data/cold/` Parquet size, and extrapolate before turning the rest on.
+
+**Two things nearly reached production wrong, and both are the same shape of mistake.** A fixture
+that builds both sides of a comparison from the same id can only prove the two sides agree with each
+other, not that either is right:
+
+- `metadata.parse_metadata` kept emitting **bare** lot ids for several tasks after
+  `Observation.lot_id` became namespaced. Every publish test passed the whole time, because each one
+  seeded its lots and its observations from the same bare literal (`_seed(lot="A")` + `_make_lot("A")`) — internally
+  consistent, and exactly what production is not. Reached on this branch: publishing would have
+  stopped entirely (`lot.id in history.counts.lot` matches nothing once one side is bare and the
+  other namespaced), freezing the live site at its last artifact.
+- The cold Parquet corpus was namespaced only going forward — every day compacted before this branch
+  still holds Taipei's original bare `TPE0001` ids, and always will, because Parquet is never
+  rewritten. The fix (`ids.as_stored`, qualifying a bare id on read) needed a **bare** cold fixture to
+  even be tested — the tests already in the suite for this exact case wrote *namespaced* cold Parquet
+  fixtures, which the real corpus does not and will never contain, so they could not have caught the
+  bug they were meant to cover. Reached un-caught: Taipei's per-lot and per-bucket climatology would
+  have silently lost the entire pre-namespacing corpus and fallen back toward the citywide rate —
+  plausible-looking numbers, quietly wrong, for the one city with real history.
+
+Both were caught in review, not by the suite, and both are now written into `CLAUDE.md`'s
+project-specific standards as a general rule for the next test of this shape.
+
+**The hot-store id migration has never run in production.** `store.migrate_to_namespaced_ids` runs
+once at startup (`__main__.main`, before anything else touches the store) and rewrites every
+pre-namespacing row in the 48-hour hot window to `taipei:<id>` in one transaction. It is idempotent
+and deliberately deduplicates a legacy/namespaced pair of the same `(lot_id, data_ts)` by deleting the
+legacy copy — it is the same reading, so nothing is lost except that copy's `observed_at`, which was
+the more truthful first-sighting time, making `lag` very slightly overstated for those rows. A
+failure is logged and collection carries on rather than the process dying. **Before the first boot of
+this code in production, back up `data/hot.sqlite`** — see the runbook note in "What to do next".
+
+**The daily report cannot measure per-lot coverage for New Taipei, Tainan or Hsinchu.** Those three
+stamp `data_ts` per record rather than per tick, and the hot store's primary key is
+`(lot_id, data_ts)`, so a sensor whose reading has not changed writes no new row at all — a healthy
+slow sensor and a lot a tick genuinely missed look identical in the stored data. `report.py` says so
+explicitly (`tick_based=False`, no `ticks_seen`/`lots_with_gaps` figure) rather than printing a number
+that would look like the tick-based cities' but measure something else. Lifting this would need one of
+those feeds to distinguish "still reporting the same number" from "not answering," which none of them
+do today.
+
+---
+
 ## What to do next
 
 1. ~~Deploy Plan 3e to the collector~~ — **done 2026-09-14 09:06**; see "Which machine is which".
@@ -250,9 +313,22 @@ transparent pseudo-element carrying the target.
    (design: [`docs/superpowers/specs/2026-09-15-ui-redesign-design.md`](superpowers/specs/2026-09-15-ui-redesign-design.md)).
    The one follow-up it left open — `PlaceSearch`'s `loading` flag sticking when the box blurs
    mid-fetch — was closed in the review round the same day; see above.
-5. **Accumulate, then re-run the evaluation around 2026-10-01**, when every half-hour-of-week bucket
+5. **Roll out the nationwide collector, live, with the user** — code-complete on
+   `feat/nationwide-collector` (see "Nationwide collection" above), but turning it on is a live
+   operation against a running collector and a published site, not something to do unattended:
+   1. **Back up `data/hot.sqlite`** before the first boot of this code — the id migration has never
+      run in production.
+   2. `python -m pytest` green, then restart the collector with **Taipei alone** still enabled.
+      Confirm the live site is unchanged and `grid.bin` still republishes byte-for-byte.
+   3. Enable **New Taipei only**. Let it run a day, then read `data/cold/`'s actual growth and
+      compare it against the spec's 150–400 MB/month estimate — the number this plan deliberately
+      left unmeasured.
+   4. Enable the remaining four, one per tick-cycle, watching the per-source report.
+   5. The app keeps showing Taipei only until a following spec teaches it to read the other
+      cities' shards — the shards will exist on disk, but nothing reads them yet.
+6. **Accumulate, then re-run the evaluation around 2026-10-01**, when every half-hour-of-week bucket
    has three days behind it (at 09-13: 134 of 336 had none, 120 one, 82 two; Tuesday none at all).
-6. **Then** consider a trained model — against a persistence baseline that is strong on an
+7. **Then** consider a trained model — against a persistence baseline that is strong on an
    autocorrelated series, and a blend that now beats it.
 
 Also deferred: removing frozen lots from the climatology counts; retiring or recalibrating
