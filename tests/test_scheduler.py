@@ -319,6 +319,87 @@ def test_two_hanging_feeds_never_cost_taipei_the_following_slot(monkeypatch):
     )
 
 
+def test_three_hanging_feeds_never_cost_the_others_the_following_slot(monkeypatch):
+    """Pins the retry deadline's central judgement: it is checked against the
+    NEXT attempt's WORST CASE (`delay + len(pending) x HTTP_TIMEOUT_SEC`), not
+    against the clock alone.
+
+    Two hanging feeds (see the test above) happen not to distinguish the two
+    forms: the worst-case check abandons the retry at the same attempt a
+    plain `now >= deadline` check would, so that test is green under either
+    form. Three hanging feeds is where they diverge -- worked through below
+    with this module's config (`HTTP_TIMEOUT_SEC=30`, `RETRY_DELAYS_SEC=(45,
+    45, 60)`, `SLOT_RESERVE_SEC=45`, a 300s period, so `deadline = target +
+    255`):
+
+      attempt 1 (delay=0, always tried): 3 hangs x 30s -> now = target+90,
+        3 cities still pending.
+      attempt 2 (delay=45): worst_case = 45+3x30=135; target+90+135=target+225
+        <= deadline (255) either way -> proceeds. Sleep 45, 3 more hangs
+        -> now = target+225, still 3 pending.
+      attempt 3 (delay=45): worst_case = 135 again;
+        target+225+135=target+360 > deadline -- the WORST-CASE form abandons
+        here, ending the slot at target+225 (< 300: the next slot target is
+        still exactly +300). The PLAIN-CLOCK form instead checks
+        target+225 >= deadline (255)? No -- so it proceeds: sleep 45, 3 more
+        hangs -> now = target+360.
+      attempt 4 (delay=60): even the plain-clock form now abandons
+        (target+360 >= deadline), but the damage is done -- the slot has
+        already run to target+360, past its own 300s period, so
+        `next_poll_ts` (evaluated only once the loop exits) skips the
+        following slot: targets 600s apart instead of 300s.
+
+    This is the live case the reviewer demonstrated: swapping in the
+    plain-clock form left all 546 other tests green while re-opening exactly
+    this overrun. Verified by making that swap here and confirming this is
+    the test that fails.
+    """
+    clock = _VirtualClock(1788484080)
+    hanging = {"newtaipei", "kaohsiung", "hsinchu"}
+    sources = [SimpleNamespace(city=city) for city in
+               ("taipei", "newtaipei", "kaohsiung", "tainan", "taoyuan", "hsinchu")]
+    targets = _spy_next_poll_ts(monkeypatch)
+    polls = []
+
+    def collect(conn, to_try, capacities):
+        results = []
+        for source in to_try:
+            if source.city in hanging:
+                # A hung socket, charged to the clock exactly as the real one
+                # would be: `collect_all` asks each source in turn.
+                clock.sleep(config.HTTP_TIMEOUT_SEC)
+                results.append(TickResult(city=source.city, data_ts=0,
+                                          rows_written=0, advanced=False))
+            else:
+                polls.append((source.city, clock.now))
+                results.append(TickResult(city=source.city, data_ts=clock.now,
+                                          rows_written=1, advanced=True))
+        return results
+
+    slots = []
+
+    def fake_prune(conn, cutoff_ts):
+        slots.append(clock.now)
+        if len(slots) >= 3:
+            raise _StopLoop()
+        return 0
+
+    monkeypatch.setattr(scheduler.store, "prune", fake_prune)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sources=sources,
+                              sleep=clock.sleep, now_fn=clock.now_fn, archive=_no_archive)
+
+    assert [b - a for a, b in zip(targets, targets[1:])] == [300, 300], (
+        "three hanging feeds must not drift consecutive poll targets to "
+        "600s apart -- a plain now >= deadline check lets one more attempt "
+        "start than the slot's own 300s period can afford"
+    )
+    assert sum(1 for city, _ in polls if city == "taipei") == 3, (
+        "Taipei must be polled once per slot, not once per two"
+    )
+
+
 def test_a_slot_that_ends_early_still_spends_its_whole_retry_budget(monkeypatch):
     """The deadline must not cost a healthy feed its retries.
 

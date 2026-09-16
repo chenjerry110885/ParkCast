@@ -65,6 +65,22 @@ def select(names: str | None) -> list[Source]:
     failing a boot over. The message names both the typo and every valid
     choice, because the person reading it is mid-rollout at a terminal.
 
+    A MISTYPED SEPARATOR RAISES TOO, for the same reason. `names=","` is not
+    unset and not whitespace-only -- `names.strip()` is the truthy string
+    `","` -- so it fails the guard above and reaches the split; but splitting
+    it on `,` and stripping each piece yields no names at all, `unknown` is
+    then vacuously empty (there is nothing in `wanted` to be unknown), and the
+    old code fell through to `chosen = set()` and returned `[]`: zero sources,
+    silently. `run_forever` then has an empty `stall_slots`, so the
+    `all_stalled` guard's `bool(stall_slots) and all(...)` is `False` on an
+    empty dict and the loop polls nothing forever without ever raising --
+    exactly the silent-stall failure that guard exists to catch, and measured
+    live at 20 slots / 98 minutes with no `SystemExit`. An explicitly-set
+    value that selects no cities is strictly more dangerous than a mistyped
+    name (that one city vanishes with everything else still collecting; this
+    one takes the whole container down invisibly), so it is fatal here on the
+    same footing.
+
     Order and duplicates are taken from `SOURCES`, not from the string: the
     registry's order is the request order within a tick, and `PARKCAST_CITIES`
     is a set of cities to enable, not an instruction about sequencing.
@@ -78,6 +94,16 @@ def select(names: str | None) -> list[Source]:
             f"{CITIES_ENV} names {', '.join(unknown)}, which is not a city this "
             f"collector has an adapter for. Valid names: {', '.join(SOURCES)}. "
             f"Unset {CITIES_ENV} to collect all {len(SOURCES)}."
+        )
+    if not wanted:
+        # Reached only when `names` is non-empty after stripping (the guard
+        # above already sent unset/empty/whitespace-only elsewhere) but every
+        # comma-separated piece is itself empty -- e.g. ",", ",,", " , ".
+        raise ValueError(
+            f"{CITIES_ENV} is set to {names!r}, which names no cities at all "
+            f"once split on ',' -- every entry is empty. Valid names: "
+            f"{', '.join(SOURCES)}. Unset {CITIES_ENV} to collect all "
+            f"{len(SOURCES)}."
         )
     chosen = set(wanted)
     return [source for city, source in SOURCES.items() if city in chosen]

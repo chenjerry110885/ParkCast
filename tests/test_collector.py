@@ -302,6 +302,47 @@ def test_collect_all_never_raises_even_when_every_source_fails(conn):
     assert store.source_health(conn)["taoyuan"]["ok"] is False
 
 
+def test_a_fully_rejected_tick_keeps_the_last_known_good_ts_and_stays_stale(conn):
+    """Live case, 2026-09-16: a city with good history whose next tick is
+    entirely rejected by the plausibility bound (a >48h-stale cached payload,
+    or a feed clock reset) must keep reporting against its last known good
+    `last_ts`, not silently reset to 1970 and read as fresh.
+
+    `collect_once`'s `result.data_ts` is `FeedSnapshot.latest_data_ts` on the
+    *kept* observations -- 0 when every one of them was rejected. Passing that
+    0 straight through as `newest_ts` used to reach
+    `record_source_health`'s `COALESCE(excluded.last_ts, sources.last_ts)`
+    as a real value, overwriting a good `last_ts` with 0 and making
+    `report._source_line` treat the city as having no staleness clock at all
+    (falsy `last_ts` -> `age_min = None` -> the `ok` branch), even though the
+    very same feed with its rows kept would render STALE.
+    """
+    good_ts = 1_788_484_950
+    good = _StampedSource("tainan", rows=[("1", 5, good_ts)])
+    collector.collect_all(conn, [good], {}, now=good_ts)
+    assert store.source_health(conn)["tainan"]["last_ts"] == good_ts
+
+    # Next tick, well within the retry window but with a stamp far enough in
+    # the past that bound_data_ts rejects it outright -- the whole tick's
+    # only observation is thrown out, so `result.data_ts` is 0.
+    now = good_ts + 300
+    stale_payload = _StampedSource("tainan", rows=[("1", 5, now - 400 * 86_400)])
+    collector.collect_all(conn, [stale_payload], {}, now=now)
+
+    health = store.source_health(conn)["tainan"]
+    assert health["last_ts"] == good_ts, (
+        "a fully-rejected tick must not erase the staleness clock"
+    )
+    assert health["ok"] is True
+
+    # The outward symptom: the daily report must call this STALE, not ok --
+    # the same feed with its rows kept renders "268/268 rows usable STALE".
+    from parkcast.report import _source_line
+    line = _source_line("tainan", health, now=now + 3 * 3600)
+    assert "STALE" in line
+    assert line.strip().endswith("ok") is False
+
+
 def test_collect_all_records_health_for_a_successful_source(conn):
     source = _StubSource("tainan", rows=[("1", 5), ("2", None)])
 

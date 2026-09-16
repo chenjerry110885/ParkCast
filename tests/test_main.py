@@ -485,6 +485,32 @@ def test_an_empty_variable_is_treated_as_unset(monkeypatch, tmp_path):
     assert _capture_sources(monkeypatch, tmp_path) == list(entry.sources.SOURCES)
 
 
+def test_a_mistyped_separator_selecting_zero_cities_stops_the_boot(monkeypatch, tmp_path):
+    """`PARKCAST_CITIES=","` is not unset and not whitespace-only, so it must
+    not silently fall through to the "collect all" default nor to an empty
+    selection: `names.strip()` is the truthy string `","`, splitting on `,`
+    and stripping each piece yields no names at all, and the old code then
+    returned `[]` -- zero sources, no error. `run_forever`'s `all_stalled`
+    guard is `bool(stall_slots) and all(...)`, which is `False` on the empty
+    dict an empty source list produces, so the loop polled nothing forever
+    with no `SystemExit` -- the exact silent stall the guard exists to catch,
+    measured live at 20 slots / 98 minutes. A mistyped separator is more
+    dangerous than a mistyped city name (which only drops one city) and must
+    fail at least as loudly.
+    """
+    monkeypatch.setenv(entry.sources.CITIES_ENV, ",")
+    monkeypatch.setattr(entry.config, "DB_PATH", tmp_path / "hot.sqlite")
+    _capture_run_forever(monkeypatch, {})
+    monkeypatch.setattr(entry, "build_capacities", lambda day: {})
+
+    with pytest.raises(SystemExit) as exc:
+        entry.main()
+
+    assert "," in str(exc.value)
+    for city in entry.sources.SOURCES:
+        assert city in str(exc.value), "the message must list what IS valid"
+
+
 def test_an_unknown_city_stops_the_boot_and_names_the_valid_ones(monkeypatch, tmp_path):
     """Fatal on purpose. Every other startup failure here degrades, because the
     alternative costs ticks that cannot be re-fetched; this one is the opposite

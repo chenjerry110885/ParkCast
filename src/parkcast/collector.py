@@ -37,7 +37,10 @@ class TickResult:
     lots: tuple[metadata.Lot, ...] | None = None
     # Observations this tick whose `data_ts` could not be true and were
     # therefore not stored. Counted rather than merely logged so the number is
-    # available to a caller; see `bound_data_ts`.
+    # available to a caller; see `bound_data_ts`. Not read anywhere in `src/`
+    # or `scripts/` yet -- it exists for the daily report (`report.py`) to
+    # pick up later, once it grows a per-tick rejection line, not because
+    # nothing consumes it today was an oversight.
     rejected_ts: int = 0
 
 
@@ -239,7 +242,20 @@ def collect_all(
             ).fetchone()
             store.record_source_health(
                 conn, source.city, observed_at=observed_at,
-                rows=rows or 0, usable=usable or 0, newest_ts=result.data_ts, ok=True,
+                # `result.data_ts` is 0 when every observation this tick
+                # carried was rejected by `bound_data_ts` (or the tick held
+                # none to begin with) -- `FeedSnapshot.latest_data_ts` on an
+                # empty tuple. That 0 is not a timestamp; passing it straight
+                # through would have `record_source_health`'s
+                # `COALESCE(excluded.last_ts, ...)` treat it as a real one and
+                # overwrite this city's last known good `last_ts` with 1970,
+                # erasing the very staleness clock `_source_line` depends on
+                # -- a city with good history one tick ago would then report
+                # `ok` instead of `STALE` the moment a feed serves a
+                # stale-cached payload or resets its clock. `None` here is
+                # what actually reaches `COALESCE`'s fallback, exactly as a
+                # failed fetch already does in the `except` branch above.
+                rows=rows or 0, usable=usable or 0, newest_ts=result.data_ts or None, ok=True,
             )
         except Exception:
             # The tick itself already succeeded -- insert_snapshot committed

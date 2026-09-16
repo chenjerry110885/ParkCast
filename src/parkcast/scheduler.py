@@ -415,11 +415,16 @@ def run_forever(
                     # Abandoning the retry costs the pending cities one slot's
                     # reading -- which they have already failed to produce on
                     # every attempt so far -- while running it dry costs every
-                    # OTHER city the whole of the next slot. A genuinely
-                    # slow-but-healthy feed is unaffected in practice: it only
-                    # loses an attempt once its own responses have eaten the
-                    # slot, and a feed that answers in under a second still
-                    # gets all four.
+                    # OTHER city the whole of the next slot. What costs a
+                    # feed its remaining attempts is NOT its own latency:
+                    # `worst_case` is charged against every source still in
+                    # `pending`, so a feed that itself answers in under a
+                    # second can still lose attempts purely because OTHER
+                    # cities are pending alongside it. Measured with every
+                    # pending feed answering instantly: 4 pending fast feeds
+                    # get 3 attempts, 6 get only 2 -- the count shrinks with
+                    # how crowded `pending` is, not with how slow any one
+                    # feed has been.
                     log.warning(
                         "out of slot budget: abandoning the remaining retries "
                         "for %s -- a further attempt could run %ss past the "
