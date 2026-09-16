@@ -1,12 +1,16 @@
 """One collection tick: fetch, parse, validate, persist."""
-import json
 import time
 from dataclasses import dataclass
 
 import requests
 
 from parkcast import config, store
-from parkcast.feed import parse_availability
+from parkcast.sources import http, taipei
+# Re-exported: existing callers and tests import FeedError from here. It is
+# defined in sources.http, which collector.fetch_json now delegates to --
+# that import direction is what keeps this module and sources.http from
+# forming a cycle.
+from parkcast.sources.http import FeedError  # noqa: F401
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,32 +20,18 @@ class TickResult:
     advanced: bool
 
 
-class FeedError(RuntimeError):
-    """The feed answered with something we refuse to read."""
-
-
 def fetch_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC,
                max_bytes: int = config.MAX_FEED_BYTES) -> dict:
     """GET one feed blob as JSON, refusing redirects and oversized bodies.
 
-    Both feed URLs answer 200 directly (checked 2026-09-14), so a redirect is
-    never legitimate: following one would let a hijacked endpoint send this
-    container's requests anywhere, including the local network. The size cap
-    bounds memory against a body that never ends.
+    A thin delegation to `sources.http.get_json`, which holds the actual
+    redirect-refusal, declared-length and streaming-cap logic -- keeping it
+    in one place rather than two copies that could silently drift apart.
+    `requests` stays imported here (unused directly) so
+    `monkeypatch.setattr(collector.requests, "get", ...)` in existing tests
+    still patches the same `requests` module `get_json` calls into.
     """
-    with requests.get(url, timeout=timeout, allow_redirects=False, stream=True) as response:
-        if response.is_redirect or 300 <= response.status_code < 400:
-            raise FeedError(f"refusing a redirect from the feed (HTTP {response.status_code})")
-        response.raise_for_status()
-        declared = response.headers.get("Content-Length")
-        if declared is not None and declared.isdigit() and int(declared) > max_bytes:
-            raise FeedError(f"feed body of {declared} bytes exceeds {max_bytes}")
-        body = bytearray()
-        for chunk in response.iter_content(chunk_size=64 * 1024):
-            body += chunk
-            if len(body) > max_bytes:
-                raise FeedError(f"feed body exceeds {max_bytes} bytes")
-    return json.loads(bytes(body))
+    return http.get_json(url, timeout=timeout, max_bytes=max_bytes)
 
 
 def collect_once(
@@ -59,7 +49,7 @@ def collect_once(
     observed_at = int(time.time()) if now is None else now
     previous = store.latest_data_ts(conn)
 
-    snapshot = parse_availability(fetch(config.AVAILABILITY_URL), observed_at)
+    snapshot = taipei.parse(fetch(config.AVAILABILITY_URL), now=observed_at).snapshot
     rows = store.insert_snapshot(conn, snapshot, capacities)
 
     return TickResult(

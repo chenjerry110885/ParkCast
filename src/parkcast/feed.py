@@ -1,9 +1,14 @@
-"""Parse the Taipei availability endpoint into typed records."""
+"""Shared feed types: one observation, one tick's worth of them.
+
+Per-city parsing lives in `sources.<city>` -- `parse_updatetime` stays here
+because it is Taipei-specific date-format logic that `sources.taipei` and
+(for now) nothing else needs, and moving it would just be another import
+for no gain.
+"""
 from dataclasses import dataclass
 from datetime import datetime
 
 from parkcast import config
-from parkcast.quality import clean_count
 
 _UPDATETIME_FORMAT = "%a %b %d %H:%M:%S CST %Y"
 
@@ -42,27 +47,3 @@ def parse_updatetime(text: str) -> int:
     """
     naive = datetime.strptime(text.strip(), _UPDATETIME_FORMAT)
     return int(naive.replace(tzinfo=config.TAIPEI_TZ).timestamp())
-
-
-def parse_availability(payload: dict, observed_at: int) -> FeedSnapshot:
-    data = payload["data"]
-    data_ts = parse_updatetime(data["UPDATETIME"])
-
-    seen: set[str] = set()
-    observations: list[Observation] = []
-    for entry in data["park"]:
-        lot_id = entry["id"]
-        if lot_id in seen:
-            continue
-        seen.add(lot_id)
-        observations.append(
-            Observation(
-                lot_id=lot_id,
-                free_car=clean_count(entry.get("availablecar")),
-                free_motor=clean_count(entry.get("availablemotor")),
-                data_ts=data_ts,
-                ts_kind=TS_FEED,
-            )
-        )
-
-    return FeedSnapshot(city="taipei", observed_at=observed_at, observations=tuple(observations))

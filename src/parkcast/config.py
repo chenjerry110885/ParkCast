@@ -38,6 +38,12 @@ MAX_EXHAUSTED_SLOTS = 12
 LAT_MIN, LAT_MAX = 24.5, 25.5
 LON_MIN, LON_MAX = 121.0, 122.5
 
+# Nationwide bounding box, for the other five adapters' coordinate sanity
+# checks (`sources.geo.in_taiwan`). Wide enough to include Kinmen and Penghu,
+# both far west of the main island, without widening Taipei's own box above.
+TW_LAT_MIN, TW_LAT_MAX = 21.5, 25.5
+TW_LON_MIN, TW_LON_MAX = 118.0, 122.5
+
 # --- forecasting ---
 HORIZON_STEP_MIN = 5
 HORIZON_COUNT = 24            # +5 min through +120 min

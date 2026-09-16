@@ -1,29 +1,38 @@
 """Shared HTTP transport for per-city source adapters.
 
 Every feed request refuses redirects, honours a declared `Content-Length`
-over the cap, and caps the streamed body -- the same safety behaviour
-`collector.fetch_json` already has. `_read` holds that behaviour once so
-`get_json` and `post_json` cannot drift apart from each other; a later task
-moves Taipei's collector onto `get_json` too.
+over the cap, and caps the streamed body. `_read` holds that behaviour once
+so `get_json` and `post_json` cannot drift apart from each other -- and
+`collector.fetch_json` (Taipei's own transport) delegates to `get_json` too,
+so there is exactly one copy of this logic in the whole codebase.
 """
 import json
 
 import requests
 
 from parkcast import config
-from parkcast.collector import FeedError
 
 # Cloudflare and New Taipei's IIS both reject an anonymous default user
 # agent; this is the same honest name `upload.py` already sends.
 USER_AGENT = "parkcast-collector/1"
 
 
+class FeedError(RuntimeError):
+    """The feed answered with something we refuse to read.
+
+    Lives here, not in `collector.py`: `collector.fetch_json` delegates to
+    this module's `get_json`, and `collector.FeedError` is only a re-export
+    kept for backward compatibility with existing callers and tests.
+    """
+
+
 def _read(response, max_bytes: int) -> bytes:
     """Read one response body, refusing redirects and oversized bodies.
 
-    Verbatim copy of the body-reading logic in `collector.fetch_json`: a
-    redirect is never legitimate for these feeds, and the size cap bounds
-    memory against a body that never ends.
+    A redirect is never legitimate for these feeds: both feed URLs answer
+    200 directly, so following one would let a hijacked endpoint send this
+    container's requests anywhere, including the local network. The size cap
+    bounds memory against a body that never ends.
     """
     if response.is_redirect or 300 <= response.status_code < 400:
         raise FeedError(f"refusing a redirect from the feed (HTTP {response.status_code})")
