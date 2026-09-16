@@ -7,7 +7,7 @@ updating" because a collector outage looked like a frozen feed.
 import pytest
 
 from parkcast import config, liveness, store
-from parkcast.feed import FeedSnapshot, Observation
+from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 from parkcast.liveness import (Run, Withholding, last_update, not_updating,
                                unchanged_run, withheld_since)
 
@@ -110,8 +110,8 @@ def conn(tmp_path):
 
 def write(conn, ts, readings):
     """One tick. `readings` is {lot_id: free_car or None}."""
-    obs = tuple(Observation(lot, free, None) for lot, free in readings.items())
-    store.insert_snapshot(conn, FeedSnapshot(ts, ts + 200, obs), {lot: 50 for lot in readings})
+    obs = tuple(Observation(lot, free, None, ts, TS_FEED) for lot, free in readings.items())
+    store.insert_snapshot(conn, FeedSnapshot("taipei", ts + 200, obs), {lot: 50 for lot in readings})
 
 
 def ticks(hours, *, end=T):

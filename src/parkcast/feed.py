@@ -7,19 +7,31 @@ from parkcast.quality import clean_count
 
 _UPDATETIME_FORMAT = "%a %b %d %H:%M:%S CST %Y"
 
+TS_RECORD = "record"   # the feed stamped this lot
+TS_FEED = "feed"       # the feed stamped the whole payload
+TS_FETCH = "fetch"     # the feed stamped nothing; this is when we asked
+
 
 @dataclass(frozen=True, slots=True)
 class Observation:
     lot_id: str
     free_car: int | None
     free_motor: int | None
+    data_ts: int
+    # Which of the three above produced `data_ts`. A fetch-time stamp is an
+    # assumption, not a reading, and a backtest must be able to exclude it.
+    ts_kind: str
 
 
 @dataclass(frozen=True, slots=True)
 class FeedSnapshot:
-    data_ts: int
+    city: str
     observed_at: int
     observations: tuple[Observation, ...]
+
+    @property
+    def latest_data_ts(self) -> int:
+        return max((o.data_ts for o in self.observations), default=0)
 
 
 def parse_updatetime(text: str) -> int:
@@ -48,7 +60,9 @@ def parse_availability(payload: dict, observed_at: int) -> FeedSnapshot:
                 lot_id=lot_id,
                 free_car=clean_count(entry.get("availablecar")),
                 free_motor=clean_count(entry.get("availablemotor")),
+                data_ts=data_ts,
+                ts_kind=TS_FEED,
             )
         )
 
-    return FeedSnapshot(data_ts, observed_at, tuple(observations))
+    return FeedSnapshot(city="taipei", observed_at=observed_at, observations=tuple(observations))

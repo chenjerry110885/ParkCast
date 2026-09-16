@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from parkcast import store
-from parkcast.feed import FeedSnapshot, Observation
+from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 from parkcast.quality import Q
 
 
@@ -15,7 +15,7 @@ def conn(tmp_path):
 
 
 def snap(data_ts, observed_at, free_car=16):
-    return FeedSnapshot(data_ts, observed_at, (Observation("TPE0001", free_car, None),))
+    return FeedSnapshot("taipei", observed_at, (Observation("TPE0001", free_car, None, data_ts, TS_FEED),))
 
 
 def test_insert_then_read_back(conn):
@@ -80,20 +80,21 @@ def test_aborted_batch_writes_no_rows_at_all(conn):
     violates the primary key's implicit NOT NULL only once SQLite reaches
     that row — i.e. after the five good rows have already been written.
     """
-    good = tuple(Observation(f"L{i}", 10 + i, None) for i in range(5))
-    doomed = Observation(None, 10, None)  # type: ignore[arg-type]
+    good = tuple(Observation(f"L{i}", 10 + i, None, 1000, TS_FEED) for i in range(5))
+    doomed = Observation(None, 10, None, 1000, TS_FEED)  # type: ignore[arg-type]
 
     with pytest.raises(sqlite3.IntegrityError):
-        store.insert_snapshot(conn, FeedSnapshot(1000, 1180, good + (doomed,)), {})
+        store.insert_snapshot(conn, FeedSnapshot("taipei", 1180, good + (doomed,)), {})
 
     assert store.count_rows(conn) == 0, "the good rows of a failed tick must be rolled back"
 
 
 def test_connection_is_usable_after_an_aborted_batch(conn):
     """The rollback must leave no transaction open, or every later tick fails too."""
-    doomed = (Observation("A", 10, None), Observation(None, 10, None))  # type: ignore[arg-type]
+    doomed = (Observation("A", 10, None, 1000, TS_FEED),
+              Observation(None, 10, None, 1000, TS_FEED))  # type: ignore[arg-type]
     with pytest.raises(sqlite3.IntegrityError):
-        store.insert_snapshot(conn, FeedSnapshot(1000, 1180, doomed), {})
+        store.insert_snapshot(conn, FeedSnapshot("taipei", 1180, doomed), {})
 
     assert store.insert_snapshot(conn, snap(1300, 1480), {"TPE0001": 50}) == 1
     assert store.count_rows(conn) == 1
@@ -110,10 +111,11 @@ def test_free_at_returns_each_lots_count_at_one_tick(tmp_path):
     conn = store.connect(tmp_path / "t.sqlite")
     store.insert_snapshot(
         conn,
-        FeedSnapshot(1000, 1200, (Observation("A", 12, None), Observation("B", None, None))),
+        FeedSnapshot("taipei", 1200, (Observation("A", 12, None, 1000, TS_FEED),
+                                       Observation("B", None, None, 1000, TS_FEED))),
         {"A": 50, "B": 50},
     )
-    store.insert_snapshot(conn, FeedSnapshot(1300, 1500, (Observation("A", 7, None),)), {"A": 50})
+    store.insert_snapshot(conn, FeedSnapshot("taipei", 1500, (Observation("A", 7, None, 1300, TS_FEED),)), {"A": 50})
     # The parser already turned the feed's -9 sentinel into None (see feed.py's
     # clean_count call): seen, reported nothing -> None, not dropped.
     assert store.free_at(conn, 1000) == {"A": 12, "B": None}

@@ -56,7 +56,7 @@ def insert_snapshot(
         free_car, flags = validate(obs.free_car, capacity)
         free_motor, _ = validate(obs.free_motor, None)
         rows.append(
-            (obs.lot_id, snapshot.data_ts, snapshot.observed_at,
+            (obs.lot_id, obs.data_ts, snapshot.observed_at,
              free_car, free_motor, int(flags))
         )
 

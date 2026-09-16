@@ -22,7 +22,7 @@ from parkcast.evaluate import (
     skill,
     withheld_at,
 )
-from parkcast.feed import FeedSnapshot, Observation
+from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 from parkcast.liveness import not_updating
 from datetime import date
 
@@ -38,7 +38,7 @@ def conn(tmp_path):
 
 def write(conn, ts, lot="A", free=5, capacity=50):
     store.insert_snapshot(
-        conn, FeedSnapshot(ts, ts + 200, (Observation(lot, free, None),)), {lot: capacity}
+        conn, FeedSnapshot("taipei", ts + 200, (Observation(lot, free, None, ts, TS_FEED),)), {lot: capacity}
     )
 
 

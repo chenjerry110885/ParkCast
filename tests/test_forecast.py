@@ -6,7 +6,7 @@ import pytest
 
 from parkcast import config, store
 from parkcast.compact import compact_day, day_bounds
-from parkcast.feed import FeedSnapshot, Observation
+from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 from parkcast.forecast import Blend, Climatology, Persistence, load_history, week_bucket
 
 
@@ -18,7 +18,7 @@ def conn(tmp_path):
 
 
 def write(conn, ts, lot="A", free=5, capacity=50):
-    store.insert_snapshot(conn, FeedSnapshot(ts, ts + 200, (Observation(lot, free, None),)), {lot: capacity})
+    store.insert_snapshot(conn, FeedSnapshot("taipei", ts + 200, (Observation(lot, free, None, ts, TS_FEED),)), {lot: capacity})
 
 
 def test_history_separates_current_from_past(conn):
@@ -86,8 +86,8 @@ def test_recent_is_sorted_across_the_cold_hot_boundary(conn, tmp_path):
     for slot in range(5):
         store.insert_snapshot(
             other,
-            FeedSnapshot(start + slot * 300 + 180, start + slot * 300 + 380,
-                         (Observation("A", 5, None),)),
+            FeedSnapshot("taipei", start + slot * 300 + 380,
+                         (Observation("A", 5, None, start + slot * 300 + 180, TS_FEED),)),
             {"A": 50},
         )
     compact_day(other, day, tmp_path)
@@ -161,8 +161,8 @@ def test_before_ts_filters_the_cold_store_too(conn, tmp_path):
     for slot in range(10):
         store.insert_snapshot(
             other,
-            FeedSnapshot(start + slot * 300, start + slot * 300 + 200,
-                         (Observation("A", 5, None),)),
+            FeedSnapshot("taipei", start + slot * 300 + 200,
+                         (Observation("A", 5, None, start + slot * 300, TS_FEED),)),
             {"A": 50},
         )
     compact_day(other, day, tmp_path)
@@ -189,8 +189,8 @@ def _cold_day(tmp_path, day, *, lot="A", free=5, slots=10):
     for slot in range(slots):
         store.insert_snapshot(
             other,
-            FeedSnapshot(start + slot * 300, start + slot * 300 + 200,
-                         (Observation(lot, free, None),)),
+            FeedSnapshot("taipei", start + slot * 300 + 200,
+                         (Observation(lot, free, None, start + slot * 300, TS_FEED),)),
             {lot: 50},
         )
     compact_day(other, day, tmp_path)
@@ -633,8 +633,8 @@ def test_cold_observations_older_than_the_hot_window_are_kept(conn, tmp_path):
     for slot in range(10):
         store.insert_snapshot(
             other,
-            FeedSnapshot(older_start + slot * 300 + 180, older_start + slot * 300 + 380,
-                         (Observation("A", 5, None),)),
+            FeedSnapshot("taipei", older_start + slot * 300 + 380,
+                         (Observation("A", 5, None, older_start + slot * 300 + 180, TS_FEED),)),
             {"A": 50},
         )
     compact_day(other, older, tmp_path)
@@ -731,8 +731,8 @@ def test_a_cold_only_lot_keeps_its_counts_but_has_no_recent_tail(conn, tmp_path)
     for slot in range(10):
         store.insert_snapshot(
             other,
-            FeedSnapshot(start + slot * 300 + 180, start + slot * 300 + 380,
-                         (Observation("A", 5, None),)),
+            FeedSnapshot("taipei", start + slot * 300 + 380,
+                         (Observation("A", 5, None, start + slot * 300 + 180, TS_FEED),)),
             {"A": 50},
         )
     compact_day(other, day, tmp_path)
@@ -795,7 +795,7 @@ def _write_parquet_day(tmp_path, day, free_by_slot, lot="A"):
     for slot, free in free_by_slot.items():
         ts = start + slot * 300 + 180
         store.insert_snapshot(
-            src, FeedSnapshot(ts, ts + 200, (Observation(lot, free, None),)), {lot: 50}
+            src, FeedSnapshot("taipei", ts + 200, (Observation(lot, free, None, ts, TS_FEED),)), {lot: 50}
         )
     compact_day(src, day, tmp_path)
     src.close()

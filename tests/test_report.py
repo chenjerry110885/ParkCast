@@ -5,7 +5,7 @@ import pytest
 
 from parkcast import store
 from parkcast.compact import day_bounds
-from parkcast.feed import FeedSnapshot, Observation
+from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 from parkcast.report import build_report, find_frozen_lots, format_report
 
 
@@ -19,7 +19,7 @@ def conn(tmp_path):
 def write(conn, slot, lot="A", free=10):
     start, _ = day_bounds(date(2026, 9, 4))
     ts = start + slot * 300
-    store.insert_snapshot(conn, FeedSnapshot(ts, ts + 200, (Observation(lot, free, None),)), {lot: 50})
+    store.insert_snapshot(conn, FeedSnapshot("taipei", ts + 200, (Observation(lot, free, None, ts, TS_FEED),)), {lot: 50})
 
 
 def test_counts_ticks_and_reports_gaps(conn):

@@ -7,7 +7,7 @@ import pytest
 from parkcast import artifacts, config, scheduler, store
 from parkcast.collector import TickResult
 from parkcast.compact import day_bounds
-from parkcast.feed import FeedSnapshot, Observation
+from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 from parkcast.grid import UNKNOWN
 from parkcast.metadata import Lot
 from parkcast.scheduler import next_poll_ts, taipei_date
@@ -399,7 +399,7 @@ def test_successful_refresh_fires_exactly_once_for_the_day(monkeypatch):
 def _seed(conn, day, lot="A", free=10, motor=None):
     start, _ = day_bounds(day)
     store.insert_snapshot(
-        conn, FeedSnapshot(start, start + 200, (Observation(lot, free, motor),)), {lot: 50}
+        conn, FeedSnapshot("taipei", start + 200, (Observation(lot, free, motor, start, TS_FEED),)), {lot: 50}
     )
 
 
@@ -1110,8 +1110,8 @@ def test_publish_artifacts_withholds_a_lot_that_is_not_updating(tmp_path):
         ts = start + i * 300
         store.insert_snapshot(
             conn,
-            FeedSnapshot(ts, ts + 200, (Observation("FROZEN", 34, None),
-                                        Observation("LIVE", i % 7, None))),
+            FeedSnapshot("taipei", ts + 200, (Observation("FROZEN", 34, None, ts, TS_FEED),
+                                              Observation("LIVE", i % 7, None, ts, TS_FEED))),
             {"FROZEN": 50, "LIVE": 50},
         )
     out_dir = tmp_path / "artifacts"

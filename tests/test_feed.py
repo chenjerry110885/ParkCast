@@ -41,11 +41,27 @@ def test_parse_availability_on_real_payload():
 
     assert isinstance(snap, FeedSnapshot)
     assert snap.observed_at == observed_at
-    assert snap.data_ts > 0
+    assert snap.latest_data_ts > 0
     # data_ts must precede observed_at: the feed publishes ~3 min after stamping.
-    assert snap.data_ts < snap.observed_at
+    assert snap.latest_data_ts < snap.observed_at
     assert len(snap.observations) > 1000
     assert len({o.lot_id for o in snap.observations}) == len(snap.observations)
+
+
+def test_each_observation_carries_its_own_timestamp_and_its_kind():
+    payload = {"data": {"UPDATETIME": "Fri Sep 04 09:08:00 CST 2026",
+                        "park": [{"id": "TPE0001", "availablecar": 5, "availablemotor": -9}]}}
+    snap = parse_availability(payload, observed_at=1757000000)
+    obs = snap.observations[0]
+    assert obs.data_ts == parse_updatetime("Fri Sep 04 09:08:00 CST 2026")
+    # Taipei stamps the feed, not the record -- say so, so a model can exclude it later.
+    assert obs.ts_kind == "feed"
+    assert snap.latest_data_ts == obs.data_ts
+    assert snap.city == "taipei"
+
+
+def test_latest_data_ts_is_zero_for_an_empty_feed():
+    assert FeedSnapshot(city="taipei", observed_at=1, observations=()).latest_data_ts == 0
 
 
 def test_sentinel_minus_nine_becomes_none_not_zero():
@@ -64,4 +80,4 @@ def test_sentinel_minus_nine_becomes_none_not_zero():
 def test_data_ts_minutes_land_on_the_expected_phase():
     payload = _fixture_payload()
     snap = parse_availability(payload, observed_at=_observed_at(payload))
-    assert (snap.data_ts // 60) % 5 == 3, "feed stamps minutes congruent to 3 (mod 5)"
+    assert (snap.latest_data_ts // 60) % 5 == 3, "feed stamps minutes congruent to 3 (mod 5)"

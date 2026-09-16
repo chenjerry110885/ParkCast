@@ -63,7 +63,7 @@ def collect_once(
     rows = store.insert_snapshot(conn, snapshot, capacities)
 
     return TickResult(
-        data_ts=snapshot.data_ts,
+        data_ts=snapshot.latest_data_ts,
         rows_written=rows,
-        advanced=previous is None or snapshot.data_ts > previous,
+        advanced=previous is None or snapshot.latest_data_ts > previous,
     )
