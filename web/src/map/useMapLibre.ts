@@ -34,7 +34,7 @@ import { MapLibreMap, setWorkerUrl } from "maplibre-gl";
 // build alike. `setWorkerUrl` takes precedence over MapLibre's guess.
 import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import type { Lang } from "../i18n";
-import { BASEMAP_BOUNDS, basemapStyle } from "./basemapStyle";
+import { basemapStyle } from "./basemapStyle";
 
 /** Roughly Taipei Main Station, in GeoJSON order: [lon, lat]. */
 export const TAIPEI_CENTER: [number, number] = [121.5170, 25.0478];
@@ -92,13 +92,6 @@ export function useMapLibre(lang: Lang): MapLifecycle {
         container,
         center: TAIPEI_CENTER,
         zoom: INITIAL_ZOOM,
-        // The extract's own box. Without it a wide window at the opening zoom
-        // shows grey either side of Taipei -- the area the basemap was never
-        // cut for -- and MapLibre will happily keep panning into more of it.
-        // Constraining the camera also raises the effective minimum zoom to
-        // whatever makes the box fill the container, so a 27-inch screen opens
-        // on city, not on margin.
-        maxBounds: BASEMAP_BOUNDS,
         attributionControl: { compact: true },
         // North-up. A driver reads a map against street signs, and a map that
         // has quietly rotated under a two-finger gesture is worse than useless.
