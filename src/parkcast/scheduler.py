@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from parkcast import artifacts, config, liveness, store
-from parkcast.collector import collect_all
+from parkcast.collector import TickResult, collect_all
 from parkcast.compact import compact_day, day_bounds
 from parkcast.forecast import Blend, load_history
 from parkcast.grid import build_grid
@@ -208,69 +208,128 @@ def run_forever(
     # way; a generator would not be.
     if sources is None:
         sources = SOURCES.values()
+    # Keyed once, up front: every attempt below narrows the retry set by city
+    # name, and stall bookkeeping is per city too, so both need a stable
+    # city -> Source lookup rather than re-deriving one from a shrinking set
+    # each time. Iterated in this (insertion) order wherever a stable request
+    # order matters, e.g. building the retry list below.
+    sources_by_city = {s.city: s for s in sources}
 
     today = taipei_date(now_fn())
     current_day = today
     archived_day = _first_day_to_archive(conn, today)
-    exhausted_slots = 0
+    # Consecutive slots each city has ended without a fresh reading -- not one
+    # global counter. Kaohsiung and Taoyuan stamp every observation
+    # `data_ts=now` (TS_FETCH: their feeds carry no per-record timestamp at
+    # all -- see their adapter modules), so a successful fetch always reports
+    # `advanced=True` and their count here can *structurally never* leave 0,
+    # whether the feed is genuinely healthy or merely echoing yesterday's
+    # numbers under a fresh clock. That is not an oversight: for those two
+    # cities this counter simply has nothing to say, and an outright failure
+    # is already a different, real signal -- `ok=False` in
+    # `store.record_source_health`, checked independently of this dict. See
+    # the exit condition at the end of the loop for how the asymmetry is kept
+    # from masking a real outage.
+    stall_slots: dict[str, int] = dict.fromkeys(sources_by_city, 0)
 
     while True:
         target = next_poll_ts(now_fn())
         sleep(max(0, target - now_fn()))
 
+        # Cities not yet accounted for with a fresh reading this slot. Every
+        # attempt asks only these: retrying a city that already advanced this
+        # slot would, for every source, ask a feed that has nothing new to
+        # say, and for the five feeds that are already fine it would turn one
+        # request into up to four for no reason -- exactly the load
+        # RETRY_DELAYS_SEC's budget exists to spend on the source(s) that
+        # actually need a second look.
+        pending = set(sources_by_city)
+        slot_results: dict[str, TickResult] = {}
+
         for delay in (0, *config.RETRY_DELAYS_SEC):
+            if not pending:
+                break
             if delay:
                 sleep(delay)
             try:
-                results = collect(conn, sources, capacities)
+                to_try = [sources_by_city[city] for city in sources_by_city if city in pending]
+                results = collect(conn, to_try, capacities)
             except Exception:
                 # collect_all isolates every source's own failure and never
                 # raises; this stays as the outer net for an injected collect
                 # that does not, and for anything collect_all itself cannot
-                # anticipate.
+                # anticipate. Nothing here advanced, so `pending` is
+                # unchanged and every one of these cities is retried next
+                # attempt.
                 log.exception("tick failed; will retry within this slot")
                 continue
-            advanced = [r for r in results if r.advanced]
-            if advanced:
-                # Advanced if ANY source advanced: one city stalling (or
-                # failing outright, and so being absent from `results`) must
-                # never hold the other five hostage to its own retry.
-                for result in advanced:
-                    log.info(
-                        "tick city=%s data_ts=%s rows=%s",
-                        result.city, result.data_ts, result.rows_written,
-                    )
-                exhausted_slots = 0
-                if publish is not None:
-                    try:
-                        publish(conn)
-                    except Exception:
-                        # Publishing is downstream of collection: a tick missed is
-                        # data that can never be re-fetched, while a stale artifact
-                        # is fixed by the very next tick. It must never be able to
-                        # take collection down with it.
-                        log.exception("publishing artifacts failed; will retry next tick")
-                break
-            log.warning(
-                "no source advanced this attempt (%s of %s collected); retrying",
-                len(results), len(sources),
-            )
-        else:
-            exhausted_slots += 1
-            log.error(
-                "slot exhausted with no source advancing (%s consecutive)", exhausted_slots
-            )
-            if exhausted_slots >= config.MAX_EXHAUSTED_SLOTS:
-                # Looping forever on a feed that changed shape logs an error
-                # every five minutes while collecting nothing, and the process
-                # never exits, so `restart: unless-stopped` never fires and the
-                # container keeps reporting itself healthy. Exiting non-zero
-                # turns a silent stall into a rising restart count.
-                raise SystemExit(
-                    f"no fresh tick for {exhausted_slots} consecutive slots "
-                    f"({exhausted_slots * config.POLL_PERIOD_MIN} min); exiting so "
-                    "the restart policy fires"
+            for result in results:
+                slot_results[result.city] = result
+                if result.advanced:
+                    pending.discard(result.city)
+            if pending:
+                log.warning(
+                    "%s source(s) still without a fresh reading this attempt "
+                    "(%s); retrying", len(pending), ", ".join(sorted(pending)),
                 )
+
+        # Computed once, after retries for this slot are done, regardless of
+        # whether the loop above broke early (every city caught up) or ran
+        # out of attempts with some still pending -- unlike the single global
+        # counter this replaced, a slot ending with *some* cities advanced
+        # and others not is now the ordinary case, not a binary "all or
+        # nothing" the old `for/else` could assume.
+        advanced_cities = {city for city, r in slot_results.items() if r.advanced}
+        for city in advanced_cities:
+            r = slot_results[city]
+            log.info("tick city=%s data_ts=%s rows=%s", r.city, r.data_ts, r.rows_written)
+        for city in stall_slots:
+            stall_slots[city] = 0 if city in advanced_cities else stall_slots[city] + 1
+
+        if advanced_cities:
+            if publish is not None:
+                try:
+                    publish(conn)
+                except Exception:
+                    # Publishing is downstream of collection: a tick missed is
+                    # data that can never be re-fetched, while a stale artifact
+                    # is fixed by the very next tick. It must never be able to
+                    # take collection down with it.
+                    log.exception("publishing artifacts failed; will retry next tick")
+        else:
+            log.error("slot ended with no source advancing at all")
+
+        # Taipei's corpus cannot be re-fetched, so it alone stalling for the
+        # full window is exit-worthy on its own, independent of every other
+        # city's state -- the whole reason this moved from one counter to a
+        # per-city dict. Every other city stalling in isolation is not, by
+        # itself, cause to restart the process (a gap in a replaceable feed
+        # is a worse outcome than a needless restart), so their stalls only
+        # matter in aggregate: every tracked city stalled for the same
+        # window at once is the direct generalisation of the old single
+        # counter to six independent sources, and is what actually shows the
+        # whole process -- not one feed -- has stopped making progress. A
+        # city whose count can never move at all (see above) simply can
+        # never be the one that makes this True on its own.
+        taipei_stalled = stall_slots.get("taipei", 0) >= config.MAX_EXHAUSTED_SLOTS
+        all_stalled = bool(stall_slots) and all(
+            n >= config.MAX_EXHAUSTED_SLOTS for n in stall_slots.values()
+        )
+        if taipei_stalled or all_stalled:
+            # Looping forever on a feed that changed shape logs an error
+            # every five minutes while collecting nothing, and the process
+            # never exits, so `restart: unless-stopped` never fires and the
+            # container keeps reporting itself healthy. Exiting non-zero
+            # turns a silent stall into a rising restart count.
+            if all_stalled:
+                culprit, streak = "every tracked source", max(stall_slots.values())
+            else:
+                culprit, streak = "taipei", stall_slots["taipei"]
+            raise SystemExit(
+                f"{culprit} produced no fresh tick for {streak} consecutive slots "
+                f"({streak * config.POLL_PERIOD_MIN} min); exiting so the restart "
+                "policy fires"
+            )
 
         day = taipei_date(now_fn())
 

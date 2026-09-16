@@ -2,6 +2,7 @@ import json
 import logging
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,18 @@ from parkcast.metadata import Lot, capacity_map, parse_metadata
 from parkcast.quality import Q
 from parkcast.scheduler import next_poll_ts, taipei_date
 from parkcast.sources import taipei
+
+# Almost every test below models exactly one city and asserts on how many
+# times / how far apart its `collect` fake was called -- assertions that only
+# hold if `run_forever` has exactly one source to retry-or-not. Since the
+# per-city retry logic narrows its request list by city name each attempt,
+# passing the real six-source default here would leave the other five
+# "pending" forever (the fakes never mention them), so every one of those
+# tests would burn all four attempts every slot regardless of what the fake
+# under test actually does. `SimpleNamespace(city=...)` is all `run_forever`
+# needs from a source for this: a `.city` to key by -- it is never fetched
+# from, since `collect` itself is replaced.
+_ONE_SOURCE = [SimpleNamespace(city="taipei")]
 
 
 @pytest.fixture(autouse=True)
@@ -111,7 +124,7 @@ def test_run_forever_happy_path_makes_a_single_collect_call(monkeypatch):
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(
-            None, {}, collect=fake_collect, sleep=clock.sleep, now_fn=clock.now_fn
+            None, {}, collect=fake_collect, sources=_ONE_SOURCE, sleep=clock.sleep, now_fn=clock.now_fn
         )
 
     assert len(calls) == 1
@@ -133,7 +146,7 @@ def test_run_forever_retries_with_configured_backoff_when_feed_stalls(monkeypatc
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(
-            None, {}, collect=fake_collect, sleep=clock.sleep, now_fn=clock.now_fn
+            None, {}, collect=fake_collect, sources=_ONE_SOURCE, sleep=clock.sleep, now_fn=clock.now_fn
         )
 
     assert len(call_times) == 4
@@ -159,7 +172,7 @@ def test_run_forever_survives_one_bad_tick_and_succeeds_on_retry(monkeypatch):
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(
-            None, {}, collect=fake_collect, sleep=clock.sleep, now_fn=clock.now_fn
+            None, {}, collect=fake_collect, sources=_ONE_SOURCE, sleep=clock.sleep, now_fn=clock.now_fn
         )
 
     assert len(attempts) == 2, "loop should retry after the exception and succeed"
@@ -184,7 +197,7 @@ def test_run_forever_prunes_even_when_every_attempt_in_the_slot_fails(monkeypatc
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(
-            None, {}, collect=fake_collect, sleep=clock.sleep, now_fn=clock.now_fn
+            None, {}, collect=fake_collect, sources=_ONE_SOURCE, sleep=clock.sleep, now_fn=clock.now_fn
         )
 
     assert len(attempts) == 4, "all retries should have been exhausted"
@@ -224,7 +237,7 @@ def test_run_forever_slot_targets_stay_300s_apart_despite_exhausted_retries(monk
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(
-            None, {}, collect=fake_collect, sleep=clock.sleep, now_fn=clock.now_fn
+            None, {}, collect=fake_collect, sources=_ONE_SOURCE, sleep=clock.sleep, now_fn=clock.now_fn
         )
 
     assert len(targets) == 3
@@ -264,7 +277,7 @@ def test_refresh_not_called_while_the_day_is_unchanged(monkeypatch):
         return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {"A": 1}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {"A": 1}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                                now_fn=clock.now_fn, archive=_no_archive, refresh_metadata=lambda d: calls.append(d) or {})
     assert calls == [], "refresh must not fire within a single Taipei day"
 
@@ -291,7 +304,7 @@ def test_refresh_rebind_is_observable_at_the_call_site(monkeypatch):
         return {"NEW": 42}
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                                now_fn=clock.now_fn, archive=_no_archive, refresh_metadata=refresh)
 
     assert {"OLD": 1} in seen, "the slot(s) before the refresh landed should still see the original map"
@@ -324,7 +337,7 @@ def test_failed_refresh_is_retried_on_a_later_slot(monkeypatch):
         return {"NEW": 42}
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                                now_fn=clock.now_fn, archive=_no_archive, refresh_metadata=refresh)
 
     assert refresh_calls == [date(2026, 9, 5), date(2026, 9, 5)], (
@@ -357,7 +370,7 @@ def test_persistently_failing_refresh_never_corrupts_capacities(monkeypatch):
         raise ConnectionError("metadata endpoint down")
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                                now_fn=clock.now_fn, archive=_no_archive, refresh_metadata=boom)
 
     assert all(c == {"OLD": 1} for c in seen), f"stale capacities beat no capacities, got {seen}"
@@ -386,7 +399,7 @@ def test_successful_refresh_fires_exactly_once_for_the_day(monkeypatch):
         return {"NEW": 42}
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {"OLD": 1}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                                now_fn=clock.now_fn, archive=_no_archive, refresh_metadata=refresh)
 
     assert refresh_calls == [date(2026, 9, 5)], f"expected exactly one refresh call for the day, got {refresh_calls}"
@@ -421,7 +434,7 @@ def test_previous_day_is_compacted_when_the_taipei_day_rolls_over(monkeypatch):
         return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn,
                               archive=lambda conn, day: archived.append(day))
 
@@ -442,7 +455,7 @@ def test_no_compaction_while_the_day_is_still_running(monkeypatch):
         return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn,
                               archive=lambda conn, day: archived.append(day))
 
@@ -473,7 +486,7 @@ def test_compaction_runs_before_prune(monkeypatch):
         return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn,
                               archive=lambda conn, day: events.append("archive"))
 
@@ -504,7 +517,7 @@ def test_failed_compaction_is_retried_for_the_same_day_and_collection_continues(
         return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn, archive=flaky_archive)
 
     assert attempts == [date(2026, 9, 4), date(2026, 9, 4)], (
@@ -544,7 +557,7 @@ def test_prune_keeps_a_day_whose_compaction_keeps_failing(monkeypatch):
         return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn, archive=always_fails)
 
     unarchived_start, _ = day_bounds(date(2026, 9, 4))
@@ -568,7 +581,7 @@ def test_prune_uses_the_normal_window_once_days_are_archived(monkeypatch):
         return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn, archive=_no_archive)
 
     now_at_prune, cutoff = seen[-1]
@@ -599,7 +612,7 @@ def test_startup_catches_up_days_a_restart_left_unarchived(tmp_path, monkeypatch
 
     try:
         with pytest.raises(_StopLoop):
-            scheduler.run_forever(conn, {}, collect=collect, sleep=clock.sleep,
+            scheduler.run_forever(conn, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                                   now_fn=clock.now_fn,
                                   archive=lambda c, day: archived.append(day))
     finally:
@@ -667,7 +680,7 @@ def test_exits_non_zero_after_an_hour_of_exhausted_slots(monkeypatch):
         return [TickResult(city="taipei", data_ts=1788484080, rows_written=0, advanced=False)]
 
     with pytest.raises(SystemExit) as exc:
-        scheduler.run_forever(None, {}, collect=stalled, sleep=clock.sleep,
+        scheduler.run_forever(None, {}, collect=stalled, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn, archive=_no_archive)
 
     assert exc.value.code, "must exit non-zero, or Docker will not restart it"
@@ -700,8 +713,137 @@ def test_one_good_tick_resets_the_exhausted_slot_counter(monkeypatch):
     # reset, a run of 11 exhausted slots either side of one good tick would
     # trip the threshold.
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn, archive=_no_archive)
+
+
+# --- multi-city retry and per-city stall tracking ----------------------------
+#
+# Every test above models exactly one city (`_ONE_SOURCE`), so none of them
+# could ever exercise "advanced if ANY source advanced" against a genuine
+# mix of results -- the exact gap a review found: Kaohsiung and Taoyuan stamp
+# every observation `data_ts=now`, so they report `advanced=True` on every
+# successful fetch and can never themselves need (or show) a retry. With a
+# single source in every existing test, "retry only the sources that did not
+# advance" and "break once nothing is left pending" both degenerate to the
+# old single-global-counter behaviour -- which is exactly why it took a
+# multi-source result list to surface the bug in the first place.
+
+
+def test_only_the_staller_is_retried_once_another_city_has_advanced(monkeypatch):
+    """A city that already produced a fresh reading this slot must not be
+    re-asked, and a stalling city must not cost the others a retry either."""
+    clock = _VirtualClock(1788484080)
+    # Mocked even though this test expects to reach _StopLoop before either is
+    # ever called for real: under the pre-fix "any advance breaks the loop"
+    # behaviour, the second `collect()` call below happens one slot later
+    # (not as a same-slot retry), so this slot's archive/prune would run
+    # first with a bare `None` connection -- this keeps the test's failure
+    # mode a clean assertion, not an unrelated `None.execute()` crash.
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+    sources = [SimpleNamespace(city="taipei"), SimpleNamespace(city="tainan")]
+    calls = []
+
+    def collect(conn, sources, capacities):
+        calls.append(sorted(s.city for s in sources))
+        if len(calls) == 1:
+            return [
+                TickResult(city="taipei", data_ts=1, rows_written=1, advanced=True),
+                TickResult(city="tainan", data_ts=0, rows_written=0, advanced=False),
+            ]
+        raise _StopLoop()
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sources=sources,
+                              sleep=clock.sleep, now_fn=clock.now_fn, archive=_no_archive)
+
+    assert calls[0] == ["tainan", "taipei"], "every source is asked on the first attempt"
+    assert calls[1] == ["tainan"], "taipei already advanced this slot; only the staller is retried"
+
+
+def test_taipei_alone_stalling_trips_the_exit_even_if_another_city_advances(monkeypatch):
+    """Taipei's corpus cannot be re-fetched, so its own stall must be able to
+    exit the process on its own -- a healthy second city must not mask it."""
+    clock = _VirtualClock(1788484080)
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+    sources = [SimpleNamespace(city="taipei"), SimpleNamespace(city="tainan")]
+    attempts = []
+
+    def collect(conn, sources, capacities):
+        attempts.append(clock.now)
+        # tainan advances every attempt of every slot; taipei never does.
+        return [
+            TickResult(city="taipei", data_ts=0, rows_written=0, advanced=False),
+            TickResult(city="tainan", data_ts=len(attempts), rows_written=1, advanced=True),
+        ]
+
+    with pytest.raises(SystemExit) as exc:
+        scheduler.run_forever(None, {}, collect=collect, sources=sources,
+                              sleep=clock.sleep, now_fn=clock.now_fn, archive=_no_archive)
+
+    assert exc.value.code, "must exit non-zero, or Docker will not restart it"
+    assert "taipei" in str(exc.value)
+    assert "every tracked source" not in str(exc.value), (
+        "tainan never stalled; this must be the taipei-alone branch, not the all-stalled one"
+    )
+    assert len(attempts) == config.MAX_EXHAUSTED_SLOTS * (1 + len(config.RETRY_DELAYS_SEC)), (
+        "taipei alone is retried every attempt of every slot until the threshold trips"
+    )
+
+
+def test_a_non_taipei_city_stalling_alone_does_not_trip_the_exit(monkeypatch):
+    """Every city besides Taipei is, in principle, replaceable -- one of them
+    stalling in isolation must not be able to cost the process a restart the
+    way Taipei's own stall does."""
+    clock = _VirtualClock(1788484080)
+    sources = [SimpleNamespace(city="taipei"), SimpleNamespace(city="tainan")]
+    slots = []
+
+    def collect(conn, sources, capacities):
+        # taipei advances every attempt of every slot; tainan never does.
+        return [
+            TickResult(city="taipei", data_ts=len(slots), rows_written=1, advanced=True),
+            TickResult(city="tainan", data_ts=0, rows_written=0, advanced=False),
+        ]
+
+    def fake_prune(conn, cutoff_ts):
+        slots.append(cutoff_ts)
+        # Reaching this proves SystemExit never fired: with the old single
+        # global counter this many consecutive non-advancing slots for one
+        # source would have tripped the threshold twice over.
+        if len(slots) > 2 * config.MAX_EXHAUSTED_SLOTS:
+            raise _StopLoop()
+        return 0
+
+    monkeypatch.setattr(scheduler.store, "prune", fake_prune)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sources=sources,
+                              sleep=clock.sleep, now_fn=clock.now_fn, archive=_no_archive)
+
+
+def test_every_tracked_city_stalling_together_trips_the_exit(monkeypatch):
+    """The direct generalisation of the old single global counter: every
+    source stalling for the same window at once must still exit."""
+    clock = _VirtualClock(1788484080)
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+    sources = [SimpleNamespace(city="taipei"), SimpleNamespace(city="tainan")]
+    attempts = []
+
+    def collect(conn, sources, capacities):
+        attempts.append(clock.now)
+        return [
+            TickResult(city="taipei", data_ts=0, rows_written=0, advanced=False),
+            TickResult(city="tainan", data_ts=0, rows_written=0, advanced=False),
+        ]
+
+    with pytest.raises(SystemExit) as exc:
+        scheduler.run_forever(None, {}, collect=collect, sources=sources,
+                              sleep=clock.sleep, now_fn=clock.now_fn, archive=_no_archive)
+
+    assert exc.value.code, "must exit non-zero, or Docker will not restart it"
+    assert "every tracked source" in str(exc.value)
+    assert len(attempts) == config.MAX_EXHAUSTED_SLOTS * (1 + len(config.RETRY_DELAYS_SEC))
 
 
 # --- publishing forecast artifacts -------------------------------------------
@@ -721,7 +863,7 @@ def test_publish_runs_after_an_advancing_tick(monkeypatch):
         return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn, archive=_no_archive,
                               publish=lambda conn: published.append(clock.now))
 
@@ -745,7 +887,7 @@ def test_publish_failure_does_not_stop_collection(monkeypatch):
         raise RuntimeError("artifact write failed")
 
     with pytest.raises(_StopLoop):
-        scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
+        scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn, archive=_no_archive, publish=boom)
 
     assert len(ticks) == 3, "collection must survive a publishing failure"

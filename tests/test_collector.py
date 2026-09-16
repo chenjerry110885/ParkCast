@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from parkcast import collector, store
 from parkcast.feed import TS_FETCH, FeedSnapshot, Observation, parse_updatetime
 from parkcast.ids import qualify
+from parkcast.quality import Q
 from parkcast.sources import SourceTick, taipei
 
 FIXTURE = Path(__file__).parent / "fixtures" / "avail_sample.json"
@@ -133,6 +135,44 @@ def test_collect_all_isolates_a_keyerror_from_a_reshaped_payload(conn):
     assert conn.execute("SELECT COUNT(*) FROM observations WHERE city='hsinchu'").fetchone()[0] == 1
 
 
+def test_collect_all_keeps_going_when_health_recording_fails_after_a_success(conn, monkeypatch):
+    """A DB hiccup while recording health must not undo an already-committed
+    tick, and must not abort collection of the sources still to come.
+
+    Previously the post-success `SELECT COUNT(*)` and `record_source_health`
+    call sat outside `collect_once`'s try/except entirely, so an exception
+    from either of them would propagate straight out of `collect_all`,
+    silently dropping every source not yet reached and discarding the
+    results already accumulated -- the isolation guarantee was conditional,
+    not absolute.
+    """
+    real_record = store.record_source_health
+    calls = []
+
+    def flaky_record(conn, city, **kwargs):
+        calls.append(city)
+        if city == "tainan":
+            raise store.sqlite3.OperationalError("database is locked")
+        return real_record(conn, city, **kwargs)
+
+    monkeypatch.setattr(store, "record_source_health", flaky_record)
+
+    results = collector.collect_all(
+        conn,
+        [_StubSource("tainan", rows=[("1", 5)]), _StubSource("hsinchu", rows=[("2", 3)])],
+        {}, now=1000,
+    )
+
+    assert [r.city for r in results] == ["tainan", "hsinchu"], (
+        "tainan's row is real and already committed -- a health-recording "
+        "failure must not drop it from the results, and must not stop "
+        "hsinchu from being collected right after it"
+    )
+    assert calls == ["tainan", "hsinchu"], "hsinchu must still be reached after tainan's failure"
+    assert conn.execute("SELECT COUNT(*) FROM observations WHERE city='tainan'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM observations WHERE city='hsinchu'").fetchone()[0] == 1
+
+
 def test_collect_all_never_raises_even_when_every_source_fails(conn):
     class Broken:
         city = "taoyuan"
@@ -186,6 +226,36 @@ def test_collect_all_derives_each_citys_own_capacities_from_its_tick(conn):
         "SELECT free_car, quality FROM observations WHERE city='kaohsiung'"
     ).fetchone()
     assert free_car == 5, "clamped against the roster carried in this tick, not the caller's map"
+    assert Q.CLAMPED in Q(quality), "proves *why* free_car became 5, not just that it did"
+
+
+def test_collect_once_warns_when_a_roster_carrying_source_has_no_lots(conn, caplog):
+    """Adapters append the Observation before their own coordinate/roster
+    check and the Lot only after, so a reshaped payload can yield real
+    observations with `lots=()` alongside them -- silently falling back to an
+    empty capacity map (every lot NO_CAPACITY) would say nothing about why."""
+    class EmptyRoster:
+        city = "kaohsiung"
+
+        def fetch(self, *, now):
+            lot_id = qualify(self.city, "1")
+            snapshot = FeedSnapshot(
+                city=self.city, observed_at=now,
+                observations=(Observation(lot_id, 8, None, now, TS_FETCH),),
+            )
+            return SourceTick(snapshot=snapshot, lots=())
+
+    with caplog.at_level(logging.WARNING, logger="parkcast.collector"):
+        result = collector.collect_once(conn, EmptyRoster(), {}, now=1000)
+
+    assert result.rows_written == 1, "the observation is still stored; this is a capacity warning, not a refusal"
+    assert "kaohsiung" in caplog.text and "empty roster" in caplog.text
+
+    free_car, quality = conn.execute(
+        "SELECT free_car, quality FROM observations WHERE city='kaohsiung'"
+    ).fetchone()
+    assert free_car == 8, "unclamped: no capacity is known, not that one was found and exceeded"
+    assert Q.NO_CAPACITY in Q(quality)
 
 
 import requests as _requests
