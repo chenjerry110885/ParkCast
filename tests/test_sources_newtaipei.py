@@ -72,11 +72,16 @@ def test_the_literal_string_sentinel_in_the_live_feed_also_falls_back():
 
 
 def test_a_duplicate_feed_id_keeps_its_first_occurrence():
-    # The fixture's two 010001 records differ only in `parkingFee`; the feed
-    # id is what identifies "the same lot twice".
+    # The fixture's two 010001 records are a synthetic duplicate that differ
+    # in NowCarSpace -- a field the parser actually reads: the first copy
+    # carries the real 24, the second a distinguishable 77. Asserting the
+    # survivor is 24 (and not 77) fails if dedup order ever flips from
+    # first-kept to last-kept.
     tick = newtaipei.parse(FIXTURE, now=NOW)
     matches = [o for o in tick.snapshot.observations if o.lot_id == "newtaipei:010001"]
     assert len(matches) == 1
+    assert matches[0].free_car == 24
+    assert matches[0].free_car != 77
     lot_matches = [lot for lot in tick.lots if lot.id == "newtaipei:010001"]
     assert len(lot_matches) == 1
 

@@ -1,6 +1,6 @@
 # Full live response on 2026-09-16: 1,623,471 bytes, 1,447 records, fetched
 # via curl POST to https://kpp.tbkc.gov.tw/ParkingLocation/ParkingLotPost
-# with body b"{}". Trimmed to 16 records in fixtures/sources/kaohsiung.json,
+# with body b"{}". Trimmed to 18 records in fixtures/sources/kaohsiung.json,
 # keeping the {"parkingLots": [...]} envelope -- see task-6-report.md for
 # exactly which lots and why.
 import json
@@ -72,12 +72,17 @@ def test_this_city_reports_real_live_motorcycle_counts():
 
 
 def test_a_duplicate_feed_id_keeps_its_first_occurrence():
-    # The fixture's two PL_KHB00035 records differ only in `memo` (a
-    # synthetic duplicate -- no live duplicate id exists in this feed, see
-    # task-6-report.md); the feed id is what identifies "the same lot twice".
+    # The fixture's two PL_KHB00035 records are a synthetic duplicate (no
+    # live duplicate id exists in this feed, see task-6-report.md) that
+    # differ in smallcarVacancy -- a field the parser actually reads: the
+    # first copy carries the real -2 sentinel, the second a distinguishable
+    # 77. Asserting the survivor is None (and not 77) fails if dedup order
+    # ever flips from first-kept to last-kept.
     tick = kaohsiung.parse(FIXTURE, now=NOW)
     matches = [o for o in tick.snapshot.observations if o.lot_id == "kaohsiung:PL_KHB00035"]
     assert len(matches) == 1
+    assert matches[0].free_car is None
+    assert matches[0].free_car != 77
     lot_matches = [lot for lot in tick.lots if lot.id == "kaohsiung:PL_KHB00035"]
     assert len(lot_matches) == 1
 
@@ -109,6 +114,29 @@ def test_capacity_falls_back_from_volumnauto_to_volumn():
     lot = next(l for l in tick.lots if l.id == "kaohsiung:PL_KHB00125")
     assert lot.capacity_car is None
     assert lot.serves_cars is False
+
+
+def test_a_real_zero_motorcycle_count_survives():
+    # PL_KHB00714 carries a real, live motorcycleVacancy of 0 (the
+    # motorcycle area is genuinely full) alongside a real car count of 1 --
+    # 0 must survive as 0, not collapse into the sentinel's None.
+    tick = kaohsiung.parse(FIXTURE, now=NOW)
+    by_id = _by_id(tick.snapshot.observations)
+    obs = by_id["kaohsiung:PL_KHB00714"]
+    assert obs.free_motor == 0
+    assert obs.free_car == 1
+
+
+def test_the_undocumented_negative_three_sentinel_also_maps_to_none():
+    # PL_KHB00019 carries -3 on both smallcarVacancy and motorcycleVacancy
+    # in the live feed -- a third sentinel value the brief never mentions.
+    # clean_count maps every negative value to None, so this is free: no
+    # adapter change was needed to handle it correctly.
+    tick = kaohsiung.parse(FIXTURE, now=NOW)
+    by_id = _by_id(tick.snapshot.observations)
+    obs = by_id["kaohsiung:PL_KHB00019"]
+    assert obs.free_car is None
+    assert obs.free_motor is None
 
 
 def test_capacity_missing_or_unparseable_leaves_the_lot_serving_cars():
