@@ -246,6 +246,168 @@ def test_run_forever_slot_targets_stay_300s_apart_despite_exhausted_retries(monk
     assert targets[2] - targets[1] == 300
 
 
+def _spy_next_poll_ts(monkeypatch) -> list[int]:
+    """Record every slot target `run_forever` computes. Returns the list."""
+    targets: list[int] = []
+    real = scheduler.next_poll_ts
+
+    def spy(now):
+        target = real(now)
+        targets.append(target)
+        return target
+
+    monkeypatch.setattr(scheduler, "next_poll_ts", spy)
+    return targets
+
+
+def test_two_hanging_feeds_never_cost_taipei_the_following_slot(monkeypatch):
+    """The retry budget was tuned for one source; six is a different budget.
+
+    An attempt costs `len(pending) x HTTP_TIMEOUT_SEC` of socket timeouts, so
+    with two feeds hanging the four attempts plus 45+45+60s of delays run the
+    slot to ~390s. `next_poll_ts` is evaluated AFTER the loop, so it then
+    returns the slot after next and the following slot is never collected --
+    Taipei, which succeeded on attempt 1 and has nothing to retry, silently
+    polls 12 times in 24 slots, permanently, and its readings cannot be
+    re-fetched.
+
+    The assertion is on the slot targets rather than on the retry count,
+    because the damage is to the cities that were never in trouble.
+    """
+    clock = _VirtualClock(1788484080)
+    hanging = {"newtaipei", "hsinchu"}
+    sources = [SimpleNamespace(city=city) for city in
+               ("taipei", "newtaipei", "kaohsiung", "tainan", "taoyuan", "hsinchu")]
+    targets = _spy_next_poll_ts(monkeypatch)
+    polls = []
+
+    def collect(conn, to_try, capacities):
+        results = []
+        for source in to_try:
+            if source.city in hanging:
+                # A hung socket, charged to the clock exactly as the real one
+                # would be: `collect_all` asks each source in turn.
+                clock.sleep(config.HTTP_TIMEOUT_SEC)
+                results.append(TickResult(city=source.city, data_ts=0,
+                                          rows_written=0, advanced=False))
+            else:
+                polls.append((source.city, clock.now))
+                results.append(TickResult(city=source.city, data_ts=clock.now,
+                                          rows_written=1, advanced=True))
+        return results
+
+    slots = []
+
+    def fake_prune(conn, cutoff_ts):
+        slots.append(clock.now)
+        if len(slots) >= 3:
+            raise _StopLoop()
+        return 0
+
+    monkeypatch.setattr(scheduler.store, "prune", fake_prune)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sources=sources,
+                              sleep=clock.sleep, now_fn=clock.now_fn, archive=_no_archive)
+
+    assert [b - a for a, b in zip(targets, targets[1:])] == [300, 300], (
+        "a slot that overruns its own 300s makes next_poll_ts skip the "
+        "following slot, and every healthy city loses that reading with it"
+    )
+    assert sum(1 for city, _ in polls if city == "taipei") == 3, (
+        "Taipei must be polled once per slot, not once per two"
+    )
+
+
+def test_a_slot_that_ends_early_still_spends_its_whole_retry_budget(monkeypatch):
+    """The deadline must not cost a healthy feed its retries.
+
+    A Taipei publication landing late is the case RETRY_DELAYS_SEC exists for,
+    and a feed that answers quickly -- even one that answers quickly with
+    nothing new -- must still be asked all four times.
+    """
+    clock = _VirtualClock(1788484080)
+    attempts = []
+
+    def collect(conn, to_try, capacities):
+        attempts.append(clock.now)
+        # Answers immediately, but with a data_ts that has not moved.
+        return [TickResult(city="taipei", data_ts=1788484080, rows_written=0, advanced=False)]
+
+    def fake_prune(conn, cutoff_ts):
+        raise _StopLoop()
+
+    monkeypatch.setattr(scheduler.store, "prune", fake_prune)
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE,
+                              sleep=clock.sleep, now_fn=clock.now_fn)
+
+    assert [b - a for a, b in zip(attempts, attempts[1:])] == list(config.RETRY_DELAYS_SEC)
+
+
+def test_a_roster_survives_the_tick_its_city_failed(monkeypatch):
+    """A city absent from a slot's results must keep its last good roster.
+
+    `collect_all` omits a city whose fetch raised, so publishing would
+    otherwise see no roster for it and take the whole city off the map for a
+    single failed request -- the opposite of the per-city isolation every other
+    part of this loop is built for.
+    """
+    clock = _VirtualClock(1788484080)
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+    sources = [SimpleNamespace(city="taipei"), SimpleNamespace(city="tainan")]
+    tainan_lots = (_make_lot("1", city="tainan", lat=22.99, lon=120.21),)
+    seen = []
+
+    def collect(conn, to_try, capacities):
+        if len(seen) == 0:
+            return [
+                TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True),
+                TickResult(city="tainan", data_ts=clock.now, rows_written=1,
+                           advanced=True, lots=tainan_lots),
+            ]
+        if len(seen) == 1:
+            # Tainan's fetch raised this slot: collect_all simply omits it.
+            return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
+        raise _StopLoop()
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sources=sources,
+                              sleep=clock.sleep, now_fn=clock.now_fn, archive=_no_archive,
+                              publish=lambda conn, rosters: seen.append(dict(rosters)))
+
+    assert seen[0] == {"tainan": tainan_lots}
+    assert seen[1] == {"tainan": tainan_lots}, (
+        "one failed fetch must not remove a city from the published map"
+    )
+
+
+def test_an_empty_roster_does_not_replace_a_good_one(monkeypatch):
+    """`lots=()` is the reshaped-payload case collect_once warns about -- real
+    observations with a roster the parser could no longer read. Accepting it
+    would take the city off the map on the strength of a renamed field."""
+    clock = _VirtualClock(1788484080)
+    monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
+    sources = [SimpleNamespace(city="tainan")]
+    tainan_lots = (_make_lot("1", city="tainan", lat=22.99, lon=120.21),)
+    seen = []
+
+    def collect(conn, to_try, capacities):
+        if len(seen) >= 2:
+            raise _StopLoop()
+        lots = tainan_lots if not seen else ()
+        return [TickResult(city="tainan", data_ts=clock.now, rows_written=1,
+                           advanced=True, lots=lots)]
+
+    with pytest.raises(_StopLoop):
+        scheduler.run_forever(None, {}, collect=collect, sources=sources,
+                              sleep=clock.sleep, now_fn=clock.now_fn, archive=_no_archive,
+                              publish=lambda conn, rosters: seen.append(dict(rosters)))
+
+    assert seen[1] == {"tainan": tainan_lots}
+
+
 def _no_archive(conn, day):
     """A do-nothing archive hook.
 
@@ -897,7 +1059,7 @@ def test_publish_runs_after_an_advancing_tick(monkeypatch):
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {}, collect=collect, sources=_ONE_SOURCE, sleep=clock.sleep,
                               now_fn=clock.now_fn, archive=_no_archive,
-                              publish=lambda conn: published.append(clock.now))
+                              publish=lambda conn, rosters: published.append(clock.now))
 
     assert len(published) == 2
 
@@ -915,7 +1077,7 @@ def test_publish_failure_does_not_stop_collection(monkeypatch):
             raise _StopLoop()
         return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
-    def boom(conn):
+    def boom(conn, rosters):
         raise RuntimeError("artifact write failed")
 
     with pytest.raises(_StopLoop):

@@ -218,9 +218,31 @@ def record_source_health(
 ) -> None:
     """Upsert one city's latest fetch outcome.
 
-    `first_ts = COALESCE(first_ts, excluded.first_ts)`: the first sighting of
-    a source is never overwritten by later runs, so `source_health` can report
-    how long a city has been collected.
+    TWO CLOCKS, AND THEY ARE NOT INTERCHANGEABLE. `observed_at` is ours: when
+    the collector asked, stamped once per fetch whatever the feed says.
+    `newest_ts` is the feed's: the newest `data_ts` in what it answered with.
+    `first_ts` records the first of the former -- how long this city has been
+    collected -- and `last_ts` the latest of the latter, which is the only
+    column that can say a feed has stopped moving.
+
+    The two arguments used to be written the other way round -- the `VALUES`
+    tuple read `(city, newest_ts, observed_at, ...)` against columns
+    `(city, first_ts, last_ts, ...)` -- so `last_ts` held the collector's own
+    clock and `report._source_line`, which ages `last_ts` against `now`, was
+    measuring how long ago we polled. That is ~0 on every successful tick, so a
+    week-old frozen payload with half its counts usable printed `ok` and the
+    `STALE` branch was unreachable for any city actually being polled.
+
+    `first_ts = COALESCE(sources.first_ts, excluded.first_ts)`: the first
+    sighting of a source is never overwritten by later runs.
+
+    `last_ts = COALESCE(excluded.last_ts, sources.last_ts)`: a failed fetch
+    passes `newest_ts=None`, and a failure is not evidence that the newest
+    reading we ever saw stopped existing. Overwriting it with NULL would erase
+    the staleness clock at exactly the moment it starts to matter -- during the
+    outage -- and `_source_line` would fall back to printing an age of
+    "unknown" for a source it had days of history for. The `ok` flag is what
+    reports the failure itself.
     """
     conn.execute(
         """
@@ -228,12 +250,12 @@ def record_source_health(
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(city) DO UPDATE SET
             first_ts = COALESCE(sources.first_ts, excluded.first_ts),
-            last_ts = excluded.last_ts,
+            last_ts = COALESCE(excluded.last_ts, sources.last_ts),
             last_rows = excluded.last_rows,
             last_usable = excluded.last_usable,
             last_ok = excluded.last_ok
         """,
-        (city, newest_ts, observed_at, rows, usable, int(ok)),
+        (city, observed_at, newest_ts, rows, usable, int(ok)),
     )
 
 

@@ -20,6 +20,48 @@ POLL_PERIOD_MIN = 5
 RETRY_DELAYS_SEC = (45, 45, 60)  # if data_ts has not advanced
 HTTP_TIMEOUT_SEC = 30
 
+# How much of the 300s slot the in-slot retry loop must leave behind it.
+#
+# The retry budget above was tuned when there was one source: 4 attempts x 30s
+# of socket timeout plus 45+45+60s of delay is 270s, just inside the slot. With
+# six sources one attempt costs `len(pending) x HTTP_TIMEOUT_SEC`, so the same
+# budget runs to 870s in the worst case. An overrun is not merely a late
+# publish: `next_poll_ts` returns the *next* slot boundary after the loop
+# finishes, so a slot that ends past its successor's start skips that
+# successor outright -- and every healthy city loses that reading with it.
+# Measured by the reviewer against the real loop: two hanging feeds stretch a
+# slot to ~390s and Taipei, which succeeded on attempt 1, polls 12 times in 24
+# slots, permanently. Taipei's readings cannot be re-fetched.
+#
+# So the loop gets a deadline at `slot start + 300 - this`, and the reserve is
+# what publishing (six shards), the day-rollover compaction and prune get to
+# spend after it. 45s is roughly three times the longest publish measured
+# (0.22s for the liveness pass over 635,563 rows, a few seconds for the whole
+# six-shard path) and equals one retry delay, so it is also the granularity at
+# which the loop can give an attempt up.
+SLOT_RESERVE_SEC = 45
+
+# Plausibility window for a feed's own `data_ts`, measured against the fetch
+# time. Counts go through `quality.clean_count` and coordinates through
+# `geo.in_taiwan`; until this, timestamps went through nothing.
+#
+# Live, not theoretical: one fetch of Tainan on 2026-09-16 returned 16 of 268
+# records stamped more than 48 h old, the worst by 2.3 years. Those rows insert
+# and then prune inside the same slot -- never compacted, a silent hole in the
+# corpus -- and their lots can never pass the publish filter. The future
+# direction is worse and unrecoverable: one record stamped 400 days ahead pins
+# `store.latest_data_ts` to itself forever, so the city reads stalled on every
+# healthy tick and is retried four times a slot; `base_data_ts` publishes 400
+# days in the future; `free_at` matches only the poisoned lot, so every other
+# card loses its observed count; and the row neither prunes nor compacts.
+#
+# 48 h is the hot window itself (`HOT_RETENTION_SEC`): a stamp older than that
+# is one no reader could ever have used. 15 min forward is the whole retry
+# budget plus a margin for a feed clock that runs fast -- generous enough that
+# no honest publication is refused, tight enough that nothing can outrun prune.
+DATA_TS_MAX_AGE_SEC = 48 * 3600
+DATA_TS_MAX_AHEAD_SEC = 15 * 60
+
 # Largest feed body accepted. Measured 2026-09-14: availability 421,825 B,
 # metadata 2,883,343 B. 32 MiB is ~11x the larger, so growth never trips it,
 # while a hijacked or broken endpoint cannot stream gigabytes into memory.

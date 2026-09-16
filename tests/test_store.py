@@ -331,9 +331,32 @@ def test_source_health_round_trips(tmp_path):
 
 
 def test_source_health_keeps_the_first_sighting_across_later_ticks(tmp_path):
+    """`first_ts` is the collector's clock, `last_ts` is the feed's.
+
+    The two used to be written into each other's columns, so `first_ts` held a
+    data timestamp and `last_ts` held the poll time -- which is what made
+    `report._source_line`'s staleness check measure how long ago we asked
+    rather than how old the data is. The distinct numbers below are the point:
+    if the two are ever equal the swap is invisible.
+    """
     conn = store.connect(tmp_path / "hot.sqlite")
     store.record_source_health(conn, "tainan", observed_at=200, rows=268, usable=190, newest_ts=199, ok=True)
     store.record_source_health(conn, "tainan", observed_at=500, rows=270, usable=200, newest_ts=499, ok=False)
     health = store.source_health(conn)["tainan"]
-    assert health["first_ts"] == 199, "the first sighting must not be overwritten by a later tick"
-    assert (health["last_ts"], health["rows"], health["usable"], health["ok"]) == (500, 270, 200, False)
+    assert health["first_ts"] == 200, (
+        "the first POLL, and never overwritten by a later tick"
+    )
+    assert health["last_ts"] == 499, "the newest DATA timestamp, not the newest poll"
+    assert (health["rows"], health["usable"], health["ok"]) == (270, 200, False)
+
+
+def test_a_failed_fetch_does_not_erase_the_newest_data_timestamp(tmp_path):
+    """A failure passes `newest_ts=None`, and that is not evidence the reading
+    we already had stopped existing. Overwriting `last_ts` with NULL would
+    blank the staleness clock exactly when the outage starts."""
+    conn = store.connect(tmp_path / "hot.sqlite")
+    store.record_source_health(conn, "tainan", observed_at=200, rows=268, usable=190, newest_ts=199, ok=True)
+    store.record_source_health(conn, "tainan", observed_at=500, rows=0, usable=0, newest_ts=None, ok=False)
+    health = store.source_health(conn)["tainan"]
+    assert health["last_ts"] == 199, "the last reading we ever saw survives the outage"
+    assert health["ok"] is False, "and the failure itself is what reports the outage"

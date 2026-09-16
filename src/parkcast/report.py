@@ -236,6 +236,25 @@ def _coverage_line(city: str, cov: CityCoverage) -> str:
 
 
 def _source_line(city: str, health: dict, *, now: int) -> str:
+    """One city's health line.
+
+    `last_ts` is the newest DATA timestamp the city has ever answered with, not
+    when we last polled it -- see `store.record_source_health`, where the two
+    used to be written into each other's columns. Ageing it against `now` is
+    therefore a real staleness measure for the four cities whose feeds carry a
+    timestamp at all.
+
+    IT IS NOT ONE FOR KAOHSIUNG OR TAOYUAN. Their feeds carry no timestamp, so
+    their adapters stamp `data_ts = now` (`feed.TS_FETCH`); `last_ts` is then
+    always the moment of the last successful fetch and the age is always ~0.
+    Those two cities have NO staleness signal available at any layer -- a
+    payload frozen for a week and a live one are byte-identical in every field
+    this table records. Closing that would need something outside the feed:
+    either the feed itself learning to stamp its records, or a content hash per
+    fetch (an unchanged payload hash over N consecutive polls is evidence a
+    per-row timestamp would have given directly). `ok=False` on an outright
+    failure remains the only thing their line can honestly report.
+    """
     rows, usable = health["rows"], health["usable"]
     age_min = (now - health["last_ts"]) // 60 if health["last_ts"] else None
     if not health["ok"]:

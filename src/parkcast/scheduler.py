@@ -318,6 +318,16 @@ def run_forever(
     archive: Callable[..., None] = archive_day,
     publish: Callable[..., None] | None = None,
 ) -> None:
+    """Poll every enabled source on the slot phase, forever.
+
+    `publish`, when given, is called as `publish(conn, rosters)` after any slot
+    in which at least one city advanced. `rosters` is {city: this city's most
+    recent roster} for the five cities that carry their own; Taipei is not in
+    it, because its roster arrives on a separate daily endpoint. Without that
+    second argument the five would have no route to publishing at all -- their
+    rosters were parsed for capacities each tick and then discarded, so
+    `cities.json` and every `grid-{city}.bin` were dead code outside tests.
+    """
     # A live view of the registry, not a one-shot snapshot: every one of the
     # up-to-four attempts in a slot, across every slot for the life of the
     # process, iterates it again. `SOURCES.values()` is reusable exactly that
@@ -348,6 +358,20 @@ def run_forever(
     # from masking a real outage.
     stall_slots: dict[str, int] = dict.fromkeys(sources_by_city, 0)
 
+    # Each roster-carrying city's most recent roster, by city. Built once and
+    # updated in place for the life of the process rather than rebuilt per
+    # tick: a roster arrives with every fetch, and five cities' worth is ~3,400
+    # `Lot` objects that are overwhelmingly identical from one tick to the
+    # next. Replacing a city's entry rebinds one reference.
+    #
+    # A city is only ever overwritten by a roster it actually sent this slot,
+    # so a city whose fetch failed (absent from `slot_results` entirely --
+    # `collect_all` skips it) keeps its last good one and stays on the map,
+    # exactly as Taipei keeps its capacities across a failed metadata refresh.
+    # Taipei never appears here: its `SourceTick.lots` is None and its roster
+    # comes from `refresh_metadata`.
+    rosters: dict[str, tuple] = {}
+
     while True:
         target = next_poll_ts(now_fn())
         sleep(max(0, target - now_fn()))
@@ -362,10 +386,48 @@ def run_forever(
         pending = set(sources_by_city)
         slot_results: dict[str, TickResult] = {}
 
+        # The instant the retry loop must be finished by, so the slot ends
+        # inside its own 300 seconds. Everything after the loop -- publishing
+        # six shards, the day-rollover compaction, prune -- is delayed by any
+        # overrun, and worse, `next_poll_ts` is evaluated at the top of the
+        # next iteration: a loop that runs past `target + 300` makes it return
+        # the slot after next, so the following slot is not collected at all.
+        # See `config.SLOT_RESERVE_SEC`.
+        deadline = target + config.POLL_PERIOD_MIN * 60 - config.SLOT_RESERVE_SEC
+
         for delay in (0, *config.RETRY_DELAYS_SEC):
             if not pending:
                 break
             if delay:
+                # Whether the attempt about to be made can still fit, judged on
+                # its WORST case rather than on the clock alone: `now >=
+                # deadline` would let an attempt start one second inside the
+                # deadline and run 180s past it, which is the overrun this
+                # exists to prevent. `collect_all` asks each source in turn, so
+                # an attempt in which every pending source hangs costs one
+                # socket timeout each.
+                #
+                # Never applied to the first attempt (`delay` is 0 there):
+                # collecting at all is the job, and a slot that cannot afford
+                # one fetch has nothing left to protect.
+                worst_case = delay + len(pending) * config.HTTP_TIMEOUT_SEC
+                if now_fn() + worst_case > deadline:
+                    # Abandoning the retry costs the pending cities one slot's
+                    # reading -- which they have already failed to produce on
+                    # every attempt so far -- while running it dry costs every
+                    # OTHER city the whole of the next slot. A genuinely
+                    # slow-but-healthy feed is unaffected in practice: it only
+                    # loses an attempt once its own responses have eaten the
+                    # slot, and a feed that answers in under a second still
+                    # gets all four.
+                    log.warning(
+                        "out of slot budget: abandoning the remaining retries "
+                        "for %s -- a further attempt could run %ss past the "
+                        "end of this slot and cost every source the next one",
+                        ", ".join(sorted(pending)),
+                        now_fn() + worst_case - deadline,
+                    )
+                    break
                 sleep(delay)
             try:
                 to_try = [sources_by_city[city] for city in sources_by_city if city in pending]
@@ -396,6 +458,16 @@ def run_forever(
         # and others not is now the ordinary case, not a binary "all or
         # nothing" the old `for/else` could assume.
         advanced_cities = {city for city, r in slot_results.items() if r.advanced}
+        # From every city that answered, advancing or not: a feed that has
+        # simply not republished yet still told us its roster, and holding that
+        # back would leave a new car park off the map until the counts moved.
+        # `if r.lots` and not `is not None`, deliberately -- an empty roster is
+        # the reshaped-payload case `collect_once` warns about, and letting it
+        # through would take the whole city off the map on the strength of a
+        # renamed coordinate field.
+        for city, r in slot_results.items():
+            if r.lots:
+                rosters[city] = r.lots
         for city in advanced_cities:
             r = slot_results[city]
             log.info("tick city=%s data_ts=%s rows=%s", r.city, r.data_ts, r.rows_written)
@@ -405,7 +477,7 @@ def run_forever(
         if advanced_cities:
             if publish is not None:
                 try:
-                    publish(conn)
+                    publish(conn, rosters)
                 except Exception:
                     # Publishing is downstream of collection: a tick missed is
                     # data that can never be re-fetched, while a stale artifact

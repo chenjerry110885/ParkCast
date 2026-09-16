@@ -224,6 +224,79 @@ parses to *some* integer (frequently a legitimate `0`), not that every lot has s
   "once a year" update-frequency label is wrong for a feed that timestamps every record to the
   second — trust `UPDATETIME`, not the catalogue metadata.
 
+## Timestamps are bounded on the way in
+
+Counts go through `quality.clean_count` and coordinates through `sources.geo.in_taiwan`; since the
+final fix round, `data_ts` goes through `quality.data_ts_plausible`, applied once in
+`collector.collect_once` (see `collector.bound_data_ts` for why there and not in each adapter or in
+`store.insert_snapshot`). A stamp outside **`now − 48 h` to `now + 15 min`** is not stored: the
+observation is dropped, counted on `TickResult.rejected_ts`, and logged with the worst offset and
+the lot that produced it.
+
+**This is live, not hypothetical.** One fetch of Tainan on 2026-09-16 returned **16 of 268 records
+stamped more than 48 h old, the worst by 2.3 years.** Stored, those rows insert and then prune inside
+the same slot — never compacted, a hole in the corpus with nothing in the log — and their lots can
+never pass the publish filter. A stamp in the *future* is worse and unrecoverable: one record 400
+days ahead pins `store.latest_data_ts` to itself forever, so the city reads stalled on every healthy
+tick and is retried four times a slot, `base_data_ts` publishes 400 days ahead, and `store.free_at`
+matches only that one lot, taking the observed count off every other card in the city.
+
+The row is **rejected, not rebased onto the fetch time**. `TS_FETCH` would keep it, but rebasing a
+reading stamped 2.3 years ago to "now" does not record that we are unsure when it was taken — it
+asserts it was taken now, which then publishes as the lot's current observed count and lands in the
+wrong time-of-week climatology bucket. A lot with no reading is something `liveness` already handles
+honestly.
+
+## Known limits — read before trusting a number
+
+Four things that are **true today, deliberately not fixed, and easy to trip over**. None is a bug in
+an adapter; each is a place where a measurement means less than it looks like it does.
+
+- **`evaluate.py` is not scoped per city.** Its origin selection and its labels run over the whole
+  store. With realistic clock phases across six cities it selected **only Kaohsiung origins and
+  scored zero Taipei predictions** — Kaohsiung and Taoyuan stamp `data_ts = now`, so they always hold
+  the global maximum, exactly the defect `forecast.by_city` exists to fix on the publishing side.
+  **Anyone re-running the evaluation must scope it to one city first**, or the resulting skill number
+  is about a different city than the one they think they are measuring. It is not a number to quote
+  until that is done.
+- **`liveness`'s cadence constants are Taipei's.** `NOT_UPDATING_MIN_COVERAGE` counts readings
+  against 5-minute slots (`liveness.SLOT_SECONDS`, from `POLL_PERIOD_MIN`). For a lot whose own stamp
+  cadence is slower than roughly 10 minutes, a genuinely unchanged run never reaches half its slots,
+  so `last_update` falls back to the newest reading and **not-updating withholding never fires for
+  that lot**. That is the conservative direction — a forecast is published where one might have been
+  withheld — but it means "0 lots withheld" in a per-record city is not evidence the feed is moving.
+- **Kaohsiung and Taoyuan have no staleness signal at any layer.** Their feeds carry no timestamp, so
+  their adapters stamp `data_ts = now`; `sources.last_ts` is therefore always the last successful
+  fetch and `report._source_line`'s age is always ~0. A payload frozen for a week and a live one are
+  identical in every field recorded. Closing this needs something outside the feed — the feed
+  learning to stamp its records, or a per-fetch content hash (an unchanged hash over N consecutive
+  polls is the evidence a record timestamp would give directly). `ok=False` on an outright failure is
+  the only thing those two lines can honestly report.
+- **TLS verification failed from the host for three of six feeds, and has not been checked from
+  inside the container.** During review on 2026-09-16, host Python rejected **New Taipei** (missing
+  intermediate certificate) and **Kaohsiung** and **Hsinchu** (missing Subject Key Identifier, which
+  OpenSSL 3.x requires), while `curl` succeeded against all three. That is a CA-trust question about
+  the machine, not a defect in any adapter, and it **must be checked from inside the collector
+  container at rollout** — see the rollout checklist in
+  [`state-of-play.md`](state-of-play.md). **Never work around it with `verify=False`**: that turns a
+  trust question into a silent acceptance of any certificate, on feeds this project already treats as
+  strangers' processes.
+
+## Turning cities on: `PARKCAST_CITIES`
+
+`SOURCES` holds all six adapters; **`PARKCAST_CITIES` decides which of them this container actually
+collects.** Comma-separated city keys (`taipei`, `newtaipei`, `kaohsiung`, `tainan`, `taoyuan`,
+`hsinchu`); unset or empty means all six, so an operator who sets nothing gets the registry exactly
+as it reads. An unknown name **stops the boot** with a message naming the typo and every valid
+choice — collecting a set the operator did not ask for while they believe otherwise leaves a gap in
+the corpus that cannot be backfilled. Order and duplicates in the value are ignored; request order
+within a tick is `SOURCES`' own. The boot log says what was selected:
+
+    collecting 2 of 6 cities: taipei, newtaipei (set PARKCAST_CITIES to change)
+
+This is what makes the spec's staged rollout (§9) possible without editing source and rebuilding the
+image between each step.
+
 ## Two of six are a city's own map backend, not a catalogued dataset
 
 New Taipei's `getSpot.ashx` and Kaohsiung's `ParkingLotPost` are not versioned, catalogued open-data

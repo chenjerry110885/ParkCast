@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from parkcast import collector, store
-from parkcast.feed import TS_FETCH, FeedSnapshot, Observation, parse_updatetime
+from parkcast import collector, config, store
+from parkcast.feed import TS_FETCH, TS_RECORD, FeedSnapshot, Observation, parse_updatetime
 from parkcast.ids import qualify
 from parkcast.quality import Q
 from parkcast.sources import SourceTick, taipei
@@ -75,6 +75,122 @@ def test_fetch_failure_propagates_rather_than_writing_partial_data(conn):
     with pytest.raises(ConnectionError):
         collector.collect_once(conn, _BoomSource(), {}, now=fixture_observed_at())
     assert store.count_rows(conn) == 0
+
+
+# --- the data_ts plausibility bound ------------------------------------------
+#
+# Counts go through `clean_count` and coordinates through `geo.in_taiwan`;
+# until `collector.bound_data_ts` timestamps went through nothing at all. Both
+# directions were reached live on 2026-09-16: a single fetch of Tainan returned
+# 16 of 268 records stamped more than 48 h old, the worst by 2.3 years. Those
+# rows insert and then prune inside the same slot -- a hole in the corpus that
+# nothing logs. The forward direction is the unrecoverable one, and is what the
+# first test below pins.
+
+
+class _StampedSource:
+    """A source whose records carry the stamps the feed gave them.
+
+    `rows` is (raw_id, free_car, data_ts) -- unlike `_StubSource`, which stamps
+    everything `now` and so can never model a feed that lies about time.
+    """
+
+    def __init__(self, city, rows):
+        self.city = city
+        self._rows = rows
+
+    def fetch(self, *, now):
+        observations = tuple(
+            Observation(qualify(self.city, raw_id), free_car, None, data_ts, TS_RECORD)
+            for raw_id, free_car, data_ts in self._rows
+        )
+        snapshot = FeedSnapshot(city=self.city, observed_at=now, observations=observations)
+        return SourceTick(snapshot=snapshot, lots=None)
+
+
+def test_a_record_stamped_in_the_future_never_reaches_the_store(conn, caplog):
+    """The unrecoverable direction. One record 400 days ahead pins
+    `store.latest_data_ts` to itself forever: the city then reads stalled on
+    every healthy tick and is retried four times a slot, `base_data_ts`
+    publishes 400 days in the future (the `latest_ts == 0` guard only catches
+    the 1970 direction), and `store.free_at` matches only the poisoned lot, so
+    every other card loses its observed count. The row neither prunes nor
+    compacts."""
+    now = 1_788_485_010
+    source = _StampedSource("tainan", rows=[
+        ("1", 5, now - 60),                 # honest
+        ("2", 7, now + 400 * 86_400),       # 400 days ahead
+    ])
+
+    with caplog.at_level(logging.WARNING, logger="parkcast.collector"):
+        result = collector.collect_once(conn, source, {}, now=now)
+
+    assert result.rejected_ts == 1
+    assert result.rows_written == 1
+    assert store.latest_data_ts(conn, "tainan") == now - 60, (
+        "the poisoned stamp must not become this city's newest reading"
+    )
+    assert [row[0] for row in conn.execute("SELECT lot_id FROM observations")] == ["tainan:1"]
+    assert "tainan" in caplog.text and "plausibility window" in caplog.text
+
+
+def test_a_record_stamped_years_ago_is_rejected_rather_than_pruned_in_silence(conn, caplog):
+    """The Tainan case, measured live. Stored, the row is deleted by the very
+    next prune without ever being compacted -- corpus loss with nothing in the
+    log. Rejected, it is counted and said out loud."""
+    now = 1_788_485_010
+    source = _StampedSource("tainan", rows=[
+        ("1", 5, now - 60),
+        ("2", 3, now - int(2.3 * 365 * 86_400)),
+    ])
+
+    with caplog.at_level(logging.WARNING, logger="parkcast.collector"):
+        result = collector.collect_once(conn, source, {}, now=now)
+
+    assert result.rejected_ts == 1
+    assert store.count_rows(conn) == 1
+    assert "1 of 2 observation(s)" in caplog.text
+
+
+def test_the_bound_is_inclusive_at_both_edges(conn):
+    """A reading exactly 48 h old is the oldest the hot window can hold, and
+    the forward margin has to cover the whole retry budget plus a feed clock
+    that runs a little fast. Neither edge may be refused."""
+    now = 1_788_485_010
+    source = _StampedSource("tainan", rows=[
+        ("1", 5, now - config.DATA_TS_MAX_AGE_SEC),
+        ("2", 5, now + config.DATA_TS_MAX_AHEAD_SEC),
+        ("3", 5, now - config.DATA_TS_MAX_AGE_SEC - 1),
+        ("4", 5, now + config.DATA_TS_MAX_AHEAD_SEC + 1),
+    ])
+
+    result = collector.collect_once(conn, source, {}, now=now)
+
+    assert result.rejected_ts == 2
+    assert sorted(row[0] for row in conn.execute("SELECT lot_id FROM observations")) == [
+        "tainan:1", "tainan:2"
+    ]
+
+
+def test_a_zero_count_on_an_implausible_stamp_is_refused_like_any_other(conn):
+    """A `0` is a real reading and `clean_count` keeps it -- but this bound is
+    about WHEN, not what. A full car park we cannot date is still undateable."""
+    now = 1_788_485_010
+    source = _StampedSource("tainan", rows=[("1", 0, now + 400 * 86_400)])
+
+    result = collector.collect_once(conn, source, {}, now=now)
+
+    assert (result.rejected_ts, result.rows_written) == (1, 0)
+
+
+def test_taipeis_feed_stamp_passes_the_bound_untouched(conn):
+    """Taipei's single strictly-parsed UPDATETIME must behave exactly as it did
+    -- the corpus behind it is the only one this project cannot re-fetch."""
+    result = collector.collect_once(conn, _FixtureTaipeiSource(), {}, now=fixture_observed_at())
+
+    assert result.rejected_ts == 0
+    assert result.rows_written > 1000
+    assert store.count_rows(conn) == result.rows_written
 
 
 # --- collect_all: every source collected, each one's failure isolated ------

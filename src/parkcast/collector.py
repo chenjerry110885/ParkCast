@@ -1,11 +1,12 @@
 """One collection tick: fetch, parse, validate, persist."""
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import requests
 
-from parkcast import config, metadata, store
+from parkcast import config, metadata, quality, store
+from parkcast.feed import FeedSnapshot, Observation
 from parkcast.sources import http
 # Re-exported: existing callers and tests import FeedError from here. It is
 # defined in sources.http, which collector.fetch_json now delegates to --
@@ -22,6 +23,22 @@ class TickResult:
     data_ts: int
     rows_written: int
     advanced: bool
+    # The roster this tick carried, straight from `SourceTick.lots`: the five
+    # feeds that answer their own lot list do so in the same request as their
+    # counts, and this is how it reaches publishing. `None` for Taipei, whose
+    # roster comes from its separate daily metadata endpoint instead.
+    #
+    # It was previously consumed for capacities inside `collect_once` and then
+    # dropped on the floor, which is why -- verified by running `main()` with a
+    # stubbed `run_forever` -- six registered sources produced exactly one
+    # published city. `publish_city`, `cities.json` and every `grid-{city}.bin`
+    # were unreachable in production; only tests that called
+    # `publish_artifacts` directly ever saw them.
+    lots: tuple[metadata.Lot, ...] | None = None
+    # Observations this tick whose `data_ts` could not be true and were
+    # therefore not stored. Counted rather than merely logged so the number is
+    # available to a caller; see `bound_data_ts`.
+    rejected_ts: int = 0
 
 
 def fetch_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC,
@@ -36,6 +53,52 @@ def fetch_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC,
     still patches the same `requests` module `get_json` calls into.
     """
     return http.get_json(url, timeout=timeout, max_bytes=max_bytes)
+
+
+def bound_data_ts(
+    snapshot: FeedSnapshot,
+) -> tuple[FeedSnapshot, tuple[Observation, ...]]:
+    """Split one snapshot into the observations we can date and the ones we cannot.
+
+    WHERE THIS LIVES, AND WHY NOT IN `store.insert_snapshot`. That is the one
+    chokepoint every stored row passes, and it is the obvious home -- but the
+    value that does the damage is `FeedSnapshot.latest_data_ts`, not the row.
+    Filtering rows down there would leave the caller's snapshot still reporting
+    the poisoned maximum, so `collect_once` would still call the tick advanced
+    on a data_ts the store does not hold, `TickResult.data_ts` would still
+    carry it, and `collect_all`'s health query would count rows at a `data_ts`
+    with none. One filtered snapshot here fixes all of those at once.
+
+    Nor in the adapters, which is where the stamps are parsed: six copies of
+    one rule, and a seventh city could simply forget it. This is the last point
+    at which a row is still an `Observation` -- i.e. the last point at which
+    `ts_kind` still exists -- and `collect_once` is the only production path
+    into `insert_snapshot`, so in practice it is a chokepoint too.
+    `insert_snapshot` stays a faithful primitive that stores what it is handed,
+    which is what lets the fixture-driven publish tests seed historic days
+    directly.
+
+    REJECTED, NOT REBASED. `feed.TS_FETCH` is available and would keep the row
+    -- but rebasing a reading stamped 2.3 years ago to "now" does not record
+    that we are unsure when it was taken; it asserts it was taken now. That
+    count would then be published as the lot's current observed count, and fed
+    to climatology in the wrong time-of-week bucket. Dropping the row leaves
+    the lot with no reading for this tick, which `liveness` already handles
+    honestly -- no forecast, "not updating" -- and which is a fact rather than
+    a fabrication. The rows are lost either way: under the old behaviour an
+    old-direction stamp inserted and pruned inside the same slot, silently.
+    What changes is that the loss is now counted and said out loud.
+    """
+    kept: list[Observation] = []
+    rejected: list[Observation] = []
+    for obs in snapshot.observations:
+        target = kept if quality.data_ts_plausible(obs.data_ts, snapshot.observed_at) else rejected
+        target.append(obs)
+    if not rejected:
+        # The overwhelmingly common path: hand back the very same object, so a
+        # healthy tick costs one comparison per observation and no allocation.
+        return snapshot, ()
+    return replace(snapshot, observations=tuple(kept)), tuple(rejected)
 
 
 def collect_once(
@@ -59,11 +122,31 @@ def collect_once(
     for them the caller's `capacities` is ignored in favour of a map built
     fresh from this tick: capacities that can never be staler than the
     reading they bound, and no second request to get them.
+
+    That same roster is handed back on `TickResult.lots` rather than being
+    consumed here and discarded, because publishing needs it too: it is the
+    only place `lots-{city}.json`, `grid-{city}.bin` and `cities.json` can get
+    their rosters from. See `TickResult.lots`.
     """
     observed_at = int(time.time()) if now is None else now
     previous = store.latest_data_ts(conn, source.city)
 
     tick = source.fetch(now=observed_at)
+    # Before anything reads `latest_data_ts` off it, and before a single row
+    # reaches the store. See `bound_data_ts`.
+    snapshot, rejected = bound_data_ts(tick.snapshot)
+    if rejected:
+        worst = max(rejected, key=lambda obs: abs(obs.data_ts - observed_at))
+        log.warning(
+            "%s: %s of %s observation(s) carry a data_ts outside the "
+            "plausibility window (-%s h to +%s min around the fetch time) and "
+            "were not stored; the worst is %+d s from the fetch (lot %s). A "
+            "count that cannot be placed in time cannot be stored without "
+            "inventing the one fact the corpus is keyed on",
+            source.city, len(rejected), len(tick.snapshot.observations),
+            config.DATA_TS_MAX_AGE_SEC // 3600, config.DATA_TS_MAX_AHEAD_SEC // 60,
+            worst.data_ts - observed_at, worst.lot_id,
+        )
     if tick.lots is not None and not tick.lots and tick.snapshot.observations:
         # Every roster-carrying adapter appends the Observation before its own
         # coordinate/roster check, and the Lot only after -- so a payload
@@ -79,13 +162,15 @@ def collect_once(
             source.city, len(tick.snapshot.observations),
         )
     tick_capacities = capacities if tick.lots is None else metadata.capacity_map(tick.lots)
-    rows = store.insert_snapshot(conn, tick.snapshot, tick_capacities)
+    rows = store.insert_snapshot(conn, snapshot, tick_capacities)
 
     return TickResult(
         city=source.city,
-        data_ts=tick.snapshot.latest_data_ts,
+        data_ts=snapshot.latest_data_ts,
         rows_written=rows,
-        advanced=previous is None or tick.snapshot.latest_data_ts > previous,
+        advanced=previous is None or snapshot.latest_data_ts > previous,
+        lots=tick.lots,
+        rejected_ts=len(rejected),
     )
 
 

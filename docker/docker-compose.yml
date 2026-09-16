@@ -25,6 +25,14 @@ services:
     environment:
       TZ: Asia/Taipei
       PARKCAST_UPLOAD_URL: https://parkcast.tpe-dev.workers.dev/artifacts/latest
+      # Which cities this container collects. The code default is all six; this
+      # is set to Taipei alone on purpose, because the spec's rollout (§9) and
+      # the runbook in docs/state-of-play.md both start there and a first boot
+      # after the merge must not turn six untried feeds on at once. Widen it
+      # one step at a time -- "taipei,newtaipei", then the rest -- restarting
+      # between steps; an unknown name stops the boot and names the valid ones.
+      # See docs/sources.md, "Turning cities on".
+      PARKCAST_CITIES: taipei
     secrets:
       - parkcast_upload_secret
 

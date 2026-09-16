@@ -239,8 +239,8 @@ Twelve tasks against [`docs/superpowers/specs/2026-09-16-nationwide-collector-de
 took the collector from one feed to six: 臺北市, 新北市, 高雄市, 臺南市, 桃園市, 新竹市, each behind its
 own adapter under `src/parkcast/sources/` (`CLAUDE.md`'s "The nationwide collector" section; per-feed
 detail in the new [`docs/sources.md`](sources.md)). It is code-complete and tested on the branch —
-**527 Python tests, 3 skipped**, measured by running `./.venv/Scripts/python.exe -m pytest -q` in
-this worktree. The web, Worker and script suites are untouched by this branch and could not be run
+**546 Python tests, 3 skipped**, measured by running `./.venv/Scripts/python.exe -m pytest -q` in
+this worktree (527 after the twelve tasks; 546 after the whole-branch review round below). The web, Worker and script suites are untouched by this branch and could not be run
 here (a fresh worktree has no `node_modules` in `web/` or `worker/`), so their figures above —
 **288 web · 66 Worker · 50 scripts** — are carried forward from the last real run, unchanged, not
 re-measured.
@@ -273,6 +273,22 @@ other, not that either is right:
 
 Both were caught in review, not by the suite, and both are now written into `CLAUDE.md`'s
 project-specific standards as a general rule for the next test of this shape.
+
+**A whole-branch review then found six defects at the seams between tasks**, none of which any
+single task's own review could see. All six are fixed on the branch:
+
+| | What it cost |
+|---|---|
+| **The retry loop had no deadline** | Tuned for one source: with two feeds hanging, a slot ran to ~390 s, `next_poll_ts` skipped the following slot, and Taipei — which had succeeded on attempt 1 — polled 12 times in 24 slots, permanently. The loop now stops retrying when the next attempt's worst case would not fit in the slot (`config.SLOT_RESERVE_SEC`). |
+| **`data_ts` had no plausibility bound** | Live: 16 of 268 Tainan records stamped over 48 h old, worst by 2.3 years, inserting and pruning in the same slot. One future stamp pins a city's `latest_data_ts` forever. Now bounded to `now − 48 h … now + 15 min` at `collect_once` — see [`sources.md`](sources.md). |
+| **The other five cities never published** | `_lots` came only from Taipei's metadata blob; each tick's roster was used for capacities and discarded, so `cities.json` and every `grid-{city}.bin` were dead code outside tests. Rosters now ride `TickResult.lots` through `run_forever` to publishing, and a failed fetch keeps the city's last good roster. |
+| **The source-health columns were swapped** | `first_ts` held a data clock and `last_ts` the collector's, so `report.py` aged the poll time (~0 on every success) and a week-old frozen payload printed `ok`. |
+| **A failed migration silently switched off withholding** | The log called it "precision"; measured, `liveness.not_updating` returns `{}` for a Taipei lot frozen 48 h, so stuck sensors publish as certainties again for about a day. Comment and log message corrected. |
+| **The staged rollout had no mechanism** | `PARKCAST_CITIES` now selects the enabled cities, validated and logged at boot; default is all six. |
+
+Three further findings are **recorded and deliberately not fixed** — `evaluate.py`'s missing per-city
+scoping, `liveness`'s Taipei-cadence constants, and TLS verification failing from the host for three
+of six feeds. See "Known limits" in [`docs/sources.md`](sources.md) and the rollout checklist below.
 
 **The hot-store id migration has never run in production.** `store.migrate_to_namespaced_ids` runs
 once at startup (`__main__.main`, before anything else touches the store) and rewrites every
@@ -317,17 +333,38 @@ do today.
    `feat/nationwide-collector` (see "Nationwide collection" above), but turning it on is a live
    operation against a running collector and a published site, not something to do unattended:
    1. **Back up `data/hot.sqlite`** before the first boot of this code — the id migration has never
-      run in production.
-   2. `python -m pytest` green, then restart the collector with **Taipei alone** still enabled.
-      Confirm the live site is unchanged and `grid.bin` still republishes byte-for-byte.
-   3. Enable **New Taipei only**. Let it run a day, then read `data/cold/`'s actual growth and
-      compare it against the spec's 150–400 MB/month estimate — the number this plan deliberately
+      run in production. If the boot log says the migration failed, **fix it before trusting a
+      published forecast**: until it succeeds, no Taipei lot can be judged not-updating for ~24 h and
+      stuck sensors are published as certainties again (the log now says so).
+   2. **Check TLS from inside the container, before enabling anything but Taipei.** During review,
+      host Python failed certificate verification for **New Taipei** (missing intermediate),
+      **Kaohsiung** and **Hsinchu** (missing Subject Key Identifier under OpenSSL 3.x), while `curl`
+      succeeded against all three. The container has a different trust store, so this must be
+      measured where the collector actually runs — one `python -c` per URL inside
+      `docker-collector:latest`. **Never `verify=False`.** If a feed genuinely needs an intermediate,
+      the fix is the container's CA bundle, not switching verification off.
+   3. `python -m pytest` green, then restart the collector with **`PARKCAST_CITIES=taipei`**. Confirm
+      the boot log reads `collecting 1 of 6 cities: taipei`, the live site is unchanged, and
+      `grid.bin` still republishes byte-for-byte.
+   4. **`PARKCAST_CITIES=taipei,newtaipei`.** Let it run a day, then read `data/cold/`'s actual growth
+      and compare it against the spec's 150–400 MB/month estimate — the number this plan deliberately
       left unmeasured.
-   4. Enable the remaining four, one per tick-cycle, watching the per-source report.
-   5. The app keeps showing Taipei only until a following spec teaches it to read the other
+   5. Add the remaining four, one per tick-cycle, watching the per-source report. Unsetting
+      `PARKCAST_CITIES` entirely is the same as naming all six.
+   6. The app keeps showing Taipei only until a following spec teaches it to read the other
       cities' shards — the shards will exist on disk, but nothing reads them yet.
+
+   Each step is an environment-variable change plus a restart; no rebuild, and no source edit.
+   Per-city detail, and the three known limits that bound what the per-source report can tell you,
+   are in [`docs/sources.md`](sources.md).
 6. **Accumulate, then re-run the evaluation around 2026-10-01**, when every half-hour-of-week bucket
    has three days behind it (at 09-13: 134 of 336 had none, 120 one, 82 two; Tuesday none at all).
+   **Scope `evaluate.py` per city first.** It is not scoped today: origin selection and labels run
+   over the whole store, and with six cities' clock phases a review run selected **only Kaohsiung
+   origins and scored zero Taipei predictions** — Kaohsiung and Taoyuan stamp `data_ts = now`, so
+   they always hold the global maximum, which is the same defect `forecast.by_city` fixed on the
+   publishing side. Deliberately left unfixed in the nationwide round (nothing publishes off it), but
+   a number produced before scoping it is about the wrong city.
 7. **Then** consider a trained model — against a persistence baseline that is strong on an
    autocorrelated series, and a blend that now beats it.
 

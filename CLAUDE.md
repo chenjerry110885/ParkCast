@@ -529,8 +529,38 @@ cannot hold both. The cost: the legacy copy's `observed_at`, which was the truth
 time under `insert_snapshot`'s "first sighting wins" rule, is lost, so `lag` is very slightly
 overstated for those rows. **It has never run in production. `data/hot.sqlite` should be backed up
 before the first boot of this code** — see "What to do next" in `docs/state-of-play.md`. A failure
-logs and lets collection continue rather than killing the process (a split id window for a few hours
-costs precision; a collector that cannot boot costs every tick until someone runs SQL by hand).
+logs and lets collection continue rather than killing the process (a collector that cannot boot costs
+every tick until someone runs SQL by hand). **But the cost of that failure is more than precision,
+and the log now says so:** every per-city read is scoped either by the `city` column or by the
+namespaced key range (`ids.prefix_range`), and a legacy row satisfies neither, so it is invisible to
+both — which means `liveness.not_updating` sees only post-boot readings and **no lot can be judged
+not-updating for the first 24 h**. Stuck sensors publish as certainties again for about a day, which
+is exactly the failure Plan 3e shipped to fix.
+
+**Which cities are collected is an environment variable, not the registry.** `PARKCAST_CITIES` (see
+`sources.select` / `sources.from_environment`) names the enabled cities; unset means all six, an
+unknown name stops the boot naming the valid ones, and the selection is logged at boot. This is what
+makes the spec's staged rollout possible without editing source and rebuilding the image three times.
+`docker/docker-compose.yml` ships it set to `taipei`.
+
+**`data_ts` is bounded on the way in.** `quality.data_ts_plausible`, applied once in
+`collector.collect_once` via `collector.bound_data_ts`, refuses any stamp outside `now − 48 h` to
+`now + 15 min`; the observation is dropped, counted on `TickResult.rejected_ts`, and logged. Measured
+live: 16 of 268 Tainan records were over 48 h old, the worst by 2.3 years, and those rows insert and
+then prune inside the same slot. Rejected rather than rebased onto the fetch time — rebasing asserts
+a reading was taken now, which then publishes as the lot's observed count and lands in the wrong
+climatology bucket. It lives at the collection seam rather than in `store.insert_snapshot` because
+the value that does the damage is `FeedSnapshot.latest_data_ts`, not the row.
+
+**The in-slot retry loop has a deadline.** `config.SLOT_RESERVE_SEC`: a retry is only attempted if
+its worst case (`delay + len(pending) × HTTP_TIMEOUT_SEC`) still fits inside the slot. The budget was
+tuned for one source; with six, a slot that overruns makes `next_poll_ts` return the slot *after*
+next, so every healthy city silently loses that reading too.
+
+**Each tick's roster reaches publishing.** `TickResult.lots` carries `SourceTick.lots` through
+`run_forever`, which keeps the last good roster per city and hands them to `publish(conn, rosters)`.
+Without it, `__main__._lots` held only Taipei's metadata roster and the other five cities never
+published at all.
 
 **The daily report cannot measure per-lot coverage for New Taipei, Tainan or Hsinchu.**
 `report.TICK_STAMPED_CITIES` is `{taipei, kaohsiung, taoyuan}` — cities where one collector fetch

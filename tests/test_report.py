@@ -305,13 +305,29 @@ def test_source_that_failed_to_fetch_is_marked_failed(conn):
     assert "FAILED" in line
 
 
-def test_source_whose_newest_reading_is_over_an_hour_old_is_marked_stale(conn):
-    observed_at = 1000
-    now = observed_at + STALE_AFTER_SEC + 120
-    store.record_source_health(conn, "tainan", observed_at=observed_at, rows=268, usable=268, newest_ts=observed_at, ok=True)
+def test_a_frozen_feed_polled_successfully_right_now_is_marked_stale(conn):
+    """The production shape, and the one this line exists for.
+
+    The previous version of this test back-dated `observed_at` -- it recorded a
+    poll from an hour ago, which the collector never does: it records every
+    poll at the moment it happens. With `observed_at` and `newest_ts` written
+    into each other's columns, `last_ts` held the poll time, its age was ~0 on
+    every successful tick, and STALE was unreachable for any city being polled
+    at all. A week-old payload with half its counts usable printed `ok`.
+
+    So: polled NOW, successfully, 268 of 268 counts usable -- and answering
+    with data stamped two hours ago. Everything about the fetch looks healthy;
+    only the feed's own clock says otherwise.
+    """
+    now = 1_788_485_010
+    store.record_source_health(conn, "tainan", observed_at=now, rows=268, usable=268,
+                               newest_ts=now - 2 * 3600, ok=True)
     text = format_report(build_report(conn, date(2026, 9, 4)), now=now)
     line = next(l for l in text.splitlines() if "tainan" in l)
-    assert "STALE" in line
+    assert "STALE" in line, (
+        "a successful poll of a frozen feed is exactly what this must catch"
+    )
+    assert "120 min" in line, "and it must say how stale the DATA is, not the poll"
 
 
 def test_source_that_is_healthy_and_fresh_is_marked_ok(conn):
