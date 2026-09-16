@@ -19,6 +19,8 @@ worker/node_modules/
 web/.dev-artifacts/
 # Brainstorm mockups and SDD ledgers (superpowers plugin scratch)
 .superpowers/
+# Isolated worktrees for in-progress plans
+.claude/worktrees/
 
 # Web app
 web/node_modules/
