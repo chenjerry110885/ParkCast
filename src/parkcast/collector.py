@@ -1,20 +1,24 @@
 """One collection tick: fetch, parse, validate, persist."""
+import logging
 import time
 from dataclasses import dataclass
 
 import requests
 
-from parkcast import config, store
-from parkcast.sources import http, taipei
+from parkcast import config, metadata, store
+from parkcast.sources import http
 # Re-exported: existing callers and tests import FeedError from here. It is
 # defined in sources.http, which collector.fetch_json now delegates to --
 # that import direction is what keeps this module and sources.http from
 # forming a cycle.
 from parkcast.sources.http import FeedError  # noqa: F401
 
+log = logging.getLogger("parkcast.collector")
+
 
 @dataclass(frozen=True, slots=True)
 class TickResult:
+    city: str
     data_ts: int
     rows_written: int
     advanced: bool
@@ -36,24 +40,92 @@ def fetch_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC,
 
 def collect_once(
     conn,
+    source,
     capacities: dict[str, int | None],
     *,
     now: int | None = None,
-    fetch=fetch_json,
 ) -> TickResult:
-    """Fetch one tick and persist it.
+    """Fetch one source's tick and persist it.
 
     Fetch errors propagate: a failed tick must leave the store untouched rather
-    than writing partial data. The caller decides whether to retry.
+    than writing partial data. The caller decides whether to retry -- or, for
+    `collect_all`, whether to isolate the failure to just this one city.
+
+    `capacities` is the roster this source does *not* carry itself. Taipei
+    publishes its lot list on a separate daily endpoint, so its capacities
+    have to come from the caller (refreshed once a day -- see
+    `scheduler.run_forever`'s `refresh_metadata`). The other five feeds answer
+    their roster in the very same tick as their counts (`SourceTick.lots`), so
+    for them the caller's `capacities` is ignored in favour of a map built
+    fresh from this tick: capacities that can never be staler than the
+    reading they bound, and no second request to get them.
     """
     observed_at = int(time.time()) if now is None else now
-    previous = store.latest_data_ts(conn)
+    previous = store.latest_data_ts(conn, source.city)
 
-    snapshot = taipei.parse(fetch(config.AVAILABILITY_URL), now=observed_at).snapshot
-    rows = store.insert_snapshot(conn, snapshot, capacities)
+    tick = source.fetch(now=observed_at)
+    tick_capacities = capacities if tick.lots is None else metadata.capacity_map(tick.lots)
+    rows = store.insert_snapshot(conn, tick.snapshot, tick_capacities)
 
     return TickResult(
-        data_ts=snapshot.latest_data_ts,
+        city=source.city,
+        data_ts=tick.snapshot.latest_data_ts,
         rows_written=rows,
-        advanced=previous is None or snapshot.latest_data_ts > previous,
+        advanced=previous is None or tick.snapshot.latest_data_ts > previous,
     )
+
+
+def collect_all(
+    conn,
+    sources,
+    capacities: dict[str, int | None],
+    *,
+    now: int | None = None,
+) -> list[TickResult]:
+    """Collect every source, once each, isolating each one's failure.
+
+    Taipei is the only corpus that cannot be re-fetched -- eleven days of
+    readings with no way to backfill a gap. A stranger's feed misbehaving
+    must be incapable of costing it a single tick, so each source's
+    fetch-and-insert runs inside its own `try/except Exception`: not just
+    network trouble, but a `KeyError` or a `TypeError` from a payload that
+    changed shape overnight, too. Health is recorded either way -- a source
+    the caller never hears from again is a source no one can tell has gone
+    dark -- and this function itself never raises: one city's outage is a
+    fact about that city, never a tick failure.
+
+    All sources share one `observed_at`, computed once, so every row from
+    this tick -- across every city -- carries the same fetch time rather than
+    drifting by however long each source's own request took.
+    """
+    observed_at = int(time.time()) if now is None else now
+    results: list[TickResult] = []
+    for source in sources:
+        try:
+            result = collect_once(conn, source, capacities, now=observed_at)
+        except Exception:
+            log.exception(
+                "collection failed for %s; other sources are unaffected", source.city
+            )
+            store.record_source_health(
+                conn, source.city, observed_at=observed_at,
+                rows=0, usable=0, newest_ts=None, ok=False,
+            )
+            continue
+
+        # "Usable" is a fact about the reading, not about this write: a tick
+        # whose data_ts repeats one already stored (rows_written == 0, the
+        # feed simply has not published yet) still has a roster sitting in
+        # the store at that data_ts, and that is what source_health should
+        # describe -- not that the source suddenly produced nothing.
+        rows, usable = conn.execute(
+            "SELECT COUNT(*), SUM(CASE WHEN free_car IS NOT NULL THEN 1 ELSE 0 END) "
+            "FROM observations WHERE city = ? AND data_ts = ?",
+            (source.city, result.data_ts),
+        ).fetchone()
+        store.record_source_health(
+            conn, source.city, observed_at=observed_at,
+            rows=rows or 0, usable=usable or 0, newest_ts=result.data_ts, ok=True,
+        )
+        results.append(result)
+    return results

@@ -26,4 +26,16 @@ class Source(Protocol):
     def fetch(self, *, now: int) -> SourceTick: ...
 
 
-SOURCES: dict[str, Source] = {}
+# Imported down here, after `SourceTick`/`Source` are defined: every adapter
+# does `from parkcast.sources import SourceTick, http` (some also `geo`) at
+# its own module level, and importing them from inside this package's own
+# __init__ only works once those names already exist as attributes on this
+# (still-initialising) module.
+from parkcast.sources import (  # noqa: E402
+    hsinchu, kaohsiung, newtaipei, taipei, tainan, taoyuan,
+)
+
+SOURCES: dict[str, Source] = {s.city: s for s in (
+    taipei.Source(), newtaipei.Source(), kaohsiung.Source(),
+    tainan.Source(), taoyuan.Source(), hsinchu.Source(),
+)}

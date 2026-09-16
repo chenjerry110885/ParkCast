@@ -97,9 +97,9 @@ def test_run_forever_happy_path_makes_a_single_collect_call(monkeypatch):
     clock = _VirtualClock(1788484080)
     calls = []
 
-    def fake_collect(conn, capacities):
+    def fake_collect(conn, sources, capacities):
         calls.append(clock.now)
-        return TickResult(data_ts=1788484080, rows_written=5, advanced=True)
+        return [TickResult(city="taipei", data_ts=1788484080, rows_written=5, advanced=True)]
 
     def fake_prune(conn, cutoff_ts):
         raise _StopLoop()
@@ -119,9 +119,9 @@ def test_run_forever_retries_with_configured_backoff_when_feed_stalls(monkeypatc
     clock = _VirtualClock(1788484080)
     call_times = []
 
-    def fake_collect(conn, capacities):
+    def fake_collect(conn, sources, capacities):
         call_times.append(clock.now)
-        return TickResult(data_ts=1788484080, rows_written=0, advanced=False)
+        return [TickResult(city="taipei", data_ts=1788484080, rows_written=0, advanced=False)]
 
     def fake_prune(conn, cutoff_ts):
         raise _StopLoop()
@@ -143,11 +143,11 @@ def test_run_forever_survives_one_bad_tick_and_succeeds_on_retry(monkeypatch):
     clock = _VirtualClock(1788484080)
     attempts = []
 
-    def fake_collect(conn, capacities):
+    def fake_collect(conn, sources, capacities):
         attempts.append(clock.now)
         if len(attempts) == 1:
             raise ConnectionError("feed unreachable")
-        return TickResult(data_ts=1788484080, rows_written=3, advanced=True)
+        return [TickResult(city="taipei", data_ts=1788484080, rows_written=3, advanced=True)]
 
     def fake_prune(conn, cutoff_ts):
         raise _StopLoop()
@@ -167,7 +167,7 @@ def test_run_forever_prunes_even_when_every_attempt_in_the_slot_fails(monkeypatc
     clock = _VirtualClock(1788484080)
     attempts = []
 
-    def fake_collect(conn, capacities):
+    def fake_collect(conn, sources, capacities):
         attempts.append(clock.now)
         raise RuntimeError("boom")
 
@@ -204,12 +204,12 @@ def test_run_forever_slot_targets_stay_300s_apart_despite_exhausted_retries(monk
 
     prune_calls = []
 
-    def fake_collect(conn, capacities):
+    def fake_collect(conn, sources, capacities):
         # First slot never advances (burns all retries); later slots advance
         # on the first attempt.
         if len(prune_calls) == 0:
-            return TickResult(data_ts=0, rows_written=0, advanced=False)
-        return TickResult(data_ts=len(prune_calls), rows_written=1, advanced=True)
+            return [TickResult(city="taipei", data_ts=0, rows_written=0, advanced=False)]
+        return [TickResult(city="taipei", data_ts=len(prune_calls), rows_written=1, advanced=True)]
 
     def fake_prune(conn, cutoff_ts):
         prune_calls.append(cutoff_ts)
@@ -254,11 +254,11 @@ def test_refresh_not_called_while_the_day_is_unchanged(monkeypatch):
     clock = _VirtualClock(int(datetime(2026, 9, 4, 2, 0, tzinfo=timezone.utc).timestamp()))
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         ticks.append(clock.now)
         if len(ticks) >= 3:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {"A": 1}, collect=collect, sleep=clock.sleep,
@@ -278,11 +278,11 @@ def test_refresh_rebind_is_observable_at_the_call_site(monkeypatch):
     clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         seen.append(dict(capacities))
         if len(seen) >= 4:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     def refresh(day):
         return {"NEW": 42}
@@ -308,11 +308,11 @@ def test_failed_refresh_is_retried_on_a_later_slot(monkeypatch):
     clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         seen.append(dict(capacities))
         if len(seen) >= 4:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     def refresh(day):
         refresh_calls.append(day)
@@ -344,11 +344,11 @@ def test_persistently_failing_refresh_never_corrupts_capacities(monkeypatch):
     clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         seen.append(dict(capacities))
         if len(seen) >= 4:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     def boom(day):
         raise ConnectionError("metadata endpoint down")
@@ -372,11 +372,11 @@ def test_successful_refresh_fires_exactly_once_for_the_day(monkeypatch):
     clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         ticks.append(clock.now)
         if len(ticks) >= 4:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     def refresh(day):
         refresh_calls.append(day)
@@ -411,11 +411,11 @@ def test_previous_day_is_compacted_when_the_taipei_day_rolls_over(monkeypatch):
     clock = _VirtualClock(int(datetime(2026, 9, 4, 15, 59, 30, tzinfo=timezone.utc).timestamp()))
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         ticks.append(clock.now)
         if len(ticks) >= 3:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
@@ -432,11 +432,11 @@ def test_no_compaction_while_the_day_is_still_running(monkeypatch):
     clock = _VirtualClock(int(datetime(2026, 9, 4, 2, 0, tzinfo=timezone.utc).timestamp()))
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         ticks.append(clock.now)
         if len(ticks) >= 4:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
@@ -463,11 +463,11 @@ def test_compaction_runs_before_prune(monkeypatch):
 
     monkeypatch.setattr(scheduler.store, "prune", fake_prune)
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         ticks.append(clock.now)
         if len(ticks) >= 3:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
@@ -494,11 +494,11 @@ def test_failed_compaction_is_retried_for_the_same_day_and_collection_continues(
         if len(attempts) == 1:
             raise OSError("no space left on device")
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         ticks.append(clock.now)
         if len(ticks) >= 4:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
@@ -532,13 +532,13 @@ def test_prune_keeps_a_day_whose_compaction_keeps_failing(monkeypatch):
     def always_fails(conn, day):
         raise OSError("disk full")
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         ticks.append(clock.now)
         # Three days of slots: well past the point where now - 48h passes the
         # start of 2026-09-04.
         if len(ticks) > 3 * 288:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
@@ -561,8 +561,8 @@ def test_prune_uses_the_normal_window_once_days_are_archived(monkeypatch):
 
     monkeypatch.setattr(scheduler.store, "prune", fake_prune)
 
-    def collect(conn, capacities):
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+    def collect(conn, sources, capacities):
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
@@ -588,11 +588,11 @@ def test_startup_catches_up_days_a_restart_left_unarchived(tmp_path, monkeypatch
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
     clock = _VirtualClock(int(datetime(2026, 9, 5, 2, 0, tzinfo=timezone.utc).timestamp()))
 
-    def collect(c, capacities):
+    def collect(c, sources, capacities):
         ticks.append(clock.now)
         if len(ticks) >= 2:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     try:
         with pytest.raises(_StopLoop):
@@ -656,12 +656,12 @@ def test_exits_non_zero_after_an_hour_of_exhausted_slots(monkeypatch):
 
     expected = config.MAX_EXHAUSTED_SLOTS * (1 + len(config.RETRY_DELAYS_SEC))
 
-    def stalled(conn, capacities):
+    def stalled(conn, sources, capacities):
         attempts.append(clock.now)
         # Safety net: a loop that never exits must fail this test, not hang it.
         if len(attempts) > 2 * expected:
             raise _StopLoop()
-        return TickResult(data_ts=1788484080, rows_written=0, advanced=False)
+        return [TickResult(city="taipei", data_ts=1788484080, rows_written=0, advanced=False)]
 
     with pytest.raises(SystemExit) as exc:
         scheduler.run_forever(None, {}, collect=stalled, sleep=clock.sleep,
@@ -685,13 +685,13 @@ def test_one_good_tick_resets_the_exhausted_slot_counter(monkeypatch):
 
     limit = config.MAX_EXHAUSTED_SLOTS
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         slot = len(slots)
         if slot == limit - 1:
-            return TickResult(data_ts=slot, rows_written=1, advanced=True)
+            return [TickResult(city="taipei", data_ts=slot, rows_written=1, advanced=True)]
         if slot >= 2 * limit - 1:
             raise _StopLoop()
-        return TickResult(data_ts=0, rows_written=0, advanced=False)
+        return [TickResult(city="taipei", data_ts=0, rows_written=0, advanced=False)]
 
     # Reaching _StopLoop at all proves SystemExit never fired: without the
     # reset, a run of 11 exhausted slots either side of one good tick would
@@ -712,10 +712,10 @@ def test_publish_runs_after_an_advancing_tick(monkeypatch):
     clock = _VirtualClock(1788537600)
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         if len(published) >= 2:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     with pytest.raises(_StopLoop):
         scheduler.run_forever(None, {}, collect=collect, sleep=clock.sleep,
@@ -732,11 +732,11 @@ def test_publish_failure_does_not_stop_collection(monkeypatch):
     clock = _VirtualClock(1788537600)
     monkeypatch.setattr(scheduler.store, "prune", lambda *a, **k: 0)
 
-    def collect(conn, capacities):
+    def collect(conn, sources, capacities):
         ticks.append(clock.now)
         if len(ticks) >= 3:
             raise _StopLoop()
-        return TickResult(data_ts=clock.now, rows_written=1, advanced=True)
+        return [TickResult(city="taipei", data_ts=clock.now, rows_written=1, advanced=True)]
 
     def boom(conn):
         raise RuntimeError("artifact write failed")

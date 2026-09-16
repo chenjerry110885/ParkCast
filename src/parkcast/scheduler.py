@@ -13,11 +13,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from parkcast import artifacts, config, liveness, store
-from parkcast.collector import collect_once
+from parkcast.collector import collect_all
 from parkcast.compact import compact_day, day_bounds
 from parkcast.forecast import Blend, load_history
 from parkcast.grid import build_grid
 from parkcast.report import build_report, format_report
+from parkcast.sources import SOURCES
 
 log = logging.getLogger("parkcast.scheduler")
 
@@ -193,13 +194,21 @@ def run_forever(
     conn,
     capacities: dict[str, int | None],
     *,
-    collect=collect_once,
+    sources=None,
+    collect=collect_all,
     sleep=time.sleep,
     now_fn=lambda: int(time.time()),
     refresh_metadata: Callable[[date], dict[str, int | None]] | None = None,
     archive: Callable[..., None] = archive_day,
     publish: Callable[..., None] | None = None,
 ) -> None:
+    # A live view of the registry, not a one-shot snapshot: every one of the
+    # up-to-four attempts in a slot, across every slot for the life of the
+    # process, iterates it again. `SOURCES.values()` is reusable exactly that
+    # way; a generator would not be.
+    if sources is None:
+        sources = SOURCES.values()
+
     today = taipei_date(now_fn())
     current_day = today
     archived_day = _first_day_to_archive(conn, today)
@@ -213,12 +222,24 @@ def run_forever(
             if delay:
                 sleep(delay)
             try:
-                result = collect(conn, capacities)
+                results = collect(conn, sources, capacities)
             except Exception:
+                # collect_all isolates every source's own failure and never
+                # raises; this stays as the outer net for an injected collect
+                # that does not, and for anything collect_all itself cannot
+                # anticipate.
                 log.exception("tick failed; will retry within this slot")
                 continue
-            if result.advanced:
-                log.info("tick data_ts=%s rows=%s", result.data_ts, result.rows_written)
+            advanced = [r for r in results if r.advanced]
+            if advanced:
+                # Advanced if ANY source advanced: one city stalling (or
+                # failing outright, and so being absent from `results`) must
+                # never hold the other five hostage to its own retry.
+                for result in advanced:
+                    log.info(
+                        "tick city=%s data_ts=%s rows=%s",
+                        result.city, result.data_ts, result.rows_written,
+                    )
                 exhausted_slots = 0
                 if publish is not None:
                     try:
@@ -230,11 +251,14 @@ def run_forever(
                         # take collection down with it.
                         log.exception("publishing artifacts failed; will retry next tick")
                 break
-            log.warning("feed has not advanced (data_ts=%s); retrying", result.data_ts)
+            log.warning(
+                "no source advanced this attempt (%s of %s collected); retrying",
+                len(results), len(sources),
+            )
         else:
             exhausted_slots += 1
             log.error(
-                "slot exhausted without a fresh tick (%s consecutive)", exhausted_slots
+                "slot exhausted with no source advancing (%s consecutive)", exhausted_slots
             )
             if exhausted_slots >= config.MAX_EXHAUSTED_SLOTS:
                 # Looping forever on a feed that changed shape logs an error
