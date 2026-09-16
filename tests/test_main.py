@@ -1,6 +1,7 @@
 # tests/test_main.py
 import inspect
 import logging
+import sqlite3
 
 from parkcast import __main__ as entry
 from parkcast import store
@@ -132,7 +133,7 @@ def test_startup_namespaces_a_pre_namespacing_store(monkeypatch, tmp_path, caplo
         _boot(monkeypatch, db)
 
     assert _lot_ids(db) == ["taipei:TPE0001", "taipei:TPE0002"]
-    assert "id migration rewrote 2 pre-namespacing row(s)" in caplog.text
+    assert "id migration rewrote 2 pre-namespacing row(s) and dropped 0" in caplog.text
 
 
 def test_a_second_startup_rewrites_nothing(monkeypatch, tmp_path, caplog):
@@ -150,7 +151,7 @@ def test_a_second_startup_rewrites_nothing(monkeypatch, tmp_path, caplog):
         _boot(monkeypatch, db)
 
     assert _lot_ids(db) == first == ["taipei:TPE0001"]
-    assert "id migration rewrote 0 pre-namespacing row(s)" in caplog.text
+    assert "id migration rewrote 0 pre-namespacing row(s) and dropped 0" in caplog.text
 
 
 def test_startup_leaves_every_other_citys_rows_alone(monkeypatch, tmp_path):
@@ -206,3 +207,57 @@ def test_startup_migrates_before_anything_reads_the_store(monkeypatch, tmp_path)
     entry.main()
 
     assert order == ["migrate", "metadata", "collect"]
+
+
+def test_startup_merges_a_bare_and_namespaced_twin_instead_of_dying(
+    monkeypatch, tmp_path, caplog
+):
+    """`lot_id` is half of a WITHOUT ROWID primary key, so the same reading
+    present under both conventions makes the migration's UPDATE violate it.
+
+    Reachable without anything exotic: a build that writes namespaced ids
+    running without this migration, then restarted inside the 48-hour window --
+    a partial deploy, or a roll back and forward. Before the dedupe, this killed
+    `main()` at startup, and would have killed it again on every later boot.
+    """
+    db = tmp_path / "hot.sqlite"
+    conn = store.connect(db)
+    _legacy_row(conn, "TPE0001", 1000)
+    conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at,"
+                 " free_car, free_motor, quality)"
+                 " VALUES ('taipei:TPE0001', 'taipei', 1000, 1500, 4, NULL, 0)")
+    conn.close()
+
+    with caplog.at_level(logging.INFO, logger="parkcast"):
+        _boot(monkeypatch, db)
+
+    assert _lot_ids(db) == ["taipei:TPE0001"], "one row per reading"
+    assert "rewrote 0 pre-namespacing row(s) and dropped 1" in caplog.text
+
+
+def test_startup_survives_a_migration_that_fails(monkeypatch, tmp_path, caplog):
+    """Collection is the irreplaceable half. A store that cannot be migrated
+    costs precision on the short-horizon forecast and the observed count until
+    someone fixes it; a collector that refuses to boot costs every tick, on
+    every restart, until someone runs SQL by hand. Degrade, do not stop."""
+    db = tmp_path / "hot.sqlite"
+    conn = store.connect(db)
+    _legacy_row(conn, "TPE0001", 100)
+    conn.close()
+
+    seen = {}
+    monkeypatch.setattr(entry.config, "DB_PATH", db)
+    _capture_run_forever(monkeypatch, seen)
+    monkeypatch.setattr(entry, "build_capacities", lambda day: {"taipei:X": 4})
+
+    def boom(conn, *args, **kwargs):
+        raise sqlite3.IntegrityError("UNIQUE constraint failed")
+
+    monkeypatch.setattr(entry.store, "migrate_to_namespaced_ids", boom)
+
+    with caplog.at_level(logging.ERROR, logger="parkcast"):
+        entry.main()
+
+    assert seen["capacities"] == {"taipei:X": 4}, "collection must still start"
+    assert "id migration failed and was rolled back" in caplog.text
+    assert _lot_ids(db) == ["TPE0001"], "and the store is untouched"

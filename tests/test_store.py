@@ -152,11 +152,11 @@ def test_migration_namespaces_every_row_once(tmp_path):
     conn = store.connect(tmp_path / "hot.sqlite")
     conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at, free_car, free_motor, quality)"
                  " VALUES ('TPE0001', '', 100, 100, 5, NULL, 0)")
-    assert store.migrate_to_namespaced_ids(conn) == 1
+    assert store.migrate_to_namespaced_ids(conn) == store.Migration(rewritten=1, dropped=0)
     row = conn.execute("SELECT lot_id, city FROM observations").fetchone()
     assert row == ("taipei:TPE0001", "taipei")
     # Idempotent: a second run must not double-prefix.
-    assert store.migrate_to_namespaced_ids(conn) == 0
+    assert store.migrate_to_namespaced_ids(conn) == store.Migration(rewritten=0, dropped=0)
     assert conn.execute("SELECT lot_id FROM observations").fetchone()[0] == "taipei:TPE0001"
 
 
@@ -168,12 +168,14 @@ def test_migration_handles_a_bare_feed_id_that_itself_contains_a_colon(tmp_path)
     conn = store.connect(tmp_path / "hot.sqlite")
     conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at, free_car, free_motor, quality)"
                  " VALUES ('PL:0001', '', 100, 100, 5, NULL, 0)")
-    assert store.migrate_to_namespaced_ids(conn, city="kaohsiung") == 1
+    assert store.migrate_to_namespaced_ids(conn, city="kaohsiung") == store.Migration(
+        rewritten=1, dropped=0)
     row = conn.execute("SELECT lot_id, city FROM observations").fetchone()
     assert row == ("kaohsiung:PL:0001", "kaohsiung")
     # Idempotent: a second run must not double-prefix, and must recognize the
     # row as already migrated even though its lot_id still contains a colon.
-    assert store.migrate_to_namespaced_ids(conn, city="kaohsiung") == 0
+    assert store.migrate_to_namespaced_ids(conn, city="kaohsiung") == store.Migration(
+        rewritten=0, dropped=0)
     assert conn.execute("SELECT lot_id FROM observations").fetchone()[0] == "kaohsiung:PL:0001"
 
 
@@ -201,7 +203,8 @@ def test_migration_leaves_every_other_citys_rows_alone(tmp_path):
             {},
         )
 
-    assert store.migrate_to_namespaced_ids(conn) == 1, "only the legacy row"
+    assert store.migrate_to_namespaced_ids(conn) == store.Migration(
+        rewritten=1, dropped=0), "only the legacy row"
 
     rows = dict(conn.execute("SELECT lot_id, city FROM observations"))
     assert rows == {
@@ -212,6 +215,111 @@ def test_migration_leaves_every_other_citys_rows_alone(tmp_path):
         "taoyuan:TY01": "taoyuan",
         "hsinchu:HC9": "hsinchu",
     }
+    conn.close()
+
+
+def test_migration_merges_a_bare_and_namespaced_twin_rather_than_raising(tmp_path):
+    """`lot_id` is half of a WITHOUT ROWID primary key, so a store holding both
+    `TPE0001` and `taipei:TPE0001` at one `data_ts` makes the UPDATE violate it
+    and the whole migration raise.
+
+    Not hypothetical: it needs only a build that writes namespaced ids to run
+    without this migration and then restart inside the 48-hour window -- a
+    partial deploy, or a roll back and forward. The primary key is also what
+    says the two rows are the SAME reading, so the legacy copy is deleted in the
+    same transaction rather than merged.
+    """
+    conn = store.connect(tmp_path / "hot.sqlite")
+    conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at,"
+                 " free_car, free_motor, quality)"
+                 " VALUES ('TPE0001', '', 1000, 1200, 5, NULL, 0)")
+    conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at,"
+                 " free_car, free_motor, quality)"
+                 " VALUES ('taipei:TPE0001', 'taipei', 1000, 1500, 4, NULL, 0)")
+    conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at,"
+                 " free_car, free_motor, quality)"
+                 " VALUES ('TPE0002', '', 1000, 1200, 9, NULL, 0)")
+
+    assert store.migrate_to_namespaced_ids(conn) == store.Migration(
+        rewritten=1, dropped=1)
+
+    rows = sorted(conn.execute(
+        "SELECT lot_id, city, data_ts, free_car FROM observations"))
+    assert rows == [("taipei:TPE0001", "taipei", 1000, 4),
+                    ("taipei:TPE0002", "taipei", 1000, 9)], (
+        "one row per reading, and the twin that survives is the namespaced one"
+    )
+    conn.close()
+
+
+def test_migration_only_drops_a_legacy_row_that_really_is_a_duplicate(tmp_path):
+    """The same lot at a *different* `data_ts` is a different reading and does
+    not collide. Deleting it would throw away history the migration exists to
+    preserve."""
+    conn = store.connect(tmp_path / "hot.sqlite")
+    conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at,"
+                 " free_car, free_motor, quality)"
+                 " VALUES ('TPE0001', '', 1000, 1200, 5, NULL, 0)")
+    conn.execute("INSERT INTO observations (lot_id, city, data_ts, observed_at,"
+                 " free_car, free_motor, quality)"
+                 " VALUES ('taipei:TPE0001', 'taipei', 1300, 1500, 4, NULL, 0)")
+
+    assert store.migrate_to_namespaced_ids(conn) == store.Migration(
+        rewritten=1, dropped=0)
+
+    assert sorted(conn.execute("SELECT lot_id, data_ts FROM observations")) == [
+        ("taipei:TPE0001", 1000), ("taipei:TPE0001", 1300)
+    ]
+    conn.close()
+
+
+class _Boom(Exception):
+    pass
+
+
+class _FailsOnUpdate:
+    """A connection proxy that lets the DELETE through and fails the UPDATE.
+
+    `sqlite3.Connection.execute` is read-only, so the seam has to be an object
+    rather than a monkeypatched attribute. Failing *between* the two statements
+    is the case worth pinning: by then the deduplicating DELETE has already
+    modified the table inside the transaction.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.calls = []
+
+    def execute(self, sql, *args):
+        self.calls.append(sql)
+        if sql.startswith("UPDATE observations"):
+            raise _Boom("disk full, say")
+        return self._conn.execute(sql, *args)
+
+
+def test_a_failed_migration_leaves_the_store_exactly_as_it_was(tmp_path):
+    """One transaction. A half-migrated store has two id conventions in one
+    table and every later query silently reads half the corpus -- which is the
+    very thing this is here to prevent, so a failure must not create it. The
+    rows the DELETE had already removed must come back with it."""
+    conn = store.connect(tmp_path / "hot.sqlite")
+    for lot_id, city in (("TPE0001", ""), ("taipei:TPE0001", "taipei"),
+                         ("TPE0002", "")):
+        conn.execute("INSERT INTO observations (lot_id, city, data_ts,"
+                     " observed_at, free_car, free_motor, quality)"
+                     " VALUES (?, ?, 1000, 1200, 5, NULL, 0)", (lot_id, city))
+    before = sorted(conn.execute("SELECT lot_id, city, data_ts FROM observations"))
+
+    flaky = _FailsOnUpdate(conn)
+    with pytest.raises(_Boom):
+        store.migrate_to_namespaced_ids(flaky)
+
+    assert any(sql.startswith("DELETE") for sql in flaky.calls), (
+        "the dedupe must have run, or this proves nothing about rolling it back"
+    )
+    assert flaky.calls[-1] == "ROLLBACK"
+    assert sorted(conn.execute(
+        "SELECT lot_id, city, data_ts FROM observations")) == before
     conn.close()
 
 

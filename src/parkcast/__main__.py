@@ -42,12 +42,33 @@ def main() -> None:
     # throughout. Waiting for prune to age the old rows out would mean two days
     # of it on the only corpus this project has.
     #
-    # Logged at INFO every boot, including the 0: the first run after the
+    # Logged at INFO every boot, including the zeroes: the first run after the
     # migration lands reports a large one-off number worth seeing, and every
     # later run reporting 0 is the signal that it is idempotent and has nothing
     # left to do.
-    rewritten = store.migrate_to_namespaced_ids(conn)
-    log.info("id migration rewrote %s pre-namespacing row(s)", rewritten)
+    #
+    # Survivable, because collection is the irreplaceable half and this is not.
+    # The migration runs in one transaction that rolls itself back, so a failure
+    # leaves the store exactly as it was -- two id conventions in one window,
+    # which costs precision on the short-horizon forecast and the observed count
+    # until it is resolved. Dying here instead would cost every tick, on every
+    # restart, until someone ran SQL by hand: a strictly worse outcome than the
+    # one the migration exists to prevent. Same reasoning as the metadata fetch
+    # below, and as `run_forever`'s net around publishing.
+    try:
+        migration = store.migrate_to_namespaced_ids(conn)
+    except Exception:
+        log.exception(
+            "id migration failed and was rolled back; collecting anyway. Until "
+            "this succeeds the hot window may hold both id conventions for one "
+            "car park, which splits its history across `current` and `counts`"
+        )
+    else:
+        log.info(
+            "id migration rewrote %s pre-namespacing row(s) and dropped %s "
+            "already superseded by a namespaced twin",
+            migration.rewritten, migration.dropped,
+        )
 
     # The metadata blob is 2.85 MB and separate from the availability blob, so
     # it can be unavailable while collection would be perfectly fine. Dying

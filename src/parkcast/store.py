@@ -1,5 +1,6 @@
 """SQLite hot store: the rolling 48-hour window of observations."""
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 from parkcast import ids
@@ -97,8 +98,22 @@ def insert_snapshot(
     return written
 
 
-def migrate_to_namespaced_ids(conn: sqlite3.Connection, city: str = "taipei") -> int:
-    """Prefix every un-namespaced row's id, once. Returns rows rewritten.
+@dataclass(frozen=True, slots=True)
+class Migration:
+    """What one run of `migrate_to_namespaced_ids` actually did.
+
+    Two numbers rather than one, because a real run can do two different things
+    to the corpus and a caller reporting "rewrote 40,000 rows" while silently
+    deleting 1,100 more would be describing half of it.
+    """
+    rewritten: int      # legacy rows given their city namespace
+    dropped: int        # legacy rows whose namespaced twin already held the reading
+
+
+def migrate_to_namespaced_ids(
+    conn: sqlite3.Connection, city: str = "taipei"
+) -> Migration:
+    """Prefix every un-namespaced row's id, once.
 
     Called from `__main__.main` at startup, immediately after `connect` and
     before anything reads the store. It has to run there and not lazily: the
@@ -133,27 +148,62 @@ def migrate_to_namespaced_ids(conn: sqlite3.Connection, city: str = "taipei") ->
     `PL:0001`) is migrated like any other row rather than looking
     already-namespaced, which `instr(lot_id, ':') = 0` would have got wrong.
 
-    The `NOT LIKE` clause stays as a second, narrower guard. It cannot be what
-    identifies a legacy row, but it makes double-prefixing unrepresentable
-    rather than merely unreachable, and a doubled prefix is not recoverable
-    either. `LIKE` treats `_` and `%` as wildcards, so it is only safe because
-    city names are plain lowercase ASCII containing neither; a future city name
-    with an underscore would need escaping here.
+    The `NOT LIKE` clause stays as a second, narrower guard, but it is worth
+    being exact about what it delivers: it stops a row that is ALREADY prefixed
+    with THIS city from being prefixed again. It does not make double-prefixing
+    unrepresentable -- a `city = ''` row carrying some other city's namespace
+    (`kaohsiung:PL0009`) still matches, and would become
+    `taipei:kaohsiung:PL0009`. That row cannot exist today, because every writer
+    that namespaces an id also sets the city column in the same statement, so
+    the combination is unreachable rather than excluded. `LIKE` treats `_` and
+    `%` as wildcards, so the clause is only safe because city names are plain
+    lowercase ASCII containing neither; a future city name with an underscore
+    would need escaping here.
+
+    COLLISIONS. `lot_id` is half of a `WITHOUT ROWID` primary key, so if the
+    store holds both `TPE0001` and `taipei:TPE0001` at the same `data_ts`, the
+    UPDATE below violates it and the whole migration raises. That shape is not
+    hypothetical: it needs only a build that writes namespaced ids to run
+    without this migration and then be restarted inside the 48-hour window --
+    a partial deploy, or a roll back and forward. The primary key is also what
+    says the two rows are the SAME reading, one feed moment for one car park,
+    so the legacy copy is deleted first rather than merged: same transaction,
+    so the store is never left half-deduplicated.
+
+    What that keeps and what it costs: the reading survives, under the id the
+    rest of the system uses. If the two copies disagreed, the namespaced one's
+    values win -- it was written by the build that is staying, against the
+    current capacity map. The legacy copy's `observed_at` is lost, and by
+    `insert_snapshot`'s first-sighting rule that was the truthful one, so the
+    `lag` feature is very slightly overstated for those rows. Bounded by one
+    deploy boundary inside one 48-hour window, and the alternative -- deleting
+    the current build's rows instead -- trades that for discarding freshly
+    validated data.
     """
     conn.execute("BEGIN IMMEDIATE")
     try:
         prefix = f"{city}{ids.SEPARATOR}"
-        cursor = conn.execute(
+        # Before the UPDATE, and inside its transaction: a legacy row whose
+        # namespaced twin already holds this exact (lot, data_ts) would collide
+        # with it on the primary key.
+        dropped = conn.execute(
+            "DELETE FROM observations "
+            "WHERE city = '' AND lot_id NOT LIKE ? || '%' AND EXISTS ("
+            "    SELECT 1 FROM observations AS twin "
+            "     WHERE twin.lot_id = ? || observations.lot_id "
+            "       AND twin.data_ts = observations.data_ts)",
+            (prefix, prefix),
+        ).rowcount
+        rewritten = conn.execute(
             "UPDATE observations SET lot_id = ? || lot_id, city = ? "
             "WHERE city = '' AND lot_id NOT LIKE ? || '%'",
             (prefix, city, prefix),
-        )
-        rewritten = cursor.rowcount
+        ).rowcount
     except BaseException:
         conn.execute("ROLLBACK")
         raise
     conn.execute("COMMIT")
-    return rewritten
+    return Migration(rewritten, dropped)
 
 
 def record_source_health(
