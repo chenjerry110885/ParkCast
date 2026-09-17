@@ -28,7 +28,10 @@ function reasonText(reason: ConfidenceReason, s: ReturnType<typeof t>): string {
     case "reading":
       return fillTemplate(s.confidenceReadingTemplate, { n: reason.ageMin });
     case "weeks":
-      return fillTemplate(s.confidenceWeeksTemplate, { n: reason.weeks });
+      // English needs the singular "week" at exactly one; zh's two templates
+      // are the same text, so this branch is a no-op there. See
+      // `confidenceWeekTemplate`'s doc comment.
+      return fillTemplate(reason.weeks === 1 ? s.confidenceWeekTemplate : s.confidenceWeeksTemplate, { n: reason.weeks });
     case "thin":
       return s.confidenceThin;
   }

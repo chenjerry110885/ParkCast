@@ -173,17 +173,38 @@ export interface Strings {
   bestPick: string;
   /** Label on the confidence pill, in front of the level word. */
   confidence: string;
-  /** Confidence level: mostly the live reading (within `HIGH_MAX_MIN`). */
+  /**
+   * Confidence level: either a live reading fresh and close enough to still
+   * dominate the blend, or a month or more of accumulated history for this
+   * exact half-hour of the week -- either kind of evidence earns it alone.
+   * See `ConfidenceReason`.
+   */
   confidenceHigh: string;
-  /** Confidence level: a blend of the live reading and the usual pattern. */
+  /** Confidence level: a lesser amount of either kind of evidence -- see `ConfidenceReason`. */
   confidenceMedium: string;
-  /** Confidence level: mostly the usual pattern for this time of week. */
+  /**
+   * Confidence level: neither a usable live reading nor a week of
+   * accumulated history for this half-hour of the week. Not "far away" --
+   * `ConfidenceReason`'s `"thin"` case, named as such in the popover text.
+   */
   confidenceLow: string;
   /**
-   * The pill's popover text when the grade rests on accumulated history --
-   * `ConfidenceReason`'s `"weeks"` case. Carries `{n}`, the number of weeks
-   * of this half-hour-of-week the climatology rests on (`Math.floor(support
-   * / WEEKLY_OBSERVATIONS)`).
+   * The pill's popover text when the grade rests on accumulated history and
+   * that count is exactly one week -- `ConfidenceReason`'s `"weeks"` case
+   * with `weeks === 1`. English needs the singular "week"; carries `{n}`
+   * (always `1`) only so both forms share `fillTemplate`. Chinese has no
+   * singular/plural distinction, so zh's `confidenceWeekTemplate` and
+   * `confidenceWeeksTemplate` are the same text -- see `spacesNowTemplate`
+   * for the same English-only-branches pattern elsewhere in this file.
+   */
+  confidenceWeekTemplate: string;
+  /**
+   * The pill's popover text when the grade rests on accumulated history and
+   * that count is not exactly one week -- `ConfidenceReason`'s `"weeks"`
+   * case for every `weeks` value except `1` (weeks is never `0` here: the
+   * lowest support that ever produces a `"weeks"` reason already floors to
+   * `1`). Carries `{n}`, the number of weeks of this half-hour-of-week the
+   * climatology rests on (`Math.floor(support / WEEKLY_OBSERVATIONS)`).
    */
   confidenceWeeksTemplate: string;
   /**
@@ -278,6 +299,7 @@ const en: Strings = {
   confidenceHigh: "High",
   confidenceMedium: "Medium",
   confidenceLow: "Low",
+  confidenceWeekTemplate: "Based on {n} week of history for this time of week.",
   confidenceWeeksTemplate: "Based on {n} weeks of history for this time of week.",
   confidenceReadingTemplate: "Based on a live reading from {n} min ago.",
   confidenceThin: "Not watched at this time of week often enough yet.",
@@ -345,6 +367,7 @@ const zh: Strings = {
   confidenceHigh: "高",
   confidenceMedium: "中",
   confidenceLow: "低",
+  confidenceWeekTemplate: "依據此時段過去 {n} 週的資料。",
   confidenceWeeksTemplate: "依據此時段過去 {n} 週的資料。",
   confidenceReadingTemplate: "依據 {n} 分鐘前的即時讀數。",
   confidenceThin: "此時段的觀測資料還不夠多。",

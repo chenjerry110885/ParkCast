@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LotCard } from "../src/components/LotCard";
 import { LotList } from "../src/components/LotList";
-import { t } from "../src/i18n";
+import { fillTemplate, t } from "../src/i18n";
 import type { Ranked } from "../src/rank";
 import type { Lot } from "../src/types";
 
@@ -71,6 +71,31 @@ describe("LotCard", () => {
     expect(onHover).toHaveBeenLastCalledWith("TPE1");
     fireEvent.mouseLeave(card);
     expect(onHover).toHaveBeenLastCalledWith(null);
+  });
+
+  it("explains the confidence pill with the card's own reading age, not a stand-in value", () => {
+    // props.ageMin is 4; the popover must say so verbatim, so a caller that
+    // stops threading its own reading age through (e.g. hard-codes 0) is
+    // caught here even though the level itself ("high") wouldn't change.
+    render(<ol><LotCard row={row()} {...props} best selected={false} /></ol>);
+    const card = screen.getByTestId("lot-row");
+    fireEvent.click(within(card).getByRole("button", { name: /confidence.*high/i }));
+    expect(within(card).getByRole("note")).toHaveTextContent(
+      fillTemplate(t("en").confidenceReadingTemplate, { n: props.ageMin }),
+    );
+  });
+
+  it("never claims weeks of history for a card that hasn't consulted the week table", () => {
+    // A horizon past MEDIUM_MAX_MIN takes both reading-led rows off the
+    // table, so with the real support: 0 this lot has nothing left but
+    // "low, thin". If the card's support were ever wired to a stand-in
+    // non-zero value instead of 0, this would read "high" or "medium" with
+    // a weeks-of-history sentence for a lot the week table was never
+    // actually asked about -- the exact overstatement this task removes.
+    render(<ol><LotCard row={row()} {...props} horizonFromReadingMin={100} best={false} selected={false} /></ol>);
+    const card = screen.getByTestId("lot-row");
+    fireEvent.click(within(card).getByRole("button", { name: /confidence.*low/i }));
+    expect(within(card).getByRole("note")).toHaveTextContent(t("en").confidenceThin);
   });
 
   it("keeps the name Chinese under English and selects on tap", () => {

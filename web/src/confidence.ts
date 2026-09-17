@@ -34,9 +34,37 @@
  * kind of evidence cleared even the medium bar -- not "far away", but "we
  * have not watched this lot at this hour often enough yet".
  *
- * Silence is still a valid answer: with no forecast, or for a lot whose feed
- * has stopped updating, there is nothing here to grade -- `null`, not a
- * guess.
+ * The two kinds of evidence are checked independently per level, so both can
+ * be true for the same input -- e.g. a five-minute-old reading ten minutes
+ * out *and* five weeks of support both clear the high bar on their own. The
+ * level is the same either way ("high"), but the reason is not, and which
+ * one the function reports is a real choice, not an accident of source
+ * order:
+ *
+ *   - **At the high bar, the reading wins.** A reading is a direct
+ *     observation of *this* prediction, taken moments ago; a month of
+ *     history is a claim about *other* weeks. When both clear the bar, the
+ *     freshest, most specific evidence is the more informative thing to
+ *     tell the driver, so it is cited first.
+ *   - **At the medium bar, the weeks win.** A medium-strength reading is
+ *     inherently borderline -- it is exactly the one that will drop out as
+ *     the horizon ticks past `MEDIUM_MAX_MIN` a few minutes later, or as the
+ *     reading itself ages past `READING_RECENT_MAX_MIN` -- while accumulated
+ *     support for this half-hour does not change minute to minute. Citing
+ *     the reading here would make the popover's own explanation flap
+ *     between "a live reading" and "history" as the clock runs, for a grade
+ *     that has not itself changed; citing the more durable claim instead
+ *     keeps the explanation as stable as the level it is attached to.
+ *
+ * This is why the branches below check reading-then-weeks at the high tier
+ * and weeks-then-reading at the medium tier -- the order is load-bearing,
+ * not merely a transcription of the spec table's row order, and a test
+ * pins each pairing (see `confidence.test.ts`'s "collision" tests).
+ *
+ * Silence is still a valid answer: with no forecast, a non-finite
+ * probability (an unknown value, never a real one -- see `WEEK_UNKNOWN` in
+ * `week.ts` for the same discipline), or for a lot whose feed has stopped
+ * updating, there is nothing here to grade -- `null`, not a guess.
  */
 export type Confidence = "high" | "medium" | "low";
 
@@ -86,7 +114,10 @@ export function confidenceFor({
   updating,
   probability,
 }: ConfidenceInput): { level: Confidence; reason: ConfidenceReason } | null {
-  if (probability === null || !updating) return null;
+  // `typeof NaN === "number"`, so an unknown probability must be refused by
+  // value, not merely by `!== null` -- see `228ce2f` on this branch for the
+  // same guard closing the same class of bug in `probabilityAt`.
+  if (probability === null || !Number.isFinite(probability) || !updating) return null;
 
   const weeks = Math.floor(support / WEEKLY_OBSERVATIONS);
 

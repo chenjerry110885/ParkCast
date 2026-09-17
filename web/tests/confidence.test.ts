@@ -30,6 +30,12 @@ describe("confidenceFor", () => {
     ).toBeNull();
   });
 
+  it("has nothing to say for a non-finite probability -- NaN is not a value to grade, same as null", () => {
+    expect(
+      confidenceFor({ minutesFromReading: 5, readingAgeMin: 5, support: 200, updating: true, probability: NaN }),
+    ).toBeNull();
+  });
+
   describe("high, reason: reading -- arrival within 30 min of a reading <= 15 min old", () => {
     it("grades high at the boundary of both thresholds, with support at 0", () => {
       const result = confidenceFor({
@@ -202,6 +208,64 @@ describe("confidenceFor", () => {
         const result = confidenceFor({ ...FAR_READING, support, updating: true, probability: 0.5 });
         expect(result?.reason).toEqual({ kind: "weeks", weeks: Math.floor(support / WEEKLY_OBSERVATIONS) });
       }
+    });
+  });
+
+  // Both `high` rows, and both `medium` rows, can be true at once (see the
+  // module docstring's "reading wins at high, weeks wins at medium"
+  // paragraph). The `level` alone can't tell them apart -- these fixtures
+  // set up a genuine collision and assert the full `{ level, reason }`, so
+  // swapping either pair of branches changes the *reason* even though the
+  // level stays the same, and the test catches it.
+  describe("collisions -- both rows of a tier are true at once", () => {
+    it("high: a fresh, near reading AND deep support both qualify -- the reading wins", () => {
+      // The module docstring's own example: a five-minute-old reading, ten
+      // minutes out, at a lot with five weeks of support.
+      const result = confidenceFor({
+        minutesFromReading: 10,
+        readingAgeMin: 5,
+        support: 30, // Math.floor(30 / 6) = 5 weeks -- also clears SUPPORT_HIGH_MIN (24) on its own
+        updating: true,
+        probability: 0.7,
+      });
+      expect(result).toEqual({ level: "high", reason: { kind: "reading", ageMin: 5 } });
+    });
+
+    it("medium: a usable reading AND a week of support both qualify -- the weeks win", () => {
+      // minutesFromReading is past HIGH_MAX_MIN (30) so the high/reading row
+      // cannot also fire and mask which medium row won.
+      const result = confidenceFor({
+        minutesFromReading: 50,
+        readingAgeMin: 20,
+        support: 10, // Math.floor(10 / 6) = 1 week -- also clears SUPPORT_MEDIUM_MIN (6) on its own
+        updating: true,
+        probability: 0.7,
+      });
+      expect(result).toEqual({ level: "medium", reason: { kind: "weeks", weeks: 1 } });
+    });
+  });
+
+  // WEEKLY_OBSERVATIONS, SUPPORT_HIGH_MIN, SUPPORT_MEDIUM_MIN and HIGH_MAX_MIN
+  // are already anchored by literal values elsewhere (the two headline
+  // tests, and "drops out of high the moment the horizon crosses
+  // HIGH_MAX_MIN"). These three close the remaining gap: each uses literal
+  // minute counts rather than the constant symbol, so a change to the
+  // constant's *value* -- not just which branch reads it -- flips the
+  // expected outcome.
+  describe("threshold values are pinned, not just the symbols", () => {
+    it("a 20-minute-old reading, 10 minutes out, is medium -- READING_FRESH_MAX_MIN (15) is not 20 or more", () => {
+      const result = confidenceFor({ minutesFromReading: 10, readingAgeMin: 20, support: 0, updating: true, probability: 0.5 });
+      expect(result).toEqual({ level: "medium", reason: { kind: "reading", ageMin: 20 } });
+    });
+
+    it("a 45-minute-old reading, 50 minutes out, is low -- READING_RECENT_MAX_MIN (30) is not 45 or more", () => {
+      const result = confidenceFor({ minutesFromReading: 50, readingAgeMin: 45, support: 0, updating: true, probability: 0.5 });
+      expect(result).toEqual({ level: "low", reason: { kind: "thin" } });
+    });
+
+    it("a fresh reading 90 minutes out is low, not medium -- MEDIUM_MAX_MIN (75) is not 90 or more", () => {
+      const result = confidenceFor({ minutesFromReading: 90, readingAgeMin: 5, support: 0, updating: true, probability: 0.5 });
+      expect(result).toEqual({ level: "low", reason: { kind: "thin" } });
     });
   });
 });

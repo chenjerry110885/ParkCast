@@ -59,6 +59,14 @@ describe("ConfidencePill", () => {
     fireEvent.click(screen.getByRole("button"));
     expect(screen.getByRole("note")).toHaveTextContent(t("en").confidenceThin);
   });
+
+  it("says '1 week', not '1 weeks', for exactly one week of support", () => {
+    render(<ConfidencePill level="medium" reason={{ kind: "weeks", weeks: 1 }} lang="en" />);
+    fireEvent.click(screen.getByRole("button"));
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent(fillTemplate(t("en").confidenceWeekTemplate, { n: 1 }));
+    expect(note.textContent).not.toMatch(/1 weeks/);
+  });
 });
 
 describe("FreshnessBadge", () => {
