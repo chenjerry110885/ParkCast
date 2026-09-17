@@ -1794,23 +1794,53 @@ def test_a_restart_with_a_valid_todays_week_bin_does_not_rebuild_it(tmp_path):
     assert up.week_offers[0][0] == pre_existing
 
 
-@pytest.mark.parametrize("bad_bytes", [
-    b"PCW1\x01",                  # truncated: shorter than the header itself
-    b"XXXX" + b"\x00" * 100,      # wrong magic, otherwise a plausible length
-], ids=["truncated", "wrong-magic"])
-def test_a_corrupt_week_bin_is_replaced_not_left_alone(tmp_path, bad_bytes):
-    """Neither case may raise out of the gate: that would be swallowed by
-    publish_city's own try/except, and since nothing else would ever
-    overwrite a corrupt file, the week table would never be republished
-    again -- a permanent stall disguised as a healthy collector. Both must
-    read as "not built today" and be republished this tick."""
+def test_a_truncated_week_bin_is_replaced_not_left_alone(tmp_path):
+    """A file shorter than the header itself may not raise out of the gate:
+    that would be swallowed by publish_city's own try/except, and since
+    nothing else would ever overwrite a corrupt file, the week table would
+    never be republished again -- a permanent stall disguised as a healthy
+    collector. It must read as "not built today" and be republished this
+    tick."""
     conn = store.connect(tmp_path / "t.sqlite")
     _seed(conn, date(2026, 9, 4), lot="A")
     out_dir = tmp_path / "artifacts"
     out_dir.mkdir()
-    (out_dir / "week.bin").write_bytes(bad_bytes)
+    (out_dir / "week.bin").write_bytes(b"PCW1\x01")  # shorter than the header itself
 
     scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir)  # must not raise
+    conn.close()
+
+    header = artifacts.decode_week_header((out_dir / "week.bin").read_bytes())
+    assert header["magic"] == artifacts.WEEK_MAGIC
+    assert header["n_lots"] == 1
+
+
+def test_a_wrong_magic_week_bin_is_replaced_not_left_alone(tmp_path):
+    """The fixture must be a header that is wrong ONLY in its magic -- valid
+    length, valid fields, `built_ts` stamped for today -- or this test cannot
+    tell the magic check apart from the date comparison beside it.
+
+    An all-nul (or otherwise zero-stamped) fixture gives `built_ts == 0`,
+    which `taipei_date` never equals "today" either, so the date comparison
+    alone already forces a republish and the magic check is never what saves
+    the test. A mutation run confirmed exactly that: deleting the magic
+    check out of `_week_already_built_today` left this test (in its old,
+    all-nul form) green along with the rest of the suite. Splicing a wrong
+    magic onto an otherwise-real, today-stamped header closes that gap --
+    only the magic check can make this one pass.
+    """
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+
+    day = date(2026, 9, 17)
+    valid = artifacts.encode_week(
+        ["A"], {"A": [(0.5, 3)] * config.WEEK_BUCKETS}, built_ts=_taipei_noon(day)
+    )
+    (out_dir / "week.bin").write_bytes(b"XXXX" + valid[4:])
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, today=day)  # must not raise
     conn.close()
 
     header = artifacts.decode_week_header((out_dir / "week.bin").read_bytes())

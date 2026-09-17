@@ -108,3 +108,65 @@ def test_build_week_cells_with_no_observations_anywhere_is_all_unknown(conn):
     row = cells["taipei:GHOST"]
     assert len(row) == config.WEEK_BUCKETS
     assert all(probability is None and support == 0 for probability, support in row)
+
+
+def test_build_week_cells_for_a_lot_the_corpus_has_never_seen_gets_the_citywide_fallback(conn):
+    """A newly added lot -- present in this tick's roster, but with no
+    observation behind it anywhere in an otherwise ordinary, non-empty
+    corpus -- is a real, recurring case (city feeds add lots regularly), not
+    a corner case. Climatology's lot tier has nothing to shrink for it, so
+    `predict` falls straight through to the global (Jeffreys-shrunk) rate,
+    the same for every bucket, while every bucket's support stays honestly
+    0 -- support and probability answer different questions ("have we ever
+    watched this lot at this hour" vs "what do we expect anyway"), and this
+    artifact exists specifically so a client can tell "we predict 40% here"
+    apart from "we have never watched this lot at this hour".
+    """
+    write(conn, 1000, lot="taipei:TPE0001", free=5)
+    write(conn, 1000 + 7 * 86400, lot="taipei:TPE0001", free=0)
+    history = load_history(conn)
+    climatology = Climatology(history)
+    fallback = climatology.predict("taipei:NEWLOT", 1000, horizon_min=0)
+
+    cells = build_week_cells(history, ["taipei:TPE0001", "taipei:NEWLOT"])
+
+    row = cells["taipei:NEWLOT"]
+    assert len(row) == config.WEEK_BUCKETS
+    assert all(support == 0 for _, support in row), (
+        "a lot the corpus has never seen must report zero support in every bucket"
+    )
+    assert all(probability == pytest.approx(fallback) for probability, _ in row), (
+        "and the same citywide fall-back probability in every bucket -- the lot "
+        "tier (and so the bucket tier beneath it) has nothing of this lot's own "
+        "to shrink"
+    )
+
+
+def test_build_week_cells_does_not_mutate_the_shared_bucket_counts(conn):
+    """`history.counts.bucket` is the live `defaultdict` `Climatology` also
+    reads -- shared, never copied (see `Climatology.__init__`) -- and this
+    function only ever asks it questions, via `.get(...)`, never indexes it
+    with `[...]`. A `[...]` lookup would silently insert a zeroed `[0, 0]`
+    entry for every `(lot_id, bucket)` pair this function merely asks
+    about: one daily rebuild would add `len(lot_ids) * config.WEEK_BUCKETS`
+    entries to a dict the live forecaster shares (336 per lot; 365,904 for
+    Taipei alone), yet `build_week_cells`'s own return value would look
+    identical either way, since the shrinkage chain falls back to the same
+    parent rate whether a bucket counter exists at zero or does not exist at
+    all. The only visible symptom would be memory growth in a long-running
+    process -- nothing here would fail on its own, which is exactly why this
+    needs its own pin rather than trusting the other tests to notice.
+    """
+    write(conn, 1000, lot="taipei:TPE0001", free=5)
+    history = load_history(conn)
+    before = {key: tuple(counter) for key, counter in history.counts.bucket.items()}
+
+    # Many buckets this lot was never observed in, so a `[...]` mutation has
+    # plenty of room to insert new entries that `.get` would not.
+    build_week_cells(history, ["taipei:TPE0001"])
+
+    after = {key: tuple(counter) for key, counter in history.counts.bucket.items()}
+    assert after == before, (
+        "build_week_cells must never create bucket entries for buckets it "
+        "only read from"
+    )

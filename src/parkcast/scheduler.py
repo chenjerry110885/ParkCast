@@ -76,17 +76,35 @@ def _first_day_to_archive(conn, today: date) -> date:
     return today if oldest is None else min(taipei_date(oldest), today)
 
 
-def _week_already_built_today(out_dir: Path, city: str, today: date) -> bool:
-    """Whether `city`'s published week.bin was already built today, in Taipei.
+def _read_current_week(out_dir: Path, city: str) -> bytes | None:
+    """`city`'s published week.bin, straight off disk, or None if there is
+    nothing there to read.
 
-    Reads the file's own header off disk -- not an in-memory flag -- and
-    compares its `built_ts` to `today`. `publish_artifacts` is a plain
-    function with nowhere to keep a flag between calls, and the collector
-    restarts routinely (the operator pauses it while gaming), so a flag would
-    rebuild and re-upload the whole ~700 KB table on every resume, spending
-    the Free tier's daily KV budget re-stating what it already said before
-    the restart. This is the same idiom `publish_city` already applies to its
-    own prior grid via `artifacts.read_header` for `MIN_PUBLISH_LOT_FRACTION`.
+    The one place `_publish_week` touches the filesystem for the existing
+    file: reading it here, once, and handing the same bytes to both the
+    build gate and the upload offer is what keeps the common tick -- no
+    rebuild due -- to a single read of a file that can run past 700 KB, in
+    place of reading it once to check its header and again to get its bytes.
+    """
+    try:
+        return (Path(out_dir) / artifacts.week_name(city)).read_bytes()
+    except OSError:
+        return None
+
+
+def _week_already_built_today(blob: bytes | None, today: date) -> bool:
+    """Whether `blob` -- `city`'s published week.bin, read fresh off disk by
+    the caller -- shows a build already done today, in Taipei.
+
+    Judged from the file's own header -- not an in-memory flag -- so this
+    reads the same today regardless of who is asking or when the process
+    started. `publish_artifacts` is a plain function with nowhere to keep a
+    flag between calls, and the collector restarts routinely (the operator
+    pauses it while gaming), so a flag would rebuild and re-upload the whole
+    ~700 KB table on every resume, spending the Free tier's daily KV budget
+    re-stating what it already said before the restart. This is the same
+    idiom `publish_city` already applies to its own prior grid via
+    `artifacts.read_header` for `MIN_PUBLISH_LOT_FRACTION`.
 
     Missing, truncated or non-week bytes all read as "not built today" --
     the same "nothing trustworthy" contract `artifacts.read_header` uses for
@@ -94,10 +112,11 @@ def _week_already_built_today(out_dir: Path, city: str, today: date) -> bool:
     publishes immediately rather than waiting for a day boundary that has
     already passed.
     """
+    if blob is None:
+        return False
     try:
-        blob = (Path(out_dir) / artifacts.week_name(city)).read_bytes()
         header = artifacts.decode_week_header(blob[:artifacts.WEEK_HEADER_SIZE])
-    except (OSError, struct.error):
+    except struct.error:
         return False
     if header["magic"] != artifacts.WEEK_MAGIC:
         return False
@@ -141,8 +160,9 @@ def _publish_week(
     must never be allowed to cost -- or even mark stale -- a reading that
     will never come back.
     """
-    if _week_already_built_today(out_dir, city, today):
-        blob = (Path(out_dir) / artifacts.week_name(city)).read_bytes()
+    blob_on_disk = _read_current_week(out_dir, city)
+    if _week_already_built_today(blob_on_disk, today):
+        blob = blob_on_disk
     else:
         cells = build_week_cells(history, lot_ids)
         # `build_week_cells` returns rows keyed by whatever `lot_ids` holds --
