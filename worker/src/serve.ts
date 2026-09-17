@@ -9,6 +9,12 @@ export const ARTIFACT_PATHS: Readonly<Record<string, Part>> = {
   "/artifacts/lots.json": "lots",
 };
 
+/** week.bin's own path -- not in `ARTIFACT_PATHS` because, unlike the pair's
+ * GET-only paths, it answers both its daily PUT and its GET/HEAD serving
+ * (see index.ts's `route`). Exported from here, beside its sibling
+ * artifacts, so the literal exists in one conceptual place. */
+export const WEEK_PATH = "/artifacts/week.bin";
+
 export function etagMatches(header: string | null, etag: string): boolean {
   if (header === null) return false;
   const bare = etag.replace(/^W\//, "");
@@ -39,11 +45,16 @@ export async function serveArtifact(request: Request, part: Part, env: Env, cach
  * day and fetched lazily by the app, nowhere near the request volume `grid`/
  * `lots` see, so it does not need `LatestCache`'s per-isolate memoisation.
  * `max-age=3600` is fixed, not computed like the pair's: the table changes
- * daily, and a stale hour of climatology is not a stale forecast. */
+ * daily, and a stale hour of climatology is not a stale forecast.
+ *
+ * This 503 ("nothing has ever been uploaded to `WEEK_KEY`") is a GET-side
+ * condition, distinct from `handleWeekUpload`'s PUT-side 503 ("no pair
+ * stored yet", `X-Reject: no-pair`) -- worded differently, and carrying no
+ * `X-Reject` header at all, so the two are never mistaken for each other. */
 export async function serveWeek(request: Request, env: Env): Promise<Response> {
   const stored = await env.ARTIFACTS.getWithMetadata(WEEK_KEY, { type: "arrayBuffer" });
   const meta = asWeekMeta(stored.metadata);
-  if (stored.value === null || meta === null) return respond(503, "No forecast yet", { ...TEXT, "Retry-After": "300" });
+  if (stored.value === null || meta === null) return respond(503, "No week table yet", { ...TEXT, "Retry-After": "300" });
   const headers = {
     "Content-Type": "application/octet-stream",
     "Cache-Control": "max-age=3600",

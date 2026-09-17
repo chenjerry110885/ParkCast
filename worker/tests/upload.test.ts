@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { LatestCache } from "../src/cache";
 import { route } from "../src/index";
 import { LATEST_KEY, WEEK_KEY, type Env } from "../src/kv";
-import { authorized, handleUpload, sha256Hex } from "../src/upload";
+import { MAX_WEEK_BODY_BYTES, authorized, handleUpload, handleWeekUpload, parseRosterHeader, sha256Hex } from "../src/upload";
 import { FakeKV, joined, makePair, makeWeek, metaFor, weekMetaFor, type Pair, type Week } from "./fakes";
 
 const NOW = 1_789_352_400;
@@ -204,7 +204,7 @@ describe("week upload", () => {
     expect([kv.reads, kv.writes]).toEqual([0, 0]);
   });
 
-  it.each(["0x2a", "42abc", "4.2e1", "", "-1", "99999999999"])(
+  it.each(["0x2a", "42abc", "4.2e1", "", "-1", "99999999999", "4294967296"])(
     "refuses X-Roster-Id %s before touching storage",
     async (rosterId) => {
       const { kv, pair, putWeek } = weekSetup();
@@ -233,7 +233,13 @@ describe("week upload", () => {
     expect(kv.writes).toBe(0);
   });
 
-  it("rejects when no pair has ever been uploaded", async () => {
+  it("answers a cold start with a retriable 503, not a terminal 409", async () => {
+    // Fix round 1, Major 2: the client's UploadGuard treats 409 as "done,
+    // never retry today" and anything else (503 included) as "back off and
+    // retry" (see upload.py's UploadGuard.record). An empty LATEST_KEY is
+    // transient -- the pair lands within five minutes -- so a cold-start PUT
+    // here must not be answered the same way as a genuine, permanent roster
+    // mismatch, or today's week.bin is parked until tomorrow's rebuild.
     const kv = new FakeKV(); // no LATEST_KEY seeded
     const cache = new LatestCache(() => NOW * 1000);
     const env: Env = { ARTIFACTS: kv, UPLOAD_SECRET: SECRET, PRODUCTION_HOST: HOST };
@@ -241,7 +247,8 @@ describe("week upload", () => {
     const headers = new Headers({ "X-Roster-Id": "42", Authorization: `Bearer ${SECRET}` });
     const request = new Request(`https://${HOST}/artifacts/week.bin`, { method: "PUT", headers, body: week.week });
     const res = await route(request, env, cache, NOW);
-    expect([res.status, res.headers.get("X-Reject")]).toEqual([409, "roster-mismatch"]);
+    expect([res.status, res.headers.get("X-Reject")]).toEqual([503, "no-pair"]);
+    expect(res.headers.get("Retry-After")).toBe("300");
     expect(kv.writes).toBe(0);
   });
 
@@ -253,5 +260,47 @@ describe("week upload", () => {
     const res = await putWeek({ ...week, week: corrupt });
     expect(res.status).toBe(422);
     expect([kv.reads, kv.writes]).toEqual([0, 0]);
+  });
+
+  it("refuses a declared oversize week body, and an oversize week stream whatever it declares", async () => {
+    const { env, kv } = weekSetup();
+    const auth = { Authorization: `Bearer ${SECRET}`, "X-Roster-Id": "42" };
+    const declared = await handleWeekUpload(
+      rawRequest({ ...auth, "Content-Length": String(MAX_WEEK_BODY_BYTES + 1) }, streamOf(10)),
+      env,
+      NOW,
+    );
+    expect(declared.status).toBe(413);
+    const lying = await handleWeekUpload(
+      rawRequest({ ...auth, "Content-Length": "10" }, streamOf(MAX_WEEK_BODY_BYTES + 1)),
+      env,
+      NOW,
+    );
+    expect(lying.status).toBe(413);
+    const undeclared = await handleWeekUpload(rawRequest(auth, streamOf(MAX_WEEK_BODY_BYTES + 1)), env, NOW);
+    expect(undeclared.status).toBe(413);
+    expect(kv.writes).toBe(0);
+  });
+});
+
+describe("parseRosterHeader", () => {
+  it("accepts a well-formed roster id", () => {
+    expect(parseRosterHeader("42")).toBe(42);
+  });
+
+  it.each([null, "0x2a", "42abc", "4.2e1", "", "-1", "99999999999"])("rejects %s", (value) => {
+    expect(parseRosterHeader(value)).toBeNull();
+  });
+
+  it("rejects a value one above the largest real uint32", () => {
+    // "4294967296" is exactly 10 digits, so it passes the length regex --
+    // isolating the `> 0xffffffff` bound specifically. This cannot be tested
+    // end-to-end through handleWeekUpload: a week blob's own rosterId is a
+    // decoded uint32 (see validate.ts's parseWeekHeader), so it can never
+    // equal a value this large, and the body-vs-header consistency check a
+    // few lines below this one in upload.ts would always catch an
+    // over-bound header too -- an end-to-end fixture could never tell the
+    // two checks apart. Only a direct call on this pure function can.
+    expect(parseRosterHeader("4294967296")).toBeNull();
   });
 });

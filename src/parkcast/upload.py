@@ -33,7 +33,14 @@ log = logging.getLogger("parkcast.upload")
 
 SECRET_RE = re.compile(r"pcu_[A-Za-z0-9_-]{43}")
 UPLOAD_PATH = "/artifacts/latest"
-KNOWN_REJECTS = frozenset({"future", "too-old", "stale", "too-soon", "roster-shrink"})
+KNOWN_REJECTS = frozenset({
+    "future", "too-old", "stale", "too-soon", "roster-shrink",
+    # The week lane's own tokens (see worker/src/validate.ts's checkWeekRoster):
+    # "roster-mismatch" is the only one the week path can ever emit as a 409,
+    # and without it here every week rejection logged as "unknown" -- the one
+    # diagnostic X-Reject exists to carry, erased at the receiver.
+    "roster-mismatch", "no-pair",
+})
 SendResult = tuple[int, str | None, str | None]
 
 
@@ -414,6 +421,13 @@ class Uploader:
             token = reject if reject in KNOWN_REJECTS else "unknown"
             log.warning("week upload rejected: %s status=409 duration=%.1fs bytes=%s",
                         token, box["seconds"], total_bytes)
+        elif status == 503 and reject == "no-pair":
+            # Expected on a cold deploy, not a fault: the Worker has no pair
+            # to check this roster against yet, but the pair uploads every
+            # five minutes, so this clears itself well within the guard's own
+            # back-off -- worded to read that way rather than as an error.
+            log.warning("week upload waiting: status=503 reject=no-pair duration=%.1fs bytes=%s; "
+                       "no pair uploaded yet, retrying", box["seconds"], total_bytes)
         elif status == 401:
             log.warning("week upload unauthorized: status=401 duration=%.1fs bytes=%s; "
                        "retrying in an hour", box["seconds"], total_bytes)

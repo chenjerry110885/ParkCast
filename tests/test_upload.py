@@ -514,6 +514,40 @@ def test_offer_week_retries_the_same_blob_until_accepted():
     assert attempts == [b"TODAY", b"TODAY"], "an accepted day's blob is a no-op duplicate"
 
 
+def _week_upload_record_for(caplog, status, reject):
+    def week_send(url, secret, week, *, city, roster_id, opener, timeout):
+        return status, reject, None
+
+    up = _uploader_week(week_send)
+    up.offer_week(b"W", city="taipei", roster_id=1)
+    with caplog.at_level(logging.DEBUG, logger="parkcast.upload"):
+        assert up.process_pending_week()
+    [record] = [r for r in caplog.records if r.name == "parkcast.upload"]
+    return record
+
+
+def test_a_week_409_names_roster_mismatch_instead_of_unknown(caplog):
+    """Fix round 1, Major 1: `roster-mismatch` is the only token the week
+    lane can ever emit as a 409 (see checkWeekRoster in worker/src/validate.ts),
+    so it must be in KNOWN_REJECTS -- otherwise every week rejection logs as
+    `unknown`, erasing the one diagnostic X-Reject exists to carry."""
+    record = _week_upload_record_for(caplog, 409, "roster-mismatch")
+    assert record.levelno == logging.WARNING
+    assert record.getMessage().startswith("week upload rejected: roster-mismatch status=409")
+
+
+def test_a_week_503_no_pair_is_visible_and_reads_as_self_resolving(caplog):
+    """Fix round 1, Major 2: a cold-start 503 must be logged -- not silently
+    swallowed into the generic "failed" branch -- and worded so it does not
+    read as a fault. It is the expected state before the very next
+    five-minute pair upload lands, not an error to chase."""
+    record = _week_upload_record_for(caplog, 503, "no-pair")
+    assert record.levelno == logging.WARNING
+    message = record.getMessage()
+    assert "no-pair" in message
+    assert "failed" not in message.lower()
+
+
 def test_from_environment_is_off_and_says_so_once_without_the_value(tmp_path, caplog, host):
     with caplog.at_level(logging.INFO, logger="parkcast.upload"):
         assert upload.from_environment({}, secret_path=tmp_path / "none") is None

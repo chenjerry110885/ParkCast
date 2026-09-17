@@ -148,7 +148,11 @@ describe("checkWeekRoster", () => {
     expect(checkWeekRoster(header, 7)).toBe("roster-mismatch");
   });
 
-  it("rejects when no roster is stored yet", () => {
-    expect(checkWeekRoster(header, null)).toBe("roster-mismatch");
+  it("answers 'no-pair', not 'roster-mismatch', when nothing is stored yet", () => {
+    // Distinct token on purpose: a missing pair is transient (the pair
+    // uploads every five minutes) while a real mismatch is permanent. The
+    // caller (handleWeekUpload) answers the two with different HTTP statuses
+    // so the client's retry-vs-terminal logic tells them apart.
+    expect(checkWeekRoster(header, null)).toBe("no-pair");
   });
 });

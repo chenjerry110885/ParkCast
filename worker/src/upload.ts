@@ -13,6 +13,20 @@ const DECIMAL = /^[0-9]+$/;
 /** `roster_id` is a `zlib.crc32(...) & 0xFFFFFFFF` -- at most 10 decimal digits. */
 const ROSTER_ID = /^[0-9]{1,10}$/;
 
+/** The `X-Roster-Id` header as a validated uint32, or null if malformed or
+ * out of range. Split out from `handleWeekUpload` so the `0xffffffff` bound
+ * is directly testable: a week blob's own decoded `rosterId` is *also*
+ * always `<= 0xffffffff` (it comes from `DataView.getUint32`), so an
+ * over-bound header can never be caught "anyway" by the body-vs-header
+ * consistency check downstream -- no real body can hold a value that large
+ * to compare against, which makes an end-to-end fixture unable to isolate
+ * this bound from that check. A direct unit test on this function can. */
+export function parseRosterHeader(value: string | null): number | null {
+  if (value === null || !ROSTER_ID.test(value)) return null;
+  const n = Number(value);
+  return n > 0xffffffff ? null : n;
+}
+
 type TimingSafeSubtle = SubtleCrypto & {
   timingSafeEqual(a: ArrayBuffer | ArrayBufferView, b: ArrayBuffer | ArrayBufferView): boolean;
 };
@@ -130,17 +144,15 @@ export async function handleWeekUpload(request: Request, env: Env, nowSec: numbe
   if (declared !== null && (!DECIMAL.test(declared) || Number(declared) > MAX_WEEK_BODY_BYTES)) {
     return respond(413, "Too large", TEXT);
   }
-  const rosterHeader = request.headers.get("X-Roster-Id") ?? "";
-  if (!ROSTER_ID.test(rosterHeader) || Number(rosterHeader) > 0xffffffff) {
-    return respond(422, "Invalid upload", TEXT);
-  }
+  const claimedRosterId = parseRosterHeader(request.headers.get("X-Roster-Id"));
+  if (claimedRosterId === null) return respond(422, "Invalid upload", TEXT);
   const body = await readCapped(request.body, MAX_WEEK_BODY_BYTES);
   if (body === null) return respond(413, "Too large", TEXT);
 
   // 3. Shape -- including that the body's own roster agrees with the header
   // that named it, so the two can never silently drift apart.
   const result = validateWeek(body);
-  if (!result.ok || result.header.rosterId !== Number(rosterHeader)) {
+  if (!result.ok || result.header.rosterId !== claimedRosterId) {
     return respond(422, "Invalid upload", TEXT);
   }
 
@@ -148,8 +160,18 @@ export async function handleWeekUpload(request: Request, env: Env, nowSec: numbe
   // never written here). This is the check that matters: a table indexed
   // against a roster other than the one lots.json currently publishes would
   // attach every lot's climatology to the wrong lot.
+  //
+  // "no-pair" gets its own status, 503, not 409: the client's UploadGuard
+  // (upload.py) treats 409 as terminal for the day and anything else as
+  // retriable. An empty LATEST_KEY is transient -- the pair uploads every
+  // five minutes -- so it must retry, unlike a genuine roster-mismatch,
+  // which is permanent (identical bytes will never pass) and correctly
+  // never retried.
   const stored = await env.ARTIFACTS.getWithMetadata(LATEST_KEY, { type: "arrayBuffer" });
   const reject = checkWeekRoster(result.header, asStoredMeta(stored.metadata)?.rosterId ?? null);
+  if (reject === "no-pair") {
+    return respond(503, "No pair uploaded yet", { ...TEXT, "X-Reject": reject, "Retry-After": "300" });
+  }
   if (reject !== null) return respond(409, "Not accepted", { ...TEXT, "X-Reject": reject });
 
   // 5. One write, to its own key.

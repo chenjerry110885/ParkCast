@@ -1,11 +1,10 @@
 import { LatestCache } from "./cache";
 import { TEXT, notFound, respond } from "./http";
 import type { Env } from "./kv";
-import { ARTIFACT_PATHS, serveArtifact, serveWeek } from "./serve";
+import { ARTIFACT_PATHS, WEEK_PATH, serveArtifact, serveWeek } from "./serve";
 import { handleUpload, handleWeekUpload } from "./upload";
 
 const isolateCache = new LatestCache();
-const WEEK_PATH = "/artifacts/week.bin";
 
 export async function route(request: Request, env: Env, cache: LatestCache, nowSec: number): Promise<Response> {
   const url = new URL(request.url);

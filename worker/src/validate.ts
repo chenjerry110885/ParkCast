@@ -128,7 +128,7 @@ export interface WeekHeader {
 }
 
 export type WeekResult = { ok: true; header: WeekHeader } | { ok: false };
-export type WeekReject = "roster-mismatch";
+export type WeekReject = "roster-mismatch" | "no-pair";
 
 export function parseWeekHeader(week: Uint8Array): WeekHeader | null {
   if (week.byteLength < WEEK_HEADER_SIZE) return null;
@@ -161,10 +161,20 @@ export function validateWeek(week: Uint8Array): WeekResult {
  * climatology to the wrong lot, silently. `storedRosterId` is the pair
  * currently in KV's own `rosterId` (validated against its `lots.json` at
  * upload time, see `validatePair`), so this is a direct comparison, not a
- * second parse of `lots.json`. No stored pair at all is the same failure --
- * there is nothing to index the table against. */
+ * second parse of `lots.json`.
+ *
+ * No stored pair at all is a *different* failure from a genuine mismatch,
+ * and the two must stay distinguishable: a mismatch is permanent (identical
+ * bytes will never pass; retrying is waste) but an empty `LATEST_KEY` is
+ * transient (the pair uploads every five minutes, so it clears within one
+ * tick). The caller (`handleWeekUpload`) answers them with different HTTP
+ * statuses for exactly this reason -- the client's `UploadGuard` treats 409
+ * as terminal and anything else as retriable (see `upload.py`), so folding
+ * "no pair yet" into "roster-mismatch" would park `week.bin` for a full day
+ * on every cold start. */
 export function checkWeekRoster(h: WeekHeader, storedRosterId: number | null): WeekReject | null {
-  return storedRosterId !== null && h.rosterId === storedRosterId ? null : "roster-mismatch";
+  if (storedRosterId === null) return "no-pair";
+  return h.rosterId === storedRosterId ? null : "roster-mismatch";
 }
 
 export function checkOrder(h: GridHeader, stored: StoredMeta | null, now: number): Reject | null {
