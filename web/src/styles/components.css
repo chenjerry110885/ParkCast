@@ -136,26 +136,31 @@
 .search__empty { margin: 6px 0 0 14px; font-size: 13px; }
 .search__recent-clear { border: 0; background: none; color: var(--accent); font-size: 12px; font-weight: 600; padding: 4px 8px; }
 
-/* ------------------------------------------------------------ arrival strip */
-.arrival { margin: 4px 0 10px; }
-.arrival__readout { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
-.arrival__label { font-size: 12px; font-weight: 600; color: var(--muted); }
-.arrival__time { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; line-height: 1; }
-.arrival__relative { font-size: 12px; color: var(--muted); }
-.arrival__strip { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 4px 2px; margin: 0 -2px; scroll-snap-type: x proximity; touch-action: pan-x; }
-.arrival__strip::-webkit-scrollbar { display: none; }
-.chip {
-  flex: 0 0 auto; min-height: 44px; padding: 0 12px; border: 0; border-radius: 12px; scroll-snap-align: center;
+/* ------------------------------------------------------------ arrival picker */
+.arrival-picker { margin: 4px 0 10px; }
+.arrival-picker__readout { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.arrival-picker__label { font-size: 12px; font-weight: 600; color: var(--muted); }
+.arrival-picker__time { font-size: 22px; font-weight: 800; letter-spacing: -0.02em; line-height: 1; }
+.arrival-picker__relative { font-size: 12px; color: var(--muted); }
+/* Quick chips: clicked, never dragged (see ArrivalPicker.tsx) -- a plain
+   button row, not a scroller, so there is no pointer-drag surface for a
+   sweep gesture to reattach to. */
+.arrival-picker__quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.qchip {
+  flex: 0 0 auto; min-height: 44px; padding: 0 12px; border: 0; border-radius: 12px;
   background: var(--unknown-soft); color: var(--text); font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums;
-  transition: background var(--dur-fast), color var(--dur-fast), transform var(--dur-fast), box-shadow var(--dur-fast);
+  transition: background var(--dur-fast), transform var(--dur-fast);
 }
-.chip[aria-checked="true"] { background: var(--gradient-navy); color: var(--accent-text); box-shadow: var(--shadow-1); transform: translateY(-1px); }
-@media (prefers-color-scheme: light) { .chip[aria-checked="true"] { color: #fff; } }
-/* The chips alone carry `role="radiogroup"`; the tail is prose about what lies
-   past the last one, so it sits beside that group inside the same scroller
-   rather than inside a radio group it is not a radio in. */
-.arrival__chips { display: flex; gap: 6px; flex: 0 0 auto; }
-.arrival__tail { flex: 0 0 auto; align-self: center; padding: 0 8px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.qchip:active { transform: scale(0.96); }
+@media (hover: hover) { .qchip:hover { background: var(--accent-soft); } }
+/* Three native selects, side by side: they wrap onto two rows rather than
+   shrinking below a usable width on the narrowest phones this ships to. */
+.arrival-picker__fields { display: flex; gap: 8px; flex-wrap: wrap; }
+.arrival-picker__field { flex: 1 1 88px; min-width: 88px; }
+.arrival-picker__select {
+  width: 100%; min-height: 44px; padding: 0 10px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); color: var(--text); font-weight: 700; font-size: 14px;
+}
 
 /* ------------------------------------------------------------ cards */
 .lots { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }

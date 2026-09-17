@@ -73,9 +73,9 @@
  *     have been the first thing an address search quietly broke.
  */
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { arrivalOptions, clampArrival, defaultArrival, horizonFromReading } from "./arrival";
+import { MAX_LEAD_SEC, MIN_LEAD_SEC, ceilToStep, clampArrival, defaultArrival, horizonFromReading } from "./arrival";
 import { artifactsBase, horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
-import { ArrivalStrip } from "./components/ArrivalStrip";
+import { ArrivalPicker } from "./components/ArrivalPicker";
 import { FreshnessBadge } from "./components/FreshnessBadge";
 import { LangToggle } from "./components/LangToggle";
 import { LocateButton } from "./components/LocateButton";
@@ -177,8 +177,8 @@ const CLOCK_TICK_MS = 30_000;
  * How often the artifacts are refetched.
  *
  * The horizon offset is only bounded if the age is: a tab left open answers for
- * an ever-older reading otherwise, and the far end of the arrival strip drifts
- * into the past. Two minutes is well inside the feed's five-minute cadence and
+ * an ever-older reading otherwise, and the grid's own far end drifts into the
+ * past. Two minutes is well inside the feed's five-minute cadence and
  * costs almost nothing -- `rosterId` pairing means a routine refetch revalidates
  * the cached 186 KB `lots.json` and downloads only the 26 KB grid.
  */
@@ -407,28 +407,37 @@ export default function App() {
   const ageMin = grid === null ? null : Math.max(0, Math.round((nowSec - grid.baseDataTs) / 60));
 
   /**
-   * Every clock time the strip may offer: from five minutes out to the last
-   * time the grid still forecasts. Bounded by the *grid*, not by the clock, so
-   * an ageing reading shortens the strip instead of offering arrival times the
-   * model never answered for.
+   * The window `ArrivalPicker` may choose from: never earlier than the
+   * nearest arrival the app will answer for, never later than what
+   * `MAX_LEAD_SEC` bounds the picker to (see its own comment in
+   * `arrival.ts`). Bounded by the *clock*, not the grid -- unlike the old
+   * strip's `arrivalOptions`, this window has nothing to do with how far
+   * `grid.bin` itself reaches, which is exactly the "why can't I pick
+   * tomorrow" complaint `ArrivalPicker` exists to answer.
    */
-  const options = useMemo(() => (grid === null ? [] : arrivalOptions(nowSec, grid)), [grid, nowSec]);
+  const arrivalBounds = useMemo(
+    () => ({ min: ceilToStep(nowSec + MIN_LEAD_SEC), max: nowSec + MAX_LEAD_SEC }),
+    [nowSec],
+  );
 
-  // The clock walks the near end of `options` forward, and a refreshed grid can
-  // move the far one. Either can leave the chosen time outside the strip, and a
-  // selection nothing on screen shows is a selection the user cannot correct.
+  // The clock walks the near end of the window forward every tick. A chosen
+  // time left behind by it is a selection nothing on screen still offers --
+  // `ArrivalPicker` itself never produces one (every list it renders is
+  // pre-filtered to the live window, see R10 in its own file comment), but a
+  // `value` already passed can only be noticed here, one tick after the fact,
+  // and corrected forward to the nearest still-selectable time.
   //
-  // Written back into state rather than clamped on the way out at render time,
-  // which is the same picture but not the same behaviour: a clamp applied only
-  // on read would spring the selection back to the time the user originally
-  // asked for the moment a refreshed grid widened the strip again, moving it
-  // without anybody touching it. React bails out when the clamp changes
-  // nothing, so the extra render costs a tick only on the rare update that
-  // actually moves the selection.
+  // Written back into state rather than clamped on the way out at render
+  // time, which is the same picture but not the same behaviour: a clamp
+  // applied only on read would spring the selection back to the time the
+  // user originally asked for the moment the window moved again, without
+  // anybody touching it. React bails out when the clamp changes nothing, so
+  // the extra render costs a tick only on the rare update that actually
+  // moves the selection.
   useEffect(() => {
     // oxlint-disable-next-line react/set-state-in-effect
-    setArrivalTs((ts) => clampArrival(ts, options));
-  }, [options]);
+    setArrivalTs((ts) => clampArrival(ts, arrivalBounds));
+  }, [arrivalBounds]);
 
   /**
    * The horizon actually read out of the grid: the arrival time measured from
@@ -642,16 +651,10 @@ export default function App() {
       </div>
       {desktop && search}
       {grid !== null && (
-        <ArrivalStrip
-          options={options}
+        <ArrivalPicker
           value={arrivalTs}
           nowSec={nowSec}
           onChange={setArrivalTs}
-          // A strip that cannot change the answer must not look as though it
-          // could: past the grid's reach every chip reads the same clamped
-          // column, which is the silent no-op `forecastExpired` exists to make
-          // visible.
-          expired={forecastExpired}
           lang={lang}
         />
       )}

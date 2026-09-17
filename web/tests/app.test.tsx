@@ -25,7 +25,7 @@ import App, {
   MIN_REFETCH_MS,
   REFRESH_MS,
 } from "../src/App";
-import { arrivalOptions, defaultArrival, formatClock, horizonFromReading } from "../src/arrival";
+import { arrivalOptions, ceilToStep, defaultArrival, formatClock, horizonFromReading } from "../src/arrival";
 import { HEADER_SIZE, UNKNOWN, horizonColumn } from "../src/artifacts";
 import { haversineMeters } from "../src/geo";
 import { fillTemplate, t } from "../src/i18n";
@@ -279,9 +279,17 @@ function factText(tile: HTMLElement): string {
   return label === "" ? value : `${value} ${label}`;
 }
 
-/** The arrival strip's chips, as the clock times they read. */
-function chipTimes(): string[] {
-  return screen.queryAllByRole("radio").map((chip) => chip.textContent ?? "");
+/**
+ * Drive the arrival picker's hour and minute `<select>`s to `ts`, the way a
+ * user reaches a specific arrival time now that there is no chip to click
+ * for it directly. Every fixture in this file stays within one Taipei
+ * calendar day -- the oldest age used is 383 minutes, six and a half hours
+ * past a 14:48 reading -- so the day `<select>` is never touched.
+ */
+function selectArrival(ts: number) {
+  const [hh, mm] = formatClock(ts).split(":");
+  fireEvent.change(screen.getByLabelText(t("en").pickerHour), { target: { value: String(Number(hh)) } });
+  fireEvent.change(screen.getByLabelText(t("en").pickerMinute), { target: { value: String(Number(mm)) } });
 }
 
 beforeEach(() => {
@@ -534,19 +542,63 @@ describe("staleness", () => {
 });
 
 describe("arrival time", () => {
-  it("offers every clock time the grid actually holds, and opens on the default", async () => {
+  it("opens on the default arrival, with a day/hour/minute picker for changing it", async () => {
     render(<App />);
-    // The strip's times are read off the grid's own header -- five minutes out
-    // through the last column it forecasts -- so a grid built at a different
-    // resolution, or an older reading, moves the strip instead of leaving its
-    // far end pointing at a column that does not exist.
-    const strip = await screen.findByRole("radiogroup", { name: t("en").arrivalGroupLabel });
-    expect(within(strip).getAllByRole("radio").length).toBeGreaterThan(0);
-    expect(chipTimes()).toEqual(arrivalOptions(NOW_SEC, GRID_SPAN).map(formatClock));
+    await screen.findByTestId("staleness");
 
-    // ...and the one it opens on is a real arrival time, not a horizon index.
-    const checked = screen.getByRole("radio", { checked: true });
-    expect(checked.textContent).toBe(formatClock(defaultArrival(NOW_SEC)));
+    // The one it opens on is a real arrival time, not a horizon index.
+    expect(screen.getByTestId("arrival-time").textContent).toBe(formatClock(defaultArrival(NOW_SEC)));
+
+    // Three native selects, each reachable and named by its own label --
+    // `getByLabelText` throws unless the `<label for>`/`id` pair the
+    // component wires up actually resolves, so this fails if the
+    // association breaks, not just if the select goes missing.
+    const day = screen.getByLabelText(t("en").pickerDay) as HTMLSelectElement;
+    const hour = screen.getByLabelText(t("en").pickerHour) as HTMLSelectElement;
+    const minute = screen.getByLabelText(t("en").pickerMinute) as HTMLSelectElement;
+    expect(day.tagName).toBe("SELECT");
+    expect(hour.tagName).toBe("SELECT");
+    expect(minute.tagName).toBe("SELECT");
+    // The day list is not one entry: this is a seven-day picker, not the old
+    // strip's two-hour one -- the complaint ("limiting the prediction to two
+    // hours is weird") this control exists to answer.
+    expect(day.options.length).toBeGreaterThan(1);
+
+    // The four quick chips, each its own labelled, clickable button.
+    for (const label of [t("en").quickNow, t("en").quickPlus15, t("en").quickPlus30, t("en").quickPlus1h]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+  });
+
+  it("moves the reading forward when a quick chip is clicked, not dragged", async () => {
+    render(<App />);
+    await screen.findByTestId("staleness");
+    const before = screen.getByTestId("arrival-time").textContent;
+
+    fireEvent.click(screen.getByRole("button", { name: t("en").quickPlus1h }));
+
+    const after = screen.getByTestId("arrival-time").textContent;
+    expect(after).not.toBe(before);
+    expect(after).toBe(formatClock(ceilToStep(NOW_SEC + 3600)));
+  });
+
+  it("does not change the selection when a pointer is dragged across the quick chips", async () => {
+    // The strip this replaces used to let a drag sweep across its chips change
+    // the selection, which on desktop made a row of buttons behave like a
+    // slider nobody asked for. The chips here are plain buttons with only an
+    // `onClick`, so there is nothing for a drag to hook into -- this pins that
+    // by firing the drag's own events and nothing else.
+    render(<App />);
+    await screen.findByTestId("staleness");
+    const before = screen.getByTestId("arrival-time").textContent;
+
+    const first = screen.getByRole("button", { name: t("en").quickNow });
+    const last = screen.getByRole("button", { name: t("en").quickPlus1h });
+    fireEvent.pointerDown(first, { clientX: 10, clientY: 10, pointerId: 1, button: 0 });
+    fireEvent.pointerMove(last, { clientX: 300, clientY: 10, pointerId: 1 });
+    fireEvent.pointerUp(last, { clientX: 300, clientY: 10, pointerId: 1 });
+
+    expect(screen.getByTestId("arrival-time").textContent).toBe(before);
   });
 });
 
@@ -598,38 +650,35 @@ describe("staleness correction", () => {
     expect(staleColumn - freshColumn).toBe(20 / STEP_MIN);
   });
 
-  it("leaves the control offering the arrival times the user picks", async () => {
+  it("leaves the readout showing the time the user picked, not one stale-shifted by the reading's age", async () => {
     // The correction is applied to the grid read, never to the label: the user
-    // still chooses a real clock time, and a 23-minute-old reading does not
-    // quietly move the chip they picked 23 minutes later.
+    // still sees a real clock time, and a 23-minute-old reading does not
+    // quietly move the arrival time shown 23 minutes later.
     ageArtifact(23);
     render(<App />);
-    await screen.findByRole("radiogroup", { name: t("en").arrivalGroupLabel });
+    await screen.findByTestId("staleness");
 
-    const at = nowSec();
-    expect(chipTimes()).toEqual(arrivalOptions(at, GRID_SPAN).map(formatClock));
-    expect(screen.getByRole("radio", { checked: true }).textContent).toBe(
-      formatClock(defaultArrival(at)),
-    );
+    expect(screen.getByTestId("arrival-time").textContent).toBe(formatClock(defaultArrival(nowSec())));
   });
 
-  it("keeps the far end of the strip a real answer rather than a clamp", async () => {
-    // `arrivalOptions` stops at the last clock time the grid still forecasts,
-    // instead of offering one `probabilityAt` would have to clamp. So the
-    // furthest chip a driver can pick reads its own column -- not the last
-    // column standing in for a time nobody asked for, and not "no data".
+  it("reads a real column for a time still on the grid, not the clamp standing in past its end", async () => {
+    // `probabilityAt` clamps a request off the grid to its last column rather
+    // than failing (see `horizonColumn`'s own comment) -- the honest trade for
+    // a time slightly beyond what the grid covers. This pins the *other* side
+    // of that trade: a time the grid still genuinely reaches must read its own
+    // column, not the clamp meant for times past it.
     stubColumnMarkedArtifacts();
     ageArtifact(30);
     await renderLocated();
 
-    const chips = screen.getAllByRole("radio");
-    const furthest = arrivalOptions(nowSec(), GRID_SPAN).at(-1)!;
-    expect(chips.at(-1)?.textContent).toBe(formatClock(furthest));
-
-    fireEvent.click(chips.at(-1)!);
+    const last = arrivalOptions(nowSec(), GRID_SPAN).at(-1)!;
+    selectArrival(last);
 
     const chance = within(rowFor(MARKED.n)).getByTestId("lot-probability");
-    expect(chance.textContent).toContain(`${columnMark(columnFor(furthest))}%`);
+    expect(chance.textContent).toContain(`${columnMark(columnFor(last))}%`);
+    // ...and not the grid's very last column, which is what the clamp this
+    // test is *not* exercising would have said instead.
+    expect(chance.textContent).not.toContain(`${columnMark(N_HORIZONS - 1)}%`);
     expect(chance.textContent).not.toContain(t("en").noData);
   });
 });
@@ -852,13 +901,18 @@ describe("an artifact older than the grid it came from", () => {
     expect(screen.queryByText(t("en").rankedForArrival)).toBeNull();
   });
 
-  it("renders no arrival chips rather than leave a control that does nothing", async () => {
+  it("keeps the arrival picker itself present and honest, even once this grid's forecast has expired", async () => {
     ageArtifact(OBSERVED_AGE_MIN);
     await renderLocated();
-    // Not a disabled strip and not a strip of identical answers: there is no
-    // arrival time left that this grid forecasts, so there is none to offer.
-    expect(screen.queryAllByRole("radio")).toEqual([]);
-    expect(screen.getByTestId("arrival-time").textContent).not.toMatch(/\d/);
+    // Not a disabled control and not a blank one: a driver can still say when
+    // they expect to arrive -- the picker's own range runs seven days ahead
+    // of the clock and has nothing to do with how old this particular grid
+    // is. It is only *this* grid's forecast for that time that expired, which
+    // the probability cells and the banner above already say; the picker does
+    // not pretend otherwise by going empty.
+    expect(screen.getByTestId("arrival-time").textContent).toMatch(/^\d{2}:\d{2}$/);
+    expect(screen.getByLabelText(t("en").pickerHour)).toBeInTheDocument();
+    expect(screen.getByLabelText(t("en").pickerMinute)).toBeInTheDocument();
   });
 
   it("says all of it in Chinese too", async () => {
@@ -879,7 +933,6 @@ describe("an artifact older than the grid it came from", () => {
     await renderLocated();
 
     expect(screen.getByTestId("forecast-expired").textContent).toBe(t("en").forecastTooOld);
-    expect(screen.queryAllByRole("radio")).toEqual([]);
     expect(screen.getByText(t("en").nearbyCarParks)).toBeInTheDocument();
     for (const cell of screen.getAllByTestId("lot-probability")) {
       expect(cell.textContent).not.toMatch(/\d+%/);
@@ -888,9 +941,9 @@ describe("an artifact older than the grid it came from", () => {
 
   it("leaves a grid alone while an arrival time still has a column of its own", async () => {
     // One minute earlier, and the forecast is not a decoration: the last
-    // arrival time the grid reaches is still offered, and it reads its own
-    // column rather than the clamped last one -- the documented trade, not an
-    // expiry.
+    // arrival time the grid reaches still has a real column behind it, and
+    // picking it reads that column rather than the clamped last one -- the
+    // documented trade, not an expiry.
     stubColumnMarkedArtifacts();
     ageArtifact(LAST_LIVE_AGE_MIN);
     await renderLocated();
@@ -899,8 +952,8 @@ describe("an artifact older than the grid it came from", () => {
     expect(screen.getByText(t("en").rankedForArrival)).toBeInTheDocument();
 
     const offered = arrivalOptions(nowSec(), GRID_SPAN);
-    expect(chipTimes()).toEqual(offered.map(formatClock));
     expect(offered.length).toBeGreaterThan(0);
+    selectArrival(offered.at(-1)!);
 
     const chance = within(rowFor(MARKED.n)).getByTestId("lot-probability").textContent;
     expect(chance).toContain(`${columnMark(columnFor(offered.at(-1)!))}%`);
@@ -1265,7 +1318,11 @@ describe("searching for a destination", () => {
     fireEvent.keyDown(box(), { key: "ArrowDown" });
     fireEvent.keyDown(box(), { key: "ArrowDown" });
     fireEvent.keyDown(box(), { key: "ArrowUp" });
-    const active = screen.getByRole("option", { selected: true });
+    // Scoped to the results list: the arrival picker's own native `<select>`s
+    // add "option" elements of their own to the page (a currently-selected
+    // hour or minute is a selected option too), and an unscoped query would
+    // now match one of those instead of failing outright.
+    const active = within(screen.getByTestId("search-results")).getByRole("option", { selected: true });
     expect(box().getAttribute("aria-activedescendant")).toBe(active.id);
     expect(active.getAttribute("data-lot-id")).toBe(offered[1]);
 

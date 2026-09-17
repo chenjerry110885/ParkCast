@@ -236,14 +236,41 @@ export interface Strings {
   spacesNowLabel: string;
   /** Accessible name suffix for a card's tap target, after the lot's own name. */
   selectCard: string;
-  /** Label in front of the arrival strip's clock-time readout, e.g. "Arrive at 18:35". */
+  /** Label in front of the arrival picker's clock-time readout, e.g. "Arrive at 18:35". */
   arrivalLabel: string;
   /** Lead time under the readout, e.g. "in 15 min". Carries `{n}`, minutes from now. */
   inMinutesTemplate: string;
-  /** The strip's tail text once its options run out or the forecast has expired. */
-  noForecastBeyond: string;
-  /** Accessible name for the arrival strip's radiogroup. */
-  arrivalGroupLabel: string;
+  /** Accessible name (via `<label for>`) for the arrival picker's day `<select>`. Not shown -- the select's own options already read as calendar days. */
+  pickerDay: string;
+  /** Accessible name for the arrival picker's hour `<select>` (00..23). */
+  pickerHour: string;
+  /** Accessible name for the arrival picker's minute `<select>` (00, 05, .. 55). */
+  pickerMinute: string;
+  /** The day `<select>`'s first row: the current Taipei calendar day, in place of a weekday name. */
+  dayToday: string;
+  /** The day `<select>`'s second row: the Taipei calendar day after today. */
+  dayTomorrow: string;
+  /**
+   * `Date#getDay()` convention (Sun=0..Sat=6) weekday names for the day
+   * `<select>`'s remaining rows -- every offered day beyond tomorrow reads as
+   * its own weekday rather than a date, since the picker never reaches beyond
+   * one week out (`MAX_LEAD_SEC` in `arrival.ts`). See `weekdayName`.
+   */
+  weekdaySunday: string;
+  weekdayMonday: string;
+  weekdayTuesday: string;
+  weekdayWednesday: string;
+  weekdayThursday: string;
+  weekdayFriday: string;
+  weekdaySaturday: string;
+  /** Quick chip: the soonest arrival the picker will offer -- "as soon as possible", not literally this instant (see `MIN_LEAD_SEC`). */
+  quickNow: string;
+  /** Quick chip: fifteen minutes from now, rounded onto the picker's 5-minute clock. */
+  quickPlus15: string;
+  /** Quick chip: thirty minutes from now. */
+  quickPlus30: string;
+  /** Quick chip: one hour from now. */
+  quickPlus1h: string;
   /** Accessible label for the bottom sheet's grip button when tapping it would open the sheet to `full`. */
   expandList: string;
   /** Accessible label for the bottom sheet's grip button when tapping it would collapse the sheet. */
@@ -313,8 +340,22 @@ const en: Strings = {
   selectCard: "Show on map",
   arrivalLabel: "Arrive at",
   inMinutesTemplate: "in {n} min",
-  noForecastBeyond: "no forecast beyond this yet",
-  arrivalGroupLabel: "Arrival time",
+  pickerDay: "Day",
+  pickerHour: "Hour",
+  pickerMinute: "Minute",
+  dayToday: "Today",
+  dayTomorrow: "Tomorrow",
+  weekdaySunday: "Sunday",
+  weekdayMonday: "Monday",
+  weekdayTuesday: "Tuesday",
+  weekdayWednesday: "Wednesday",
+  weekdayThursday: "Thursday",
+  weekdayFriday: "Friday",
+  weekdaySaturday: "Saturday",
+  quickNow: "Now",
+  quickPlus15: "+15 min",
+  quickPlus30: "+30 min",
+  quickPlus1h: "+1 h",
   expandList: "Expand the list",
   collapseList: "Collapse the list",
 };
@@ -381,8 +422,22 @@ const zh: Strings = {
   selectCard: "在地圖上顯示",
   arrivalLabel: "抵達",
   inMinutesTemplate: "{n} 分鐘後",
-  noForecastBeyond: "之後尚無預測",
-  arrivalGroupLabel: "抵達時間",
+  pickerDay: "日期",
+  pickerHour: "小時",
+  pickerMinute: "分鐘",
+  dayToday: "今天",
+  dayTomorrow: "明天",
+  weekdaySunday: "週日",
+  weekdayMonday: "週一",
+  weekdayTuesday: "週二",
+  weekdayWednesday: "週三",
+  weekdayThursday: "週四",
+  weekdayFriday: "週五",
+  weekdaySaturday: "週六",
+  quickNow: "現在",
+  quickPlus15: "+15 分鐘",
+  quickPlus30: "+30 分鐘",
+  quickPlus1h: "+1 小時",
   expandList: "展開清單",
   collapseList: "收合清單",
 };
@@ -462,6 +517,26 @@ const LOT_TYPE_EN: Record<string, string> = {
 export function lotTypeName(type2: string, lang: Lang): string {
   if (lang === "zh") return type2;
   return LOT_TYPE_EN[type2] ?? type2;
+}
+
+/**
+ * `Date#getDay()` convention (Sun=0..Sat=6) weekday name in `lang`, for a
+ * `DayOption.weekday` value from `arrival.ts`'s `dayOptions`.
+ *
+ * A plain array indexed by the same convention `dayOptions` already
+ * documents, rather than a `Record<number, string>` -- an out-of-range index
+ * (never produced by `dayOptions`, but this is still a public function) reads
+ * as `undefined` and falls back to the empty string instead of `undefined`
+ * reaching the DOM, matching `districtName`/`lotTypeName`'s fallback
+ * discipline just above.
+ */
+export function weekdayName(weekday: number, lang: Lang): string {
+  const s = t(lang);
+  const names = [
+    s.weekdaySunday, s.weekdayMonday, s.weekdayTuesday, s.weekdayWednesday,
+    s.weekdayThursday, s.weekdayFriday, s.weekdaySaturday,
+  ];
+  return names[weekday] ?? "";
 }
 
 /**
