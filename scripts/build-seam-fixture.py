@@ -174,10 +174,18 @@ def render(rows: list[dict]) -> str:
 # constructed either blob in TypeScript could only prove the client agrees
 # with itself: the client's arithmetic would sit on both sides of the equals
 # sign, and a client that computes the seam differently from the server is
-# precisely the bug the test exists to catch. It is also the first time the JS
-# suite parses encoder-written bytes at all -- `week.test.ts`'s own `makeWeek`
-# helper lays its header out at `week.ts`'s own `HEADER_SIZE`, so a wrong
-# constant there would be self-consistent and invisible.
+# precisely the bug the test exists to catch.
+#
+# These are also the first bytes the JS suite reads that Python actually
+# wrote, which is what makes that test the only guard on CROSS-LANGUAGE
+# LAYOUT AGREEMENT. `week.test.ts` exercises `parseWeek` hard, but against
+# tables its own `makeWeek` helper lays out by hand -- a second, independent
+# statement of the wire format that never consults `encode_week`. Add a pad
+# byte to `WEEK_HEADER_FORMAT` (`"<4sBIHHBI"` -> `"<4sBIHHBxI"`) and
+# regenerate these fixtures: the whole Python suite stays green, because it
+# compares the encoder against itself, and `week.test.ts` stays green, because
+# it compares the client against itself. Only `seam.test.ts` fails. That gap
+# is what these blobs close, and it is why they have to be written here.
 
 SEAM_GRID_PATH = ROOT / "web" / "tests" / "fixtures" / "seam-grid.bin"
 SEAM_WEEK_PATH = ROOT / "web" / "tests" / "fixtures" / "seam-week.bin"

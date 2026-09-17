@@ -2,10 +2,23 @@
 # `tests/test_seam_fixture.py` and parsed byte-for-byte by
 # `web/tests/seam.test.ts`. This repo is developed on Windows with
 # `core.autocrlf=true`, where git rewrites line endings in any file it
-# *guesses* is text. Both blobs happen to carry a NUL byte early enough for
-# that guess to come out right today, but that is a property of the data
-# currently in them, not of the format: a regenerated fixture that happened to
-# hold no NUL in its first 8000 bytes would be silently CRLF-mangled on
-# checkout, and the byte-identity test would fail on a machine whose author
-# changed nothing.
+# *guesses* is text.
+#
+# Mangling one of these blobs takes two things at once: no NUL byte early
+# enough for git's guess to come out right, AND an 0x0A or 0x0D byte for it to
+# rewrite. Today's fixtures carry neither, so they are safe twice over -- but
+# both are properties of the data currently in them, not of the format. A
+# regenerated fixture holding a 10% or 13% probability byte, or a support
+# count of 10 or 13, introduces the second one immediately, and a roster that
+# happened to place a NUL later introduces the first. The guard is cheap and
+# the failure it prevents is a byte-identity test failing on a machine whose
+# author changed nothing.
 web/tests/fixtures/*.bin binary
+
+# Deliberately NOT extended to the two text fixtures beside them,
+# `seam.json` and `week-buckets.json`. Those are checked out CRLF here and
+# that is fine, in both directions: Python reads them through
+# `Path.read_text`, whose universal newlines turn CRLF back into LF before
+# either is compared against a freshly rendered string, and `JSON.parse`
+# tolerates CRLF outright. Pinning them to `eol=lf` would churn two tracked
+# files to fix nothing.

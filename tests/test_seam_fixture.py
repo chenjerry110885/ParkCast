@@ -122,13 +122,21 @@ def test_regenerating_the_seam_blobs_is_byte_identical():
     produces right now, in memory, must equal what is committed on disk."""
     script = _load_script()
     fresh_grid, fresh_week, payload = script.build_seam_blobs()
-    stale = (
-        "web/tests/fixtures/seam-*.bin is stale -- regenerate it with "
-        f"`python {SCRIPT_PATH.relative_to(ROOT)}` and commit the result"
-    )
-    assert fresh_grid == SEAM_GRID_PATH.read_bytes(), stale
-    assert fresh_week == SEAM_WEEK_PATH.read_bytes(), stale
-    assert script.render_seam_json(payload) == SEAM_JSON_PATH.read_text(encoding="utf-8"), stale
+
+    def stale(path: Path) -> str:
+        """Name the file that actually drifted.
+
+        One shared message across all three assertions sent anyone who edited
+        `seam.json` off hunting a stale `.bin`, which is the opposite of what
+        a rot guard is for."""
+        return (
+            f"{path.relative_to(ROOT).as_posix()} is stale -- regenerate it with "
+            f"`python {SCRIPT_PATH.relative_to(ROOT)}` and commit the result"
+        )
+
+    assert fresh_grid == SEAM_GRID_PATH.read_bytes(), stale(SEAM_GRID_PATH)
+    assert fresh_week == SEAM_WEEK_PATH.read_bytes(), stale(SEAM_WEEK_PATH)
+    assert script.render_seam_json(payload) == SEAM_JSON_PATH.read_text(encoding="utf-8"), stale(SEAM_JSON_PATH)
 
 
 def test_seam_json_indexes_the_blobs_it_was_built_beside():
