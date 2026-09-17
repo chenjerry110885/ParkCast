@@ -537,12 +537,24 @@ describe("a car park whose feed is not updating", () => {
   const LAST_UPDATE = BASE_DATA_TS - 30 * 3600 - 7 * 60;
   const NAME = "中山區行政中心停車場";
 
-  /** The standard fixture, with the unpriced lot marked not updating. */
-  function stubNotUpdating(cell: number = UNKNOWN, week: WeekStub = null) {
-    const lots = LOTS.map((lot) => (lot.id === "TPE_UNPRICED" ? { ...lot, u: LAST_UPDATE } : lot));
-    const perLot = [88, 61, 45, cell];
+  /**
+   * The standard fixture with one lot marked not updating, `cell` being that
+   * lot's own grid row.
+   *
+   * `stalledId` defaults to the unpriced lot, which is what every test written
+   * before the best-pick rule uses. Passing another id moves the stall; passing
+   * an id no lot has (see `STALL_NOBODY`) marks none, which is how the control
+   * case for the ranking tests below gets the same fixture with live feeds.
+   */
+  const STALL_NOBODY = "TPE_NONE_OF_THEM";
+  function stubNotUpdating(cell: number = UNKNOWN, week: WeekStub = null, stalledId = "TPE_UNPRICED") {
+    const lots = LOTS.map((lot) => (lot.id === stalledId ? { ...lot, u: LAST_UPDATE } : lot));
+    const perLot = [88, 61, 45, UNKNOWN];
     const body: number[] = [];
-    for (const lot of lots) for (let h = 0; h < N_HORIZONS; h += 1) body.push(perLot[lot.i] ?? UNKNOWN);
+    for (const lot of lots) {
+      const value = lot.id === stalledId ? cell : (perLot[lot.i] ?? UNKNOWN);
+      for (let h = 0; h < N_HORIZONS; h += 1) body.push(value);
+    }
     stubFetch(encodeGrid(body, lots.length), { ...makeLotsDoc(), lots }, week);
   }
 
@@ -680,6 +692,74 @@ describe("a car park whose feed is not updating", () => {
     const stalled = within(rowFor(NAME)).getByTestId("lot-stalled");
     expect(stalled.textContent).toContain(t("en").notUpdating);
     expect(stalled.textContent).toContain(fillTemplate(t("en").unchangedForTemplate, { n: 30 }));
+  });
+
+  /* ---------------------------------------------------------------- *
+   * ...and the recommendation, which is a different question from the
+   * number. `week.bin` carries no `liveness.Withholding` -- deliberately,
+   * because what a car park usually has free at 21:20 does not depend on
+   * whether its feed answered today -- so past the grid's window a dead lot
+   * carries a full climatology figure. That figure is honest. Crowning it
+   * "Best pick", top of the list, with no confidence pill beside it, is not:
+   * a car park nobody has heard from in thirty hours may simply be closed.
+   * See `rank.ts`'s `group` and `App.tsx`'s `bestId`.
+   *
+   * The entry-fee lot is the fixture's cheapest, and every lot here reads the
+   * same climatology at this arrival, so it is the one the ranker crowns --
+   * which is exactly what makes it the useful one to kill the feed on. The
+   * control case below is what stops these from passing vacuously.
+   * ---------------------------------------------------------------- */
+  const CHEAPEST = LOTS[2]!;
+
+  /** The lot ids of the rendered rows, in the order the list draws them. */
+  function rankedIds(): (string | null)[] {
+    return screen.getAllByTestId("lot-row").map((el) => el.getAttribute("data-lot-id"));
+  }
+
+  it("crowns the cheapest lot at a far arrival while its feed is alive", async () => {
+    const far = tomorrowEvening();
+    stubNotUpdating(UNKNOWN, weekForRoster(far), STALL_NOBODY);
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() =>
+      expect(within(rowFor(CHEAPEST.n)).getByTestId("lot-probability").textContent)
+        .toContain(`${FAR_CLIMATOLOGY}%`),
+    );
+
+    expect(rankedIds()[0]).toBe(CHEAPEST.id);
+    expect(within(rowFor(CHEAPEST.n)).getByText(t("en").bestPick)).toBeInTheDocument();
+  });
+
+  it("takes the 'Best pick' badge off that same lot once its feed stops, and keeps its number", async () => {
+    const far = tomorrowEvening();
+    stubNotUpdating(UNKNOWN, weekForRoster(far), CHEAPEST.id);
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() =>
+      expect(within(rowFor(CHEAPEST.n)).getByTestId("lot-probability").textContent)
+        .toContain(`${FAR_CLIMATOLOGY}%`),
+    );
+    const row = rowFor(CHEAPEST.n);
+
+    // The number stays. Suppressing it would throw away a real answer to fix a
+    // presentation problem, and the card already says the feed has stopped.
+    expect(within(row).getByTestId("lot-probability").textContent).toContain(`${FAR_CLIMATOLOGY}%`);
+    expect(within(row).getByTestId("lot-stalled").textContent).toContain(t("en").notUpdating);
+    // The row stays too -- a missing car park is invisible, an honest one is not.
+    expect(rankedIds()).toContain(CHEAPEST.id);
+
+    // What goes is the endorsement: no badge on this card...
+    expect(within(row).queryByText(t("en").bestPick)).toBeNull();
+    // ...exactly one elsewhere, on a car park we have actually heard from...
+    const badges = screen.getAllByText(t("en").bestPick);
+    expect(badges).toHaveLength(1);
+    expect(badges[0]!.closest("li")).not.toBe(row);
+    // ...and it sinks below every lot that still has a live feed. All four
+    // read the same climatology here, so nothing but the demotion can move it.
+    expect(rankedIds()[rankedIds().length - 1]).toBe(CHEAPEST.id);
+    expect(rankedIds()[0]).toBe(badges[0]!.closest("li")!.getAttribute("data-lot-id"));
   });
 });
 
@@ -1023,16 +1103,22 @@ describe("an arrival beyond the grid's own window", () => {
     expect(screen.queryByRole("button", { name: /confidence/i })).toBeNull();
   });
 
-  it("says 'no data' for a bucket this lot has never been observed in, never 0%", async () => {
+  it("says 'no data' for a cell that carries no probability at all, never 0%", async () => {
     // The rule this whole branch is built around, and the one place it is
     // easiest to break by accident. `WEEK_UNKNOWN` (255) is the absence of an
-    // observation, not an observation of nothing: a lot nobody has ever watched
-    // at 21:20 on a Monday must read "no data", because "0%" is the claim
-    // "reliably full at this hour" and a driver hunting for a space would
-    // believe it. `week.ts`'s `blend` spends three paragraphs forbidding the
-    // one-character version of this bug -- `p ?? 0` -- and this is the test
-    // that catches it: the coercion renders 0% here and nothing else in the
-    // suite notices.
+    // answer, not an answer of nothing: a cell that carries no probability must
+    // read "no data", because "0%" is the claim "reliably full at this hour" and
+    // a driver hunting for a space would believe it. `week.ts`'s `blend` spends
+    // three paragraphs forbidding the one-character version of this bug --
+    // `p ?? 0` -- and this is the test that catches it: the coercion renders 0%
+    // here and nothing else in the suite notices.
+    //
+    // The 255 is written by hand because the collector cannot currently produce
+    // one -- see `week.ts`'s `WEEK_UNKNOWN`: an *unwatched* bucket ships the
+    // citywide fallback with support 0, not this. That is exactly why the test
+    // stays. The format carries the value, a future encoder could legitimately
+    // emit it, and this is the only thing standing between such a cell and a
+    // "255%" on a card.
     const far = tomorrowEvening();
     const unobserved = encodeWeek(
       weekBucket(far),
@@ -1053,11 +1139,11 @@ describe("an arrival beyond the grid's own window", () => {
     expect(screen.queryByRole("button", { name: /confidence/i })).toBeNull();
   });
 
-  it("stays silent about an unobserved bucket however much support it carries", async () => {
+  it("stays silent about a cell with no probability, however much support it carries", async () => {
     // Support and probability are different facts, and the pill is gated on the
-    // second. A cell can hold observations for the lot or the city that never
-    // resolved into a rate for *this* half-hour; grading that as "high, five
-    // weeks" would put a confident label beside a blank ring.
+    // second. Grading a cell that carries no rate as "high, five weeks" would
+    // put a confident label beside a blank ring. Same defensive 255 as above:
+    // hand-written, because the encoder does not currently produce one.
     const far = tomorrowEvening();
     const unobserved = encodeWeek(
       weekBucket(far),

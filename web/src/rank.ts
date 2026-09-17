@@ -175,7 +175,16 @@ export interface Ranked {
 export interface RankInput {
   /** Where the driver is actually going -- not where they are now. */
   destination: LatLon;
-  /** Minutes from now until arrival. Passed through to `probability`. */
+  /**
+   * Minutes until arrival, passed through to `probability` untouched.
+   *
+   * Measured from the *reading* the forecast was built on, not from the wall
+   * clock: the app passes `horizonFromReadingMin`, which `arrival.ts` measures
+   * from the shard's `base_data_ts`. This module never interprets the number,
+   * so the choice belongs to the caller -- but the two must not be confused,
+   * because a stale reading makes them differ by however long ago it was
+   * taken. See `probabilityForLot` in `App.tsx`.
+   */
   horizonMin: number;
   /** Candidates, in grid-row order. */
   lots: readonly Lot[];
@@ -184,7 +193,13 @@ export interface RankInput {
    *
    * A callback rather than a `Grid` so that ranking -- the part with the
    * product judgment in it -- stays testable without building binary buffers.
-   * In the app this is `(i, h) => probabilityAt(grid, i, h)`.
+   * In the app this is
+   * `(i, h) => (withheld ? null : probabilityForLot(g, week, rows[i], h, arrivalTs))`
+   * (`App.tsx`), which reads `grid.bin` inside its +120 min window and
+   * `week.bin` past it. So a `null` here can mean "no grid cell", "no week
+   * table", "no cell in it for this lot", or "the reading is too old to answer
+   * from at all" -- and this module deliberately does not care which. It knows
+   * only "we have a number" and "we do not".
    */
   probability: (lotIndex: number, horizonMin: number) => number | null;
 }
@@ -243,6 +258,62 @@ function priceOf(price: Price | undefined): Money {
 function usableProbability(p: number | null): number | null {
   if (p === null || !Number.isFinite(p)) return null;
   return Math.min(1, Math.max(0, p));
+}
+
+/**
+ * This car park's feed has stopped, so we will not *recommend* it.
+ *
+ * `Lot.u` is published only for the lots `src/parkcast/liveness.py` found not
+ * updating -- the same reading, or no reading, for at least 24 hours -- and is
+ * absent for a live one, so there is no value to misread. The guard matches
+ * `format.notUpdatingHours`'s exactly, so the lots demoted here are the same
+ * lots whose cards read "Not updating".
+ */
+export function notUpdating(lot: Lot): boolean {
+  return typeof lot.u === "number" && Number.isFinite(lot.u);
+}
+
+/**
+ * Which of three ordering groups a scored row belongs to; lower sorts first.
+ *
+ * `0` a forecast we can stand behind, `1` a forecast for a car park we have
+ * not heard from, `2` no forecast at all. Inside a group the sort key is the
+ * expected cost, as it always was.
+ *
+ * **Group 1 is Stage A's doing, and it is a ranking rule rather than an honesty
+ * one.** `grid.bin` is built through `liveness.Withholding`, so inside its
+ * +120 min window a stalled lot has no forecast at all and falls into group 2
+ * exactly as it did before this existed. `week.bin` has no such wrapper, on
+ * purpose: what a car park usually has free at 21:20 on a Thursday does not
+ * depend on whether its feed answered today, and blanking that would throw a
+ * good answer away to fix a presentation problem -- and would change the
+ * published artifact for every consumer. So past the window a stalled lot
+ * carries a full, legitimate climatology figure, and until this group existed
+ * it could out-rank every car park we can actually see and wear the "Best
+ * pick" badge with no confidence pill beside it.
+ *
+ * The number is honest; the *recommendation* was not. A lot nobody has heard
+ * from in thirty hours may simply be closed, and neither artifact can tell us.
+ * So the figure stays, the row stays, and only the endorsement goes: below
+ * every comparable live lot, and never `bestId` (`App.tsx`). Suppressing the
+ * number or dropping the row would be the opposite fault -- see `listRows` on
+ * why a missing car park is worse than an honest one.
+ *
+ * Read off `Lot.u` rather than off where the probability came from, because
+ * this module does not know: see `RankInput.probability`. The two can only
+ * disagree in a state production cannot produce -- `u` is emitted only for
+ * lots whose grid row is UNKNOWN in every column, so a grid-sourced number and
+ * a `u` never coexist -- and if one ever did, declining to crown a lot is the
+ * cheap side of that bet. The number is unaffected either way.
+ *
+ * `fallbackCost` is deliberately left alone: it asks what the neighbourhood
+ * costs, not where to send the driver, and the answer feeds every lot's score
+ * equally. Changing it would move published-looking numbers for lots that have
+ * nothing wrong with them, to no benefit this finding asked for.
+ */
+function group(row: Ranked): number {
+  if (row.cost === null) return 2;
+  return notUpdating(row.lot) ? 1 : 0;
 }
 
 /**
@@ -342,6 +413,10 @@ function fallbackCost(
  * user may know something we do not, and a missing row is invisible while an
  * honest one is not. They sort among themselves by the part of the cost we can
  * still compute, walking plus money.
+ *
+ * A car park whose feed has stopped sits between the two: it keeps its number
+ * and its row, but sorts below every lot we have actually heard from. See
+ * `group`, which is where the three-way ordering is argued.
  */
 export function rankLots(input: RankInput): Ranked[] {
   const scored = input.lots.map((lot, index) => {
@@ -386,9 +461,9 @@ export function rankLots(input: RankInput): Ranked[] {
   });
 
   rows.sort((a, b) => {
-    const aUnknown = a.row.cost === null;
-    const bUnknown = b.row.cost === null;
-    if (aUnknown !== bUnknown) return aUnknown ? 1 : -1;
+    const ga = group(a.row);
+    const gb = group(b.row);
+    if (ga !== gb) return ga - gb;
     return (a.row.cost ?? a.certain) - (b.row.cost ?? b.certain);
   });
 

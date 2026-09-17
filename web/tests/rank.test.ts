@@ -7,11 +7,19 @@ import {
   TIME_VALUE,
   UNKNOWN_RESERVE,
   listRows,
+  notUpdating,
   rankLots,
 } from "../src/rank";
 
 const lot = (id: string, lat: number, p: unknown) =>
   ({ i: 0, id, n: id, a: "中正區", y: lat, x: 121.52, c: 50, t: "民營停車場", p }) as never;
+
+/**
+ * The same lot with its feed marked stopped. `u` is the collector's liveness
+ * stamp (`src/parkcast/liveness.py`): present only for a lot that has not
+ * moved in at least 24 hours, absent otherwise.
+ */
+const stalled = (l: unknown, u = 1_789_000_000) => ({ ...(l as object), u }) as never;
 
 const at = { lat: 25.05, lon: 121.52 };
 
@@ -78,6 +86,77 @@ describe("rankLots", () => {
     });
     expect(out[0]!.walkMin).toBeGreaterThan(0);
     expect(out[0]!.meters).toBeGreaterThan(0);
+  });
+
+  /* ------------------------------------------------------------------ *
+   * A car park whose feed has stopped. Past `grid.bin`'s +120 min window
+   * `week.bin` answers for it as readily as for a live one -- climatology
+   * does not depend on whether a feed reported today -- so before `group`
+   * existed a lot nobody had heard from in thirty hours could top the list
+   * and wear the "Best pick" badge. The number is honest; the
+   * recommendation was not. See `group` in `rank.ts`.
+   * ------------------------------------------------------------------ */
+
+  it("ranks a car park whose feed has stopped below one we can still see", () => {
+    const out = rankLots({
+      destination: at, horizonMin: 200,
+      lots: [stalled(lot("dead-but-likely", 25.05, { k: "exact", lo: 10, hi: 10 })),
+             lot("live-but-worse", 25.05, { k: "exact", lo: 10, hi: 10 })],
+      // The stalled lot wins on every term the cost model can see: same walk,
+      // same fare, and nineteen times the chance of a space.
+      probability: (i) => (i === 0 ? 0.95 : 0.05),
+    });
+    expect(out.map((r) => r.id)).toEqual(["live-but-worse", "dead-but-likely"]);
+  });
+
+  it("keeps the demoted lot's number and its score, not just its row", () => {
+    // The opposite fault would be to blank it. The climatology is a real
+    // answer about what this car park usually has free at this hour, and the
+    // card says the feed has stopped among the lot's own facts.
+    const out = rankLots({
+      destination: at, horizonMin: 200,
+      lots: [stalled(lot("dead", 25.05, { k: "exact", lo: 10, hi: 10 })),
+             lot("live", 25.05, { k: "exact", lo: 10, hi: 10 })],
+      probability: () => 0.95,
+    });
+    expect(out[1]!.id).toBe("dead");
+    expect(out[1]!.probability).toBe(0.95);
+    expect(out[1]!.cost).not.toBeNull();
+  });
+
+  it("still ranks a stalled lot above one with no forecast at all", () => {
+    // Three groups, not two. "A number we will not vouch for" is better
+    // evidence than "nothing", and collapsing the two would undo the
+    // no-forecast rule this file already pins.
+    const out = rankLots({
+      destination: at, horizonMin: 200,
+      lots: [lot("noprob", 25.05, { k: "exact", lo: 10, hi: 10 }),
+             stalled(lot("dead", 25.05, { k: "exact", lo: 10, hi: 10 })),
+             lot("live", 25.05, { k: "exact", lo: 10, hi: 10 })],
+      probability: (i) => (i === 0 ? null : 0.5),
+    });
+    expect(out.map((r) => r.id)).toEqual(["live", "dead", "noprob"]);
+  });
+
+  it("sorts stalled lots among themselves by cost, like every other group", () => {
+    const out = rankLots({
+      destination: at, horizonMin: 200,
+      lots: [stalled(lot("dead-dear", 25.05, { k: "exact", lo: 90, hi: 90 })),
+             stalled(lot("dead-cheap", 25.05, { k: "exact", lo: 10, hi: 10 }))],
+      probability: () => 0.5,
+    });
+    expect(out.map((r) => r.id)).toEqual(["dead-cheap", "dead-dear"]);
+  });
+});
+
+describe("notUpdating", () => {
+  it("is true only for a lot carrying a real last-update stamp", () => {
+    // `u` is absent for a live lot, so there is no value to misread -- and the
+    // guard matches `format.notUpdatingHours`'s exactly, so the lots demoted
+    // in the ranking are the same lots whose cards read "Not updating".
+    expect(notUpdating(lot("live", 25.05, { k: "unknown" }))).toBe(false);
+    expect(notUpdating(stalled(lot("dead", 25.05, { k: "unknown" })))).toBe(true);
+    expect(notUpdating(stalled(lot("nan", 25.05, { k: "unknown" }), Number.NaN))).toBe(false);
   });
 });
 

@@ -110,7 +110,7 @@ import { Shell, useIsDesktop } from "./layout/Shell";
 import { snapHeights, type Snap } from "./layout/sheet";
 import { toMapLot } from "./map/lotSource";
 import type { Place } from "./places";
-import { listRows, rankLots } from "./rank";
+import { listRows, notUpdating, rankLots } from "./rank";
 import type { Grid, Lot, LotsDoc, WeekTable } from "./types";
 import { useGeolocation } from "./useGeolocation";
 import { blend, probabilityAt as weekProbabilityAt } from "./week";
@@ -276,10 +276,15 @@ function gridSpanMin(grid: Grid): number {
  *     `blend(f, climatology, minutesFromReading)` the server computes its own
  *     grid with -- which is why the two agree at the seam (`seam.test.ts`)
  *     rather than jumping as a driver drags across the two-hour mark.
- *   - **With no week table** -- never fetched, still in flight, 503, a failed
- *     request, a bucket this lot has never been observed in -- the answer is
+ *   - **With no week cell to read** -- the table was never fetched, is still in
+ *     flight, came back 503 or failed, the lot sits off the end of its roster,
+ *     or the cell carries `WEEK_UNKNOWN` -- the answer is
  *     `null`. "No data" is the honest thing to say about a time nothing we hold
- *     covers. There is deliberately no path from here back to the clamp, and no
+ *     covers. A bucket nobody has *watched* is deliberately not one of these
+ *     cases: it carries the citywide fallback with `support = 0`, so a number
+ *     shows and the confidence pill reads "low - thin" beside it. See
+ *     `week.ts`'s `WEEK_UNKNOWN` for why that sentinel is a defensive path
+ *     rather than the routine one. There is deliberately no path from here back to the clamp, and no
  *     `p ?? 0`: zero is a claim ("reliably full at this hour"), and `week.ts`'s
  *     `blend` spells out at length why resolving that `null` is the caller's
  *     job and never a coercion.
@@ -875,8 +880,20 @@ export default function App() {
    * over "no data" would be the ranking claiming something it does not know.
    * With the arrival withheld there is no pick to make at all, and the heading
    * above the list says the same thing one layer up.
+   *
+   * A car park whose feed has stopped is skipped too, even though it has a
+   * number. Past the grid's window that number comes from `week.bin`, which
+   * carries no liveness wrapper, so it is a real answer about what this lot
+   * usually has free at this hour -- and we keep showing it. But a lot nobody
+   * has heard from in thirty hours may be closed, and crowning it "Best pick"
+   * (and pulsing its dot) is advice we cannot support. `rank.ts`'s `group`
+   * demotes the same rows in the ordering for the same reason and argues it at
+   * length; this is the badge half of that, and `notUpdating` is shared so the
+   * two can never disagree about which lots they mean.
    */
-  const bestId = withheld ? null : (listed.find((r) => r.probability !== null)?.id ?? null);
+  const bestId = withheld
+    ? null
+    : (listed.find((r) => r.probability !== null && !notUpdating(r.lot))?.id ?? null);
 
   /**
    * A lot was chosen, in the list or on the map. One path for both, so the
