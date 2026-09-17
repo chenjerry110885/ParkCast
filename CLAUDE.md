@@ -585,7 +585,7 @@ accessor, silently wrong as an answer. Stage A closes that gap with a second art
 
 **The artifact.** A per-lot, per-half-hour-of-week climatology table: one row per lot, `336`
 buckets a row (`config.WEEK_BUCKETS = 7 * 24 * 60 // CLIMATOLOGY_BUCKET_MIN`), two bytes a
-bucket — a probability (`0..100`, or `255` for "no observation here") and its support, the raw
+bucket — a probability (`0..100`, or `255` for "no probability at all") and its support, the raw
 observation count behind that cell, capped at `255`. `WEEK_HEADER_FORMAT = "<4sBIHHBI"`: magic
 `PCW1`, schema version, `built_ts`, `n_lots`, `n_buckets`, `bucket_min`, `roster_id` — the same
 CRC32-over-ordered-ids check `grid.bin` already uses, so a table indexed against the wrong roster
@@ -594,6 +594,22 @@ day from the corpus's own shrinkage chain (`week.build_week_cells`, through the 
 `forecast.Climatology` the live forecast uses, never a re-derivation of it), not every five
 minutes — a half-hour bucket is the resolution the climatology is *computed* at, so anything
 finer would be interpolation dressed as knowledge.
+
+**`255` is a capability of the format, not a value a published table contains — and it does not
+mean "we have never watched this lot at this hour."** The only `None` the encoder can be handed
+comes from `Climatology.predict`, which returns one solely when a city's corpus is empty *in
+total* (`counts.glob[1] == 0`); `scheduler.publish_city` returns before building anything unless
+at least one lot has been observed, so the sentinel is all-or-nothing across a whole artifact and
+the "all" case is unreachable through the publish path. A table built from a single observation
+contains no `255` anywhere. **What an unwatched lot-hour actually ships as is a real number**: the
+shrinkage chain falls back bucket → lot → citywide Jeffreys rate, so the cell carries the citywide
+figure and a support byte of `0`. The ignorance is carried by **the support byte and the
+confidence label, never by the probability byte** — `confidence.ts` grades support `0` as
+"low · thin" ("not watched at this time of week often enough yet"), so the driver sees a number
+with that caveat rather than "no data". Encoder, Worker and client all still handle `255`
+defensively and the tests pinning it stay: a future encoder could legitimately emit one — a city
+on its first day, nothing observed anywhere — and a reader that stopped special-casing it would
+render that cell as 255%.
 
 **Measured: 732,498 bytes (715.3 KiB) raw at Taipei's real roster — 1,090 lots**, exactly
 `18 + 1,090 × 336 × 2`, so this is arithmetic on the published lot count and not something that

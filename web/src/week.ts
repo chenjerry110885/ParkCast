@@ -33,11 +33,34 @@ const N_BUCKETS = (7 * 24 * 60) / 30;
 const BUCKET_MIN = 30;
 
 /**
- * No observation for this lot in this bucket.
+ * No probability at all for this cell -- the encoder was handed `None`.
  *
  * Emphatically *not* zero, exactly as `./artifacts.ts`'s `UNKNOWN` is not zero
  * for the grid: zero is a claim -- "reliably full at this hour" -- and this is
  * the absence of one. `probabilityAt` returns `null` here and never a number.
+ *
+ * **This is a defensive path, not the routine one, and it does not mean "we
+ * have never watched this lot at this hour."** No `week.bin` the collector
+ * publishes today can contain a 255 anywhere: `Climatology.predict`
+ * (`src/parkcast/forecast.py`) returns `None` only when the city's corpus is
+ * empty *in total* -- `counts.glob[1] == 0` -- and `scheduler.publish_city`
+ * returns before building anything unless at least one lot has been observed.
+ * The sentinel is therefore all-or-nothing across a whole artifact, and the
+ * "all" case is unreachable through the publish path.
+ *
+ * A lot-hour nobody has watched ships as a **real number** instead: the
+ * shrinkage chain falls back bucket -> lot -> citywide Jeffreys rate, so the
+ * cell carries the citywide figure with `support = 0`. The ignorance is
+ * carried by the **support byte**, which `confidence.ts` grades
+ * `{level: "low", reason: "thin"}` -- "we have not watched this lot at this
+ * time of week often enough yet" -- never by the probability byte. See
+ * `build_week_cells` in `src/parkcast/week.py`, which states the same thing
+ * from the encoder's side.
+ *
+ * The handling stays regardless, and so do the tests that pin it: 255 is a
+ * real capability of the format that a future encoder could legitimately
+ * emit -- a city on its first day, with nothing observed anywhere -- and a
+ * decoder that stopped special-casing it would render that cell as 255%.
  */
 export const WEEK_UNKNOWN = 255;
 
@@ -137,12 +160,15 @@ export function weekBucket(ts: number): number {
  * The climatology probability and support for one lot at the time-of-week
  * `ts` falls in.
  *
- * `p` is `null` when the bucket has no observation for this lot -- see
- * `WEEK_UNKNOWN` -- and a real number (including `0`) otherwise. `support` is
- * the raw observation count behind that bucket, capped at 255 by the encoder;
- * it can be `0` whether or not `p` is `null`, since an unshrunk bucket still
- * falls back through the lot and citywide tiers and can carry a probability
- * with zero of its own support.
+ * `p` is `null` only when the cell holds `WEEK_UNKNOWN`, and a real number
+ * (including `0`) otherwise. A bucket nobody has watched is **not** one of
+ * those nulls -- it reads the citywide fallback with `support = 0`, and no
+ * published table contains a 255 at all; see `WEEK_UNKNOWN` for why that path
+ * is defensive rather than routine. `support` is the raw observation count
+ * behind that bucket, capped at 255 by the encoder, and a `0` there beside a
+ * perfectly real `p` is the *normal* shape of an unwatched cell, not a
+ * contradiction: an empty bucket still falls back through the lot and citywide
+ * tiers. It is `support`, not `p`, that says how much we actually know here.
  *
  * `ts` is validated for the same reason `lotIndex` is: `weekBucket` does no
  * range-checking of its own and happily turns a non-finite `ts` into a
@@ -195,8 +221,10 @@ export function probabilityAt(
  *
  * `climatologyP`, by contrast, is a plain `number` -- this signature has no
  * way to say "no climatology either." `probabilityAt` can return `p: null`
- * for a bucket this lot has never been observed in, and a caller sitting at
- * that seam must resolve the `null` *before* reaching this function, never
+ * for a `WEEK_UNKNOWN` cell, and `App.tsx`'s `probabilityForLot` has no cell
+ * to read at all when the table is absent or the lot sits off the end of its
+ * roster; a caller sitting at that seam must resolve the `null` *before*
+ * reaching this function, never
  * by passing it through as `p ?? 0`. Zero is a claim -- "reliably full at
  * this hour" -- and coercing an absence of history into that claim is the
  * same honesty violation `WEEK_UNKNOWN` exists to prevent, just moved one

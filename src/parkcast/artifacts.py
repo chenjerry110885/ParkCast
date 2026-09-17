@@ -30,10 +30,25 @@ WEEK_MAGIC = b"PCW1"
 WEEK_HEADER_FORMAT = "<4sBIHHBI"    # magic, version, built_ts, n_lots,
 WEEK_HEADER_SIZE = struct.calcsize(WEEK_HEADER_FORMAT)  # n_buckets, bucket_min, roster_id
 
-# The probability byte that means "no observation", not "0%". Rounding a
+# The probability byte that means "no probability at all", not "0%". Rounding a
 # fraction in [0, 1] to a percentage can never reach 255, so the sentinel is
 # unreachable by any real measurement -- a null cannot be mistaken for a value,
 # in either direction, without the reader special-casing anything.
+#
+# It does NOT mean "we have never watched this lot at this hour", and no table
+# this collector publishes contains one. The only `None` upstream produces is
+# `Climatology.predict`'s, returned solely when a city's corpus is empty in
+# total (`counts.glob[1] == 0`), and `scheduler.publish_city` returns before
+# building anything unless at least one lot has been observed -- so the
+# sentinel is all-or-nothing across a whole artifact and the "all" case is
+# unreachable through the publish path. An unwatched lot-hour encodes as the
+# citywide-shrunk rate with a support byte of `0`; it is the support byte and
+# the client's confidence label that carry the ignorance, never this one. See
+# `week.build_week_cells`.
+#
+# The sentinel stays anyway, and so do its tests: it is what the format means,
+# `_week_prob_byte` is the one place a `None` could arrive, and every reader
+# has to stay robust to a value a future encoder could legitimately emit.
 WEEK_UNKNOWN = 255
 
 CITIES_NAME = "cities.json"
@@ -110,8 +125,10 @@ def decode_header(blob: bytes) -> dict:
 def _week_prob_byte(probability: float | None) -> int:
     """One cell's probability as a percentage byte, or `WEEK_UNKNOWN`.
 
-    `None` is the caller's "no observation in this bucket" -- an empty tier,
-    not a measured rate -- and must never collapse onto a real percentage.
+    `None` is the caller's "no basis for an answer at all" -- an empty corpus,
+    not a measured rate, and not merely an empty bucket, which still resolves
+    through the shrinkage chain to a real number (see `WEEK_UNKNOWN`) -- and
+    must never collapse onto a real percentage.
     Rounding-then-clamping a genuine `[0, 1]` handles the only failure mode
     left after that: floating point can hand back `-1e-17` for a rate that is
     exactly zero, or `1.0000000001` for one that is exactly one, and either
@@ -137,7 +154,7 @@ def encode_week(
     is trusted to already be the right number for its bucket (Task 2's job).
     Its only work is the honesty-preserving trip through a byte: rounding a
     `[0, 1]` fraction to a percentage, capping support at what a byte can hold,
-    and keeping a real 0% distinguishable from "never observed" the same way
+    and keeping a real 0% distinguishable from "no answer at all" the same way
     `WEEK_UNKNOWN` keeps a real 0% distinguishable everywhere else in this
     file. Support is capped, not clamped -- the contract already guarantees
     non-negative, so there is nothing below zero to protect against, only an
