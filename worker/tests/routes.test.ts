@@ -36,6 +36,11 @@ describe("routing", () => {
     const getLatest = await route(new Request(origin + "/artifacts/latest"), env, new LatestCache(), NOW);
     expect(getLatest.status).toBe(405);
     expect(getLatest.headers.get("Allow")).toBe("PUT");
+    // Unlike the pair's split paths, week.bin answers both its daily upload
+    // and its GET/HEAD serving on one path.
+    const postWeek = await route(new Request(origin + "/artifacts/week.bin", { method: "POST" }), env, new LatestCache(), NOW);
+    expect(postWeek.status).toBe(405);
+    expect(postWeek.headers.get("Allow")).toBe("GET, HEAD, PUT");
   });
 
   it("turns an unexpected failure into a generic 500", async () => {

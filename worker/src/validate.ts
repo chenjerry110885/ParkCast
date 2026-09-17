@@ -109,6 +109,64 @@ export function validatePair(grid: Uint8Array, lotsBytes: Uint8Array): PairResul
   return { ok: true, header: h };
 }
 
+/** `WEEK_HEADER_FORMAT = "<4sBIHHBI"` in artifacts.py: magic, version, built_ts,
+ * n_lots, n_buckets, bucket_min, roster_id -- 4+1+4+2+2+1+4 = 18 bytes, no
+ * padding (`<` is unaligned little-endian), matching `WEEK_HEADER_SIZE` there. */
+export const WEEK_HEADER_SIZE = 18;
+export const WEEK_VERSION = 1;
+/** `config.WEEK_BUCKETS = 7 * 24 * 60 // CLIMATOLOGY_BUCKET_MIN` = 336. */
+export const WEEK_BUCKETS = 336;
+export const WEEK_BUCKET_MIN = 30;
+
+export interface WeekHeader {
+  version: number;
+  builtTs: number;
+  nLots: number;
+  nBuckets: number;
+  bucketMin: number;
+  rosterId: number;
+}
+
+export type WeekResult = { ok: true; header: WeekHeader } | { ok: false };
+export type WeekReject = "roster-mismatch";
+
+export function parseWeekHeader(week: Uint8Array): WeekHeader | null {
+  if (week.byteLength < WEEK_HEADER_SIZE) return null;
+  // "PCW1"
+  if (week[0] !== 0x50 || week[1] !== 0x43 || week[2] !== 0x57 || week[3] !== 0x31) return null;
+  const dv = new DataView(week.buffer, week.byteOffset, week.byteLength);
+  return {
+    version: dv.getUint8(4),
+    builtTs: dv.getUint32(5, true),
+    nLots: dv.getUint16(9, true),
+    nBuckets: dv.getUint16(11, true),
+    bucketMin: dv.getUint8(13),
+    rosterId: dv.getUint32(14, true),
+  };
+}
+
+export function validateWeek(week: Uint8Array): WeekResult {
+  const h = parseWeekHeader(week);
+  if (h === null || h.version !== WEEK_VERSION || h.nBuckets !== WEEK_BUCKETS || h.bucketMin !== WEEK_BUCKET_MIN) {
+    return { ok: false };
+  }
+  if (h.nLots < 1 || h.nLots > MAX_LOTS || week.byteLength !== WEEK_HEADER_SIZE + h.nLots * h.nBuckets * 2) {
+    return { ok: false };
+  }
+  return { ok: true, header: h };
+}
+
+/** The point of the whole check: a week table indexed against a roster other
+ * than the one `lots.json` currently publishes would attach every lot's
+ * climatology to the wrong lot, silently. `storedRosterId` is the pair
+ * currently in KV's own `rosterId` (validated against its `lots.json` at
+ * upload time, see `validatePair`), so this is a direct comparison, not a
+ * second parse of `lots.json`. No stored pair at all is the same failure --
+ * there is nothing to index the table against. */
+export function checkWeekRoster(h: WeekHeader, storedRosterId: number | null): WeekReject | null {
+  return storedRosterId !== null && h.rosterId === storedRosterId ? null : "roster-mismatch";
+}
+
 export function checkOrder(h: GridHeader, stored: StoredMeta | null, now: number): Reject | null {
   if (h.baseDataTs > now + FUTURE_TOLERANCE_SEC || h.generatedAt > now + FUTURE_TOLERANCE_SEC) {
     return "future";

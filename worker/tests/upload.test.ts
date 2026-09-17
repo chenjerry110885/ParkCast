@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { LatestCache } from "../src/cache";
 import { route } from "../src/index";
-import { LATEST_KEY, type Env } from "../src/kv";
+import { LATEST_KEY, WEEK_KEY, type Env } from "../src/kv";
 import { authorized, handleUpload, sha256Hex } from "../src/upload";
-import { FakeKV, joined, makePair, metaFor, type Pair } from "./fakes";
+import { FakeKV, joined, makePair, makeWeek, metaFor, weekMetaFor, type Pair, type Week } from "./fakes";
 
 const NOW = 1_789_352_400;
 const HOST = "parkcast.example.workers.dev";
@@ -137,6 +137,121 @@ describe("upload", () => {
     const { kv, put } = setup();
     const pair = makePair({ baseDataTs: NOW - 240 });
     await Promise.all(Array.from({ length: 200 }, () => put(pair, { auth: "Bearer wrong" })));
+    expect([kv.reads, kv.writes]).toEqual([0, 0]);
+  });
+
+  it("never touches the week table's key", async () => {
+    // The point of the whole "no new KV write on the five-minute path"
+    // constraint: seed week.bin, then confirm a pair upload's one read and
+    // one write are both LATEST_KEY's, not week's.
+    const { kv, put } = setup();
+    kv.seed(WEEK_KEY, makeWeek({ builtTs: NOW - 3600 }).week, weekMetaFor(makeWeek({ builtTs: NOW - 3600 })));
+    expect((await put(makePair({ baseDataTs: NOW - 240 }))).status).toBe(204);
+    expect(kv.reads).toBe(1);
+    expect(kv.writes).toBe(1);
+    const week = await kv.getWithMetadata(WEEK_KEY);
+    expect(week.metadata).toMatchObject({ uploadedAt: NOW - 3600 + 10 }); // unchanged by the pair upload
+  });
+});
+
+describe("week upload", () => {
+  function weekSetup(rosterId = 42) {
+    const kv = new FakeKV();
+    const cache = new LatestCache(() => NOW * 1000);
+    const env: Env = { ARTIFACTS: kv, UPLOAD_SECRET: SECRET, PRODUCTION_HOST: HOST };
+    const pair = makePair({ baseDataTs: NOW - 240, generatedAt: NOW - 30, rosterId });
+    kv.seed(LATEST_KEY, joined(pair), metaFor(pair));
+    const putWeek = (week: Week, o: { auth?: string | null; host?: string; rosterId?: string; at?: number } = {}) => {
+      const headers = new Headers({ "X-Roster-Id": o.rosterId ?? String(week.rosterId) });
+      const auth = o.auth === undefined ? `Bearer ${SECRET}` : o.auth;
+      if (auth !== null) headers.set("Authorization", auth);
+      const request = new Request(`https://${o.host ?? HOST}/artifacts/week.bin`, { method: "PUT", headers, body: week.week });
+      return route(request, env, cache, o.at ?? NOW);
+    };
+    return { kv, cache, env, pair, putWeek };
+  }
+
+  it("stores a valid week table under its own key, leaving the pair's untouched", async () => {
+    const { kv, pair, putWeek } = weekSetup();
+    const week = makeWeek({ builtTs: NOW - 3600, rosterId: pair.rosterId });
+    const res = await putWeek(week);
+    expect(res.status).toBe(204);
+    expect(kv.reads).toBe(1); // the one read of LATEST_KEY to learn the roster
+    expect(kv.writes).toBe(1); // the one write, to WEEK_KEY
+
+    const stored = await kv.getWithMetadata(WEEK_KEY);
+    expect(new Uint8Array(stored.value as ArrayBuffer)).toEqual(week.week);
+    expect(stored.metadata).toMatchObject({ rosterId: pair.rosterId, nLots: week.nLots, uploadedAt: NOW });
+
+    const latest = await kv.getWithMetadata(LATEST_KEY);
+    expect(new Uint8Array(latest.value as ArrayBuffer)).toEqual(joined(pair)); // unchanged
+  });
+
+  it.each([null, "", "Basic abc", `Bearer ${SECRET}x`])(
+    "refuses authorization %s before touching storage",
+    async (auth) => {
+      const { kv, pair, putWeek } = weekSetup();
+      const res = await putWeek(makeWeek({ builtTs: NOW - 3600, rosterId: pair.rosterId }), { auth });
+      expect(res.status).toBe(401);
+      expect([kv.reads, kv.writes]).toEqual([0, 0]);
+    },
+  );
+
+  it("does not let a preview hostname write", async () => {
+    const { kv, pair, putWeek } = weekSetup();
+    const res = await putWeek(makeWeek({ builtTs: NOW - 3600, rosterId: pair.rosterId }), { host: `abc123-${HOST}` });
+    expect(res.status).toBe(404);
+    expect([kv.reads, kv.writes]).toEqual([0, 0]);
+  });
+
+  it.each(["0x2a", "42abc", "4.2e1", "", "-1", "99999999999"])(
+    "refuses X-Roster-Id %s before touching storage",
+    async (rosterId) => {
+      const { kv, pair, putWeek } = weekSetup();
+      const res = await putWeek(makeWeek({ builtTs: NOW - 3600, rosterId: pair.rosterId }), { rosterId });
+      expect(res.status).toBe(422);
+      expect([kv.reads, kv.writes]).toEqual([0, 0]);
+    },
+  );
+
+  it("refuses a body whose own header disagrees with X-Roster-Id, before touching storage", async () => {
+    const { kv, pair, putWeek } = weekSetup();
+    // The header names one roster; the body -- built for a different one --
+    // names another. Neither the Python client nor a healthy Worker ever
+    // produces this, so it must be refused, not resolved by picking one.
+    const week = makeWeek({ builtTs: NOW - 3600, rosterId: pair.rosterId + 1 });
+    const res = await putWeek(week, { rosterId: String(pair.rosterId) });
+    expect(res.status).toBe(422);
+    expect([kv.reads, kv.writes]).toEqual([0, 0]);
+  });
+
+  it("rejects a well-formed table whose roster is not what lots.json currently publishes", async () => {
+    const { kv, pair, putWeek } = weekSetup();
+    const week = makeWeek({ builtTs: NOW - 3600, rosterId: pair.rosterId + 1 });
+    const res = await putWeek(week);
+    expect([res.status, res.headers.get("X-Reject")]).toEqual([409, "roster-mismatch"]);
+    expect(kv.writes).toBe(0);
+  });
+
+  it("rejects when no pair has ever been uploaded", async () => {
+    const kv = new FakeKV(); // no LATEST_KEY seeded
+    const cache = new LatestCache(() => NOW * 1000);
+    const env: Env = { ARTIFACTS: kv, UPLOAD_SECRET: SECRET, PRODUCTION_HOST: HOST };
+    const week = makeWeek({ builtTs: NOW - 3600, rosterId: 42 });
+    const headers = new Headers({ "X-Roster-Id": "42", Authorization: `Bearer ${SECRET}` });
+    const request = new Request(`https://${HOST}/artifacts/week.bin`, { method: "PUT", headers, body: week.week });
+    const res = await route(request, env, cache, NOW);
+    expect([res.status, res.headers.get("X-Reject")]).toEqual([409, "roster-mismatch"]);
+    expect(kv.writes).toBe(0);
+  });
+
+  it("refuses a structurally invalid body, before touching storage", async () => {
+    const { kv, pair, putWeek } = weekSetup();
+    const week = makeWeek({ builtTs: NOW - 3600, rosterId: pair.rosterId });
+    const corrupt = week.week.slice();
+    corrupt[0] = 0x51; // bad magic
+    const res = await putWeek({ ...week, week: corrupt });
+    expect(res.status).toBe(422);
     expect([kv.reads, kv.writes]).toEqual([0, 0]);
   });
 });

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { checkOrder, parseGridHeader, validatePair } from "../src/validate";
-import { makePair, metaFor } from "./fakes";
+import {
+  checkOrder,
+  checkWeekRoster,
+  parseGridHeader,
+  parseWeekHeader,
+  validatePair,
+  validateWeek,
+} from "../src/validate";
+import { makePair, makeWeek, metaFor } from "./fakes";
 
 const NOW = 1_789_352_400;
 const enc = new TextEncoder();
@@ -9,6 +16,37 @@ function mutateLots(lots: Uint8Array, change: (doc: any) => void): Uint8Array {
   const doc = JSON.parse(new TextDecoder().decode(lots));
   change(doc);
   return enc.encode(JSON.stringify(doc));
+}
+
+/** A `week.bin` built field-by-field, independent of `makeWeek`'s "always
+ * well-formed" fixture -- so a single mutated field can be tested in
+ * isolation, with the body re-sized to match whatever bucket count/lot count
+ * is under test. Without that, a wrong-nBuckets fixture built by slicing a
+ * good blob would *also* fail the body-length check, and the test would stay
+ * green even if the nBuckets check itself were deleted. */
+function buildWeek(o: {
+  magic?: [number, number, number, number];
+  version?: number;
+  builtTs?: number;
+  nLots?: number;
+  nBuckets?: number;
+  bucketMin?: number;
+  rosterId?: number;
+  bodyLength?: number;
+}): Uint8Array {
+  const nLots = o.nLots ?? 3;
+  const nBuckets = o.nBuckets ?? 336;
+  const bodyLength = o.bodyLength ?? nLots * nBuckets * 2;
+  const week = new Uint8Array(18 + bodyLength);
+  const dv = new DataView(week.buffer);
+  week.set(o.magic ?? [0x50, 0x43, 0x57, 0x31], 0); // "PCW1"
+  dv.setUint8(4, o.version ?? 1);
+  dv.setUint32(5, o.builtTs ?? NOW - 3600, true);
+  dv.setUint16(9, nLots, true);
+  dv.setUint16(11, nBuckets, true);
+  dv.setUint8(13, o.bucketMin ?? 30);
+  dv.setUint32(14, o.rosterId ?? 42, true);
+  return week;
 }
 
 describe("validatePair", () => {
@@ -65,5 +103,52 @@ describe("checkOrder", () => {
     ["same reading, newer generation (PC clock behind)", () => checkOrder({ ...header, generatedAt: pair.generatedAt + 5 }, metaFor(pair, { uploadedAt: NOW - 300 }), NOW), null],
   ])("%s", (_label, run, want) => {
     expect(run()).toBe(want);
+  });
+});
+
+describe("validateWeek", () => {
+  it("accepts a well-formed week blob", () => {
+    const week = makeWeek({ builtTs: NOW - 3600 });
+    expect(validateWeek(week.week).ok).toBe(true);
+  });
+
+  it.each<[string, () => Uint8Array]>([
+    ["bad magic", () => buildWeek({ magic: [0x51, 0x43, 0x57, 0x31] })],
+    ["unknown schema version", () => buildWeek({ version: 2 })],
+    ["truncated body", () => buildWeek({ bodyLength: 3 * 336 * 2 - 1 })],
+    ["oversized body", () => buildWeek({ bodyLength: 3 * 336 * 2 + 1 })],
+    // Body re-sized to match the wrong bucket count/size, so only the field
+    // under test -- never the body-length check -- can catch it.
+    ["wrong bucket count", () => buildWeek({ nBuckets: 300, bodyLength: 3 * 300 * 2 })],
+    ["wrong bucket size in minutes", () => buildWeek({ bucketMin: 60 })],
+    ["zero lots", () => buildWeek({ nLots: 0, bodyLength: 0 })],
+  ])("rejects %s", (_label, build) => {
+    expect(validateWeek(build()).ok).toBe(false);
+  });
+
+  it("round-trips the header fields validateWeek confirms", () => {
+    const week = makeWeek({ builtTs: NOW - 3600, nLots: 5, rosterId: 99 });
+    const result = validateWeek(week.week);
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.header).toEqual({
+      version: 1, builtTs: NOW - 3600, nLots: 5, nBuckets: 336, bucketMin: 30, rosterId: 99,
+    });
+  });
+});
+
+describe("checkWeekRoster", () => {
+  const week = makeWeek({ builtTs: NOW - 3600, rosterId: 42 });
+  const header = parseWeekHeader(week.week)!;
+
+  it("accepts a roster that matches what is stored", () => {
+    expect(checkWeekRoster(header, 42)).toBeNull();
+  });
+
+  it("rejects a roster that disagrees with what is stored", () => {
+    expect(checkWeekRoster(header, 7)).toBe("roster-mismatch");
+  });
+
+  it("rejects when no roster is stored yet", () => {
+    expect(checkWeekRoster(header, null)).toBe("roster-mismatch");
   });
 });

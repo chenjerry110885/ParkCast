@@ -1,10 +1,11 @@
 import { LatestCache } from "./cache";
 import { TEXT, notFound, respond } from "./http";
 import type { Env } from "./kv";
-import { ARTIFACT_PATHS, serveArtifact } from "./serve";
-import { handleUpload } from "./upload";
+import { ARTIFACT_PATHS, serveArtifact, serveWeek } from "./serve";
+import { handleUpload, handleWeekUpload } from "./upload";
 
 const isolateCache = new LatestCache();
+const WEEK_PATH = "/artifacts/week.bin";
 
 export async function route(request: Request, env: Env, cache: LatestCache, nowSec: number): Promise<Response> {
   const url = new URL(request.url);
@@ -16,6 +17,19 @@ export async function route(request: Request, env: Env, cache: LatestCache, nowS
     // Preview URLs have their own hostnames; only the production hostname may write.
     if (url.hostname !== env.PRODUCTION_HOST) return notFound();
     return handleUpload(request, env, cache, nowSec);
+  }
+
+  // Unlike the pair, week.bin's own path both accepts its daily upload and
+  // serves it -- one artifact, one path, read on GET/HEAD and written on PUT.
+  if (url.pathname === WEEK_PATH) {
+    if (request.method === "PUT") {
+      if (url.hostname !== env.PRODUCTION_HOST) return notFound();
+      return handleWeekUpload(request, env, nowSec);
+    }
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      return respond(405, "Method not allowed", { ...TEXT, Allow: "GET, HEAD, PUT" });
+    }
+    return serveWeek(request, env);
   }
 
   const part = ARTIFACT_PATHS[url.pathname];

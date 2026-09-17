@@ -1,12 +1,17 @@
 import type { LatestCache } from "./cache";
 import { TEXT, respond } from "./http";
-import { LATEST_KEY, asStoredMeta, type Env, type StoredMeta } from "./kv";
-import { checkOrder, validatePair } from "./validate";
+import { LATEST_KEY, WEEK_KEY, asStoredMeta, type Env, type StoredMeta, type WeekMeta } from "./kv";
+import { MAX_LOTS, WEEK_BUCKETS, WEEK_HEADER_SIZE, checkOrder, checkWeekRoster, validatePair, validateWeek } from "./validate";
 
 export const MAX_BODY_BYTES = 1024 * 1024;
+/** Headroom for `MAX_LOTS` lots at `WEEK_BUCKETS` buckets x 2 bytes each
+ * (~2.56 MB for 4000 lots), the same way `MAX_BODY_BYTES` bounds the pair. */
+export const MAX_WEEK_BODY_BYTES = WEEK_HEADER_SIZE + MAX_LOTS * WEEK_BUCKETS * 2;
 export const MAX_AUTH_HEADER_LENGTH = 200;
 const GRID_LENGTH = /^[0-9]{2,7}$/;
 const DECIMAL = /^[0-9]+$/;
+/** `roster_id` is a `zlib.crc32(...) & 0xFFFFFFFF` -- at most 10 decimal digits. */
+const ROSTER_ID = /^[0-9]{1,10}$/;
 
 type TimingSafeSubtle = SubtleCrypto & {
   timingSafeEqual(a: ArrayBuffer | ArrayBufferView, b: ArrayBuffer | ArrayBufferView): boolean;
@@ -107,5 +112,55 @@ export async function handleUpload(request: Request, env: Env, cache: LatestCach
   };
   await env.ARTIFACTS.put(LATEST_KEY, body, { metadata: meta });
   cache.set({ bytes: body, meta });
+  return respond(204, null);
+}
+
+/** `week.bin`'s own PUT, mirroring `handleUpload`'s shape but never touching
+ * `LATEST_KEY` or `LatestCache` -- the five-minute pair's handling and its
+ * one write per tick are exactly what they were before this existed. This
+ * handler adds exactly one KV write, on its own once-a-day cadence, plus one
+ * read of the pair's key to learn the roster it must agree with. */
+export async function handleWeekUpload(request: Request, env: Env, nowSec: number): Promise<Response> {
+  // 1. Authentication before anything else: no body read, no storage touched.
+  if (!(await authorized(request.headers.get("Authorization"), env.UPLOAD_SECRET))) {
+    return respond(401, "Unauthorized", TEXT);
+  }
+  // 2. Size, by declaration and then by counting.
+  const declared = request.headers.get("Content-Length");
+  if (declared !== null && (!DECIMAL.test(declared) || Number(declared) > MAX_WEEK_BODY_BYTES)) {
+    return respond(413, "Too large", TEXT);
+  }
+  const rosterHeader = request.headers.get("X-Roster-Id") ?? "";
+  if (!ROSTER_ID.test(rosterHeader) || Number(rosterHeader) > 0xffffffff) {
+    return respond(422, "Invalid upload", TEXT);
+  }
+  const body = await readCapped(request.body, MAX_WEEK_BODY_BYTES);
+  if (body === null) return respond(413, "Too large", TEXT);
+
+  // 3. Shape -- including that the body's own roster agrees with the header
+  // that named it, so the two can never silently drift apart.
+  const result = validateWeek(body);
+  if (!result.ok || result.header.rosterId !== Number(rosterHeader)) {
+    return respond(422, "Invalid upload", TEXT);
+  }
+
+  // 4. Roster, against what is stored (one KV read of the pair's own key --
+  // never written here). This is the check that matters: a table indexed
+  // against a roster other than the one lots.json currently publishes would
+  // attach every lot's climatology to the wrong lot.
+  const stored = await env.ARTIFACTS.getWithMetadata(LATEST_KEY, { type: "arrayBuffer" });
+  const reject = checkWeekRoster(result.header, asStoredMeta(stored.metadata)?.rosterId ?? null);
+  if (reject !== null) return respond(409, "Not accepted", { ...TEXT, "X-Reject": reject });
+
+  // 5. One write, to its own key.
+  const meta: WeekMeta = {
+    v: 1,
+    nLots: result.header.nLots,
+    rosterId: result.header.rosterId,
+    builtTs: result.header.builtTs,
+    uploadedAt: nowSec,
+    sha256: await sha256Hex(body),
+  };
+  await env.ARTIFACTS.put(WEEK_KEY, body, { metadata: meta });
   return respond(204, null);
 }

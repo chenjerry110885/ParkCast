@@ -1,4 +1,4 @@
-import type { ArtifactsKV, StoredMeta } from "../src/kv";
+import type { ArtifactsKV, StoredMeta, WeekMeta } from "../src/kv";
 
 export class FakeKV implements ArtifactsKV {
   reads = 0;
@@ -62,5 +62,39 @@ export function metaFor(pair: Pair, overrides: Partial<StoredMeta> = {}): Stored
     v: 1, gridLength: pair.grid.byteLength, nLots: pair.nLots, rosterId: pair.rosterId,
     generatedAt: pair.generatedAt, baseDataTs: pair.baseDataTs, uploadedAt: pair.baseDataTs + 250,
     gridSha256: "g".repeat(64), lotsSha256: "l".repeat(64), ...overrides,
+  };
+}
+
+export interface Week { week: Uint8Array<ArrayBuffer>; nLots: number; rosterId: number; builtTs: number }
+
+const WEEK_BUCKETS = 336;
+
+/** A well-formed `week.bin`: `PCW1` header (see `WEEK_HEADER_FORMAT` in
+ * artifacts.py) followed by `nLots * WEEK_BUCKETS` cells of a plausible
+ * (probability, support) pair -- never zero bytes, so a test that forgets to
+ * check the body cannot pass by accident. */
+export function makeWeek(o: { builtTs: number; nLots?: number; rosterId?: number }): Week {
+  const nLots = o.nLots ?? 3;
+  const rosterId = o.rosterId ?? 42;
+  const week = new Uint8Array(18 + nLots * WEEK_BUCKETS * 2);
+  const dv = new DataView(week.buffer);
+  week.set([0x50, 0x43, 0x57, 0x31], 0); // "PCW1"
+  dv.setUint8(4, 1);
+  dv.setUint32(5, o.builtTs, true);
+  dv.setUint16(9, nLots, true);
+  dv.setUint16(11, WEEK_BUCKETS, true);
+  dv.setUint8(13, 30);
+  dv.setUint32(14, rosterId, true);
+  for (let i = 18; i < week.length; i += 2) {
+    week[i] = 50; // 50% probability
+    week[i + 1] = 6; // support: one week's worth of five-minute readings in this bucket
+  }
+  return { week, nLots, rosterId, builtTs: o.builtTs };
+}
+
+export function weekMetaFor(w: Week, overrides: Partial<WeekMeta> = {}): WeekMeta {
+  return {
+    v: 1, nLots: w.nLots, rosterId: w.rosterId, builtTs: w.builtTs,
+    uploadedAt: w.builtTs + 10, sha256: "w".repeat(64), ...overrides,
   };
 }

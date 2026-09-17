@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { LatestCache } from "../src/cache";
-import { LATEST_KEY, type Env } from "../src/kv";
+import { LATEST_KEY, WEEK_KEY, type Env } from "../src/kv";
 import { route } from "../src/index";
-import { FakeKV, joined, makePair, metaFor } from "./fakes";
+import { FakeKV, joined, makePair, makeWeek, metaFor, weekMetaFor } from "./fakes";
 
 const NOW = 1_789_352_400;
 const origin = "https://parkcast.example.workers.dev";
@@ -16,6 +16,16 @@ function setup(seed = true) {
   const env = { ARTIFACTS: kv, UPLOAD_SECRET: "x", PRODUCTION_HOST: "parkcast.example.workers.dev" } as Env;
   const get = (path: string, init?: RequestInit) => route(new Request(origin + path, init), env, cache, NOW);
   return { kv, pair, get, advance: (ms: number) => { clock += ms; } };
+}
+
+function weekSetup(seed = true) {
+  const kv = new FakeKV();
+  const week = makeWeek({ builtTs: NOW - 3600 });
+  if (seed) kv.seed(WEEK_KEY, week.week, weekMetaFor(week));
+  const cache = new LatestCache(() => NOW * 1000);
+  const env = { ARTIFACTS: kv, UPLOAD_SECRET: "x", PRODUCTION_HOST: "parkcast.example.workers.dev" } as Env;
+  const get = (path: string, init?: RequestInit) => route(new Request(origin + path, init), env, cache, NOW);
+  return { kv, week, get };
 }
 
 function expectSecurityHeaders(res: Response) {
@@ -72,5 +82,55 @@ describe("serving the forecast", () => {
     expect((await get("/artifacts/grid.bin")).status).toBe(503);
     expect((await get("/artifacts/grid.bin")).status).toBe(503);
     expect(kv.reads).toBe(1);
+  });
+});
+
+describe("serving the week table", () => {
+  it("serves week.bin with an hour-long cache lifetime, distinct from the pair's", async () => {
+    const { get, week } = weekSetup();
+    const res = await get("/artifacts/week.bin");
+    expect(res.status).toBe(200);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(week.week);
+    expect(res.headers.get("Content-Type")).toBe("application/octet-stream");
+    expect(res.headers.get("Cache-Control")).toBe("max-age=3600");
+    expect(res.headers.get("ETag")).toBe(`"${"w".repeat(64)}"`);
+    expectSecurityHeaders(res);
+  });
+
+  it("answers a matching If-None-Match with 304 and no body", async () => {
+    const { get } = weekSetup();
+    const res = await get("/artifacts/week.bin", { headers: { "If-None-Match": `"${"w".repeat(64)}"` } });
+    expect(res.status).toBe(304);
+    expect(await res.text()).toBe("");
+  });
+
+  it("sends no body for HEAD", async () => {
+    const { get } = weekSetup();
+    const res = await get("/artifacts/week.bin", { method: "HEAD" });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
+  });
+
+  it("says 503 when no week table has been uploaded yet", async () => {
+    const { get, kv } = weekSetup(false);
+    expect((await get("/artifacts/week.bin")).status).toBe(503);
+    expect(kv.reads).toBe(1);
+  });
+
+  it("never reads the pair's KV key, and the pair's GET never reads week's", async () => {
+    const { kv, get } = weekSetup();
+    kv.seed(LATEST_KEY, joined(makePair({ baseDataTs: NOW - 240 })), metaFor(makePair({ baseDataTs: NOW - 240 })));
+    await get("/artifacts/week.bin");
+    expect(kv.reads).toBe(1); // only WEEK_KEY was read to serve week.bin
+
+    const { kv: pairKv, get: pairGet } = setup();
+    pairKv.seed(WEEK_KEY, makeWeek({ builtTs: NOW - 3600 }).week, weekMetaFor(makeWeek({ builtTs: NOW - 3600 })));
+    await pairGet("/artifacts/grid.bin");
+    expect(pairKv.reads).toBe(1); // only LATEST_KEY was read to serve the pair
+  });
+
+  it.each(["/artifacts/week.bin/", "/artifacts/WEEK.BIN"])("answers unknown week variant %s with 404", async (path) => {
+    const { get } = weekSetup();
+    expect((await get(path)).status).toBe(404);
   });
 });

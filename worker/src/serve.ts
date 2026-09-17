@@ -1,6 +1,6 @@
 import type { LatestCache } from "./cache";
 import { TEXT, respond } from "./http";
-import type { Env } from "./kv";
+import { WEEK_KEY, asWeekMeta, type Env } from "./kv";
 
 export type Part = "grid" | "lots";
 
@@ -33,4 +33,22 @@ export async function serveArtifact(request: Request, part: Part, env: Env, cach
   };
   if (etagMatches(request.headers.get("If-None-Match"), headers.ETag)) return respond(304, null, headers);
   return respond(200, request.method === "HEAD" ? null : body, headers);
+}
+
+/** `week.bin`: its own KV key, read fresh every time -- it is rebuilt once a
+ * day and fetched lazily by the app, nowhere near the request volume `grid`/
+ * `lots` see, so it does not need `LatestCache`'s per-isolate memoisation.
+ * `max-age=3600` is fixed, not computed like the pair's: the table changes
+ * daily, and a stale hour of climatology is not a stale forecast. */
+export async function serveWeek(request: Request, env: Env): Promise<Response> {
+  const stored = await env.ARTIFACTS.getWithMetadata(WEEK_KEY, { type: "arrayBuffer" });
+  const meta = asWeekMeta(stored.metadata);
+  if (stored.value === null || meta === null) return respond(503, "No forecast yet", { ...TEXT, "Retry-After": "300" });
+  const headers = {
+    "Content-Type": "application/octet-stream",
+    "Cache-Control": "max-age=3600",
+    ETag: `"${meta.sha256}"`,
+  };
+  if (etagMatches(request.headers.get("If-None-Match"), headers.ETag)) return respond(304, null, headers);
+  return respond(200, request.method === "HEAD" ? null : stored.value, headers);
 }
