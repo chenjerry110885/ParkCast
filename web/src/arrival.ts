@@ -173,20 +173,30 @@ export interface DayOption {
 /**
  * The calendar days a day/hour/minute picker should offer for `nowSec`:
  * Taipei "today" through the Taipei day containing `nowSec + MAX_LEAD_SEC`,
- * inclusive -- always exactly 8 entries, not 7.
+ * inclusive.
  *
- * `MAX_LEAD_SEC` is a flat 7-day duration added to `nowSec` itself, not to a
- * day boundary, so the farthest reachable moment falls on the *same*
- * Taipei time-of-day as `nowSec`, seven calendar days later (this only
- * holds because Taipei has no DST to shift it by an hour -- see
- * `TAIPEI_OFFSET_SEC`). That moment's calendar day is therefore always the
- * 8th one out: today (i = 0), tomorrow (i = 1), then six more read as
- * weekday names (i = 2..7).
+ * The day count is *derived* from `MAX_LEAD_SEC`, not a second hard-coded
+ * "7" kept in sync by hand: `spanDays` is `taipeiMidnight(now +
+ * MAX_LEAD_SEC)` minus `taipeiMidnight(now)`, in whole days, so a future
+ * change to `MAX_LEAD_SEC` (say if `week.bin`'s own span ever changed)
+ * changes this list's length too, rather than silently drifting apart from
+ * it -- that coupling is what an earlier draft's comment claimed without
+ * the code actually doing it.
+ *
+ * For today's `MAX_LEAD_SEC` -- a flat 7-day duration added to `nowSec`
+ * itself, not to a day boundary -- `spanDays` always comes out to 7: the
+ * farthest reachable moment falls on the *same* Taipei time-of-day as
+ * `nowSec`, seven calendar days later (this only holds because Taipei has
+ * no DST to shift it by an hour -- see `TAIPEI_OFFSET_SEC`). So the list is
+ * 8 entries long, not 7: today (i = 0), tomorrow (i = 1), then weekday
+ * names (i = 2..spanDays).
  */
 export function dayOptions(nowSec: number): DayOption[] {
   const start = taipeiMidnight(nowSec);
+  const end = taipeiMidnight(nowSec + MAX_LEAD_SEC);
+  const spanDays = Math.round((end - start) / DAY_SEC);
   const days: DayOption[] = [];
-  for (let i = 0; i <= 7; i++) {
+  for (let i = 0; i <= spanDays; i++) {
     const daySec = start + i * DAY_SEC;
     const kind: DayKind = i === 0 ? "today" : i === 1 ? "tomorrow" : "weekday";
     days.push({ daySec, kind, weekday: weekdayOf(daySec) });
@@ -199,18 +209,21 @@ export function hourOptions(): number[] {
   return Array.from({ length: 24 }, (_, h) => h);
 }
 
-/** Every 5-minute mark within an hour, 0..55 -- the same `STEP_SEC` grid `ceilToStep`/`floorToStep` round onto. */
+/** `STEP_SEC` expressed in minutes -- the width `minuteOptions` and `composeArrival` step by, derived rather than a second hard-coded "5" kept in sync by hand with the grid `ceilToStep`/`floorToStep` round onto. */
+const STEP_MIN = STEP_SEC / 60;
+
+/** Every mark within an hour on the `STEP_SEC` grid, 0..(60 - `STEP_MIN`). */
 export function minuteOptions(): number[] {
   const out: number[] = [];
-  for (let m = 0; m < 60; m += 5) out.push(m);
+  for (let m = 0; m < 60; m += STEP_MIN) out.push(m);
   return out;
 }
 
 /**
  * Build an absolute Unix timestamp from a day/hour/minute picker's own
  * selection: `daySec` (a Taipei local midnight, from `dayOptions`), plus an
- * hour (0..23) and minute (a multiple of 5, 0..55) within that Taipei
- * calendar day.
+ * hour (0..23) and minute (a multiple of `STEP_MIN`, from `minuteOptions`)
+ * within that Taipei calendar day.
  *
  * Taipei's fixed, DST-free offset (`TAIPEI_OFFSET_SEC`) is exactly what
  * makes plain addition correct here: `daySec + hour*3600 + minute*60` never
@@ -236,8 +249,8 @@ export function composeArrival(daySec: number, hour: number, minute: number): nu
   if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
     throw new RangeError(`hour ${hour} is outside 0..23`);
   }
-  if (!Number.isInteger(minute) || minute < 0 || minute > 55 || minute % 5 !== 0) {
-    throw new RangeError(`minute ${minute} is outside 0..55 in steps of 5`);
+  if (!Number.isInteger(minute) || minute < 0 || minute >= 60 || minute % STEP_MIN !== 0) {
+    throw new RangeError(`minute ${minute} is outside 0..${60 - STEP_MIN} in steps of ${STEP_MIN}`);
   }
   return daySec + hour * 3600 + minute * 60;
 }

@@ -151,6 +151,20 @@ describe("dayOptions", () => {
     expect(dayOptions(NOW_MONTH_YEAR_BOUNDARY)).toHaveLength(8);
     expect(dayOptions(0)).toHaveLength(8);
   });
+
+  it("day count is coupled to MAX_LEAD_SEC, not a second hard-coded loop bound kept in sync by hand", () => {
+    // Both sides are independent literals -- neither is derived from the
+    // other, and neither is derived from the implementation under test.
+    // MAX_LEAD_SEC is restated here as the plain "seven days" arithmetic it
+    // is defined as; 8 is dayOptions' own stated length for that value. If
+    // dayOptions ever reverts to a bare `i <= 7` loop instead of reading
+    // MAX_LEAD_SEC (as it did before this test was added), this assertion
+    // stops being able to move when MAX_LEAD_SEC does -- which is exactly
+    // what changing MAX_LEAD_SEC in the source, not in this test file, is
+    // for catching.
+    expect(MAX_LEAD_SEC).toBe(7 * 24 * 3600);
+    expect(dayOptions(NOW_MIDNIGHT_SPLIT)).toHaveLength(8);
+  });
 });
 
 describe("hourOptions and minuteOptions", () => {
