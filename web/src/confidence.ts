@@ -56,6 +56,20 @@
  *     that has not itself changed; citing the more durable claim instead
  *     keeps the explanation as stable as the level it is attached to.
  *
+ * There is a second, harder reason the split falls exactly here, and it is
+ * the one that makes the choice *truthful* rather than merely stable: the
+ * two bars sit on opposite sides of the blend's own half-life. The reading's
+ * share of the number is `0.5 ** (minutesFromReading / 30)`, so
+ *
+ *     at the high bar   (arrival <= 30 min from the reading):  50% .. 100%
+ *     at the medium bar (arrival <= 75 min from the reading):  18% ..  50%
+ *
+ * -- at the high bar the reading supplies at least half of the number the
+ * driver is looking at, and at the medium bar climatology supplies most of
+ * it (82% at the far edge). So citing the reading at one bar and the history
+ * at the other is not a presentational preference: each names the input that
+ * actually dominates the figure on screen.
+ *
  * This is why the branches below check reading-then-weeks at the high tier
  * and weeks-then-reading at the medium tier -- the order is load-bearing,
  * not merely a transcription of the spec table's row order, and a test
