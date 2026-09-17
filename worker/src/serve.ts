@@ -50,7 +50,16 @@ export async function serveArtifact(request: Request, part: Part, env: Env, cach
  * This 503 ("nothing has ever been uploaded to `WEEK_KEY`") is a GET-side
  * condition, distinct from `handleWeekUpload`'s PUT-side 503 ("no pair
  * stored yet", `X-Reject: no-pair`) -- worded differently, and carrying no
- * `X-Reject` header at all, so the two are never mistaken for each other. */
+ * `X-Reject` header at all, so the two are never mistaken for each other.
+ *
+ * `Last-Modified` carries the table's own `builtTs` -- when the climatology
+ * was built, never when the bytes were re-uploaded -- because the one thing a
+ * post-deploy HEAD wants to know is whether the daily rebuild is still
+ * running, and a HEAD has no body to read `builtTs` out of. See
+ * `scripts/smoke-live.mjs`, which warns (never fails) past 48 h. Nothing
+ * conditional hangs off it: revalidation is `ETag`'s job here, and an
+ * `If-Modified-Since` this route does not answer costs a re-send of a file
+ * that changes once a day. */
 export async function serveWeek(request: Request, env: Env): Promise<Response> {
   const stored = await env.ARTIFACTS.getWithMetadata(WEEK_KEY, { type: "arrayBuffer" });
   const meta = asWeekMeta(stored.metadata);
@@ -58,6 +67,7 @@ export async function serveWeek(request: Request, env: Env): Promise<Response> {
   const headers = {
     "Content-Type": "application/octet-stream",
     "Cache-Control": "max-age=3600",
+    "Last-Modified": new Date(meta.builtTs * 1000).toUTCString(),
     ETag: `"${meta.sha256}"`,
   };
   if (etagMatches(request.headers.get("If-None-Match"), headers.ETag)) return respond(304, null, headers);

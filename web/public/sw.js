@@ -1,7 +1,7 @@
 /*
  * ParkCast's service worker: open the app in a basement car park.
  *
- * The whole read path is two static files and a tile archive, so there is
+ * The whole read path is three static files and a tile archive, so there is
  * nothing here that *needs* a network -- only something that needs a cache. A
  * cached forecast is still honest because every artifact carries its own
  * `base_data_ts`: the UI already renders an age and expires the forecast on its
@@ -41,8 +41,11 @@
  * and `activate` deletes every cache that is not the current one.
  */
 
-// v2: the redesign renamed every hashed asset and added `places/`, so the v1 cache is all dead weight -- `activate` drops it.
-const VERSION = "v2";
+// v3: `artifacts/week.bin` became the one cache-first artifact (see `routeFor`
+// rule 4a), so the store the v2 rules built is no longer the store these rules
+// describe -- `activate` drops it rather than leaving installed clients serving
+// it under the new routing.
+const VERSION = "v3";
 const CACHE_NAME = `parkcast-${VERSION}`;
 
 /**
@@ -111,6 +114,17 @@ const PASSTHROUGH = "passthrough";
  *     `.pmtiles` archive, read by range request, gets the same treatment for
  *     rule 2's reason. Leave it alone.
  *
+ *  4a. **The week table** -- cache-first, and it is the *only* named exception
+ *     under `artifacts/`. `week.bin` is a 715 KB weekly aggregate rebuilt once
+ *     a day, fetched lazily by the app on the first arrival chosen past the
+ *     grid's two-hour window. Network-first would spend a conditional request
+ *     on it every session to be told it has not changed. A stale copy errs in
+ *     the conservative direction on its own: support only ever grows, so an old
+ *     table understates confidence rather than overstating it, and a bumped
+ *     `VERSION` is what retires one. The exception is spelt out in full, not by
+ *     prefix or extension, so a future `week-{city}.bin` shard is a forecast
+ *     artifact under rule 4 until somebody decides otherwise on purpose.
+ *
  *  4. **The artifacts** -- network-first. A forecast from the network beats one
  *     from disk every time. The cached copy is the fallback, and it carries its
  *     own timestamp, so falling back costs honesty nothing.
@@ -151,6 +165,8 @@ function routeFor(request, scope) {
 
   const path = url.pathname.slice(base.pathname.length);
   if (path.startsWith("basemap/") || path.endsWith(".pmtiles")) return PASSTHROUGH;
+  // Before the branch below, or that one swallows it. See rule 4a.
+  if (path === "artifacts/week.bin") return CACHE_FIRST;
   if (path.startsWith("artifacts/")) return NETWORK_FIRST;
   if (request.mode === "navigate") return NETWORK_FIRST;
   return CACHE_FIRST;

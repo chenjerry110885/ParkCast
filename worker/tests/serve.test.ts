@@ -104,6 +104,19 @@ describe("serving the week table", () => {
     expect(await res.text()).toBe("");
   });
 
+  it("dates the table by when it was built, so a HEAD can tell how stale it is", async () => {
+    // `scripts/smoke-live.mjs` HEADs this path after every release and warns
+    // when the daily rebuild has stalled. A HEAD has no body, so the table's
+    // own `builtTs` has to reach it as a header or that check has nothing to
+    // read. `builtTs` and not `uploadedAt`: re-PUTting yesterday's bytes must
+    // not make yesterday's climatology look like today's.
+    const { get, week } = weekSetup();
+    const built = new Date(week.builtTs * 1000).toUTCString();
+    expect((await get("/artifacts/week.bin")).headers.get("Last-Modified")).toBe(built);
+    expect((await get("/artifacts/week.bin", { method: "HEAD" })).headers.get("Last-Modified")).toBe(built);
+    expect(Date.parse(built)).not.toBeNaN();
+  });
+
   it("sends no body for HEAD", async () => {
     const { get } = weekSetup();
     const res = await get("/artifacts/week.bin", { method: "HEAD" });

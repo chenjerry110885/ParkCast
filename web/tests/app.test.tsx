@@ -16,7 +16,7 @@
  * behind `React.lazy`, which is the subject of the last describe here: nothing
  * else in this file waits for it, because nothing else on the screen does.
  */
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, {
   COVERAGE_RADIUS_M,
@@ -25,12 +25,22 @@ import App, {
   MIN_REFETCH_MS,
   REFRESH_MS,
 } from "../src/App";
-import { arrivalOptions, ceilToStep, defaultArrival, formatClock, horizonFromReading } from "../src/arrival";
-import { HEADER_SIZE, UNKNOWN, horizonColumn } from "../src/artifacts";
+import {
+  arrivalOptions,
+  ceilToStep,
+  composeArrival,
+  dayOptions,
+  defaultArrival,
+  formatClock,
+  horizonFromReading,
+} from "../src/arrival";
+import { HEADER_SIZE, UNKNOWN, horizonColumn, resetWeekCache } from "../src/artifacts";
+import { WEEKLY_OBSERVATIONS } from "../src/confidence";
 import { haversineMeters } from "../src/geo";
 import { fillTemplate, t } from "../src/i18n";
 import { resetPlaceIndexCache } from "../src/places";
 import type { Grid, Lot, LotsDoc } from "../src/types";
+import { weekBucket } from "../src/week";
 
 const ROSTER_ID = 4242;
 const N_HORIZONS = 24;
@@ -162,10 +172,28 @@ function makeLotsDoc(): LotsDoc {
 /** The stubbed `fetch`, so a test can count how many times the grid was pulled. */
 let fetchMock: ReturnType<typeof vi.fn>;
 
-function stubFetch(grid: ArrayBuffer = makeGrid(), lots: LotsDoc = makeLotsDoc()) {
+/**
+ * What `/artifacts/week.bin` answers with. `null` is the Worker's own 503 for
+ * a table that has never been uploaded (`serveWeek`), and it is the **default**
+ * for every test in this file: the week table is fetched lazily, so a test that
+ * is not about it must be able to prove that by never being served one. A
+ * function is evaluated per request, for the tests that need the second attempt
+ * to answer differently from the first -- and it may return a promise, for the
+ * one that needs a request still to be in the air while the picker moves.
+ */
+type WeekStub = ArrayBuffer | null | (() => ArrayBuffer | null | Promise<ArrayBuffer | null>);
+
+function stubFetch(grid: ArrayBuffer = makeGrid(), lots: LotsDoc = makeLotsDoc(), week: WeekStub = null) {
   fetchMock = vi.fn((url: string) => {
     if (url.endsWith("grid.bin")) {
       return Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(grid) });
+    }
+    if (url.endsWith("week.bin")) {
+      return Promise.resolve(typeof week === "function" ? week() : week).then((table) =>
+        table === null
+          ? { ok: false, status: 503 }
+          : { ok: true, status: 200, arrayBuffer: () => Promise.resolve(table) },
+      );
     }
     if (url.endsWith("lots.json")) {
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(lots) });
@@ -189,6 +217,11 @@ function stubFetch(grid: ArrayBuffer = makeGrid(), lots: LotsDoc = makeLotsDoc()
 /** How many times `grid.bin` has been requested since the stub was installed. */
 function gridFetchCount(): number {
   return fetchMock.mock.calls.filter(([url]) => String(url).endsWith("grid.bin")).length;
+}
+
+/** How many times `week.bin` has been requested since the stub was installed. */
+function weekFetchCount(): number {
+  return fetchMock.mock.calls.filter(([url]) => String(url).endsWith("week.bin")).length;
 }
 
 /** Pretend the artifact's reading is `min` minutes old. */
@@ -243,20 +276,68 @@ const MARKED = LOTS[0]!;
 /**
  * One lot whose 24 columns are all different, so the row names its column.
  *
- * Shared by the two describes that need to see *which* column was read: the
- * staleness correction, and the expiry that fires when there is only one column
- * left to read.
+ * Shared by the three describes that need to see *which* column was read: the
+ * staleness correction, the expiry that fires when there is only one column
+ * left to read, and the week table, whose whole job is to be read *instead of*
+ * the last of those columns.
  */
-function stubColumnMarkedArtifacts() {
+function stubColumnMarkedArtifacts({ lot = MARKED, week = null }: { lot?: Lot; week?: WeekStub } = {}) {
   const body = Array.from({ length: N_HORIZONS }, (_unused, c) => columnMark(c));
-  stubFetch(encodeGrid(body, 1), {
-    v: 1,
-    generated_at: BASE_DATA_TS + 213,
-    base_data_ts: BASE_DATA_TS,
-    n_lots: 1,
-    roster_id: ROSTER_ID,
-    lots: [MARKED],
-  });
+  stubFetch(
+    encodeGrid(body, 1),
+    {
+      v: 1,
+      generated_at: BASE_DATA_TS + 213,
+      base_data_ts: BASE_DATA_TS,
+      n_lots: 1,
+      roster_id: ROSTER_ID,
+      lots: [lot],
+    },
+    week,
+  );
+}
+
+/** `week.bin`'s header: `<4sBIHHBI`, no padding, mirroring `web/src/week.ts`. */
+const WEEK_HEADER_SIZE = 18;
+/** `7 * 24 * 60 / 30`, the only bucket geometry `parseWeek` accepts. */
+const WEEK_BUCKETS = 336;
+
+/**
+ * A single-lot `week.bin` with one bucket worth telling apart from the rest.
+ *
+ * `marked` is written into `bucket` alone and `filler` into all 335 others, so
+ * a reader that lands on the wrong half-hour of the week -- the reading's own
+ * rather than the arrival's, say -- renders `filler`'s percentage and is caught
+ * by value rather than passing on a number that happened to be plausible.
+ *
+ * The bytes are laid out here by hand rather than generated from `week.ts`,
+ * exactly as `encodeGrid` above is: a fixture built by the code under test can
+ * only ever prove the client agrees with itself. Cross-language layout
+ * agreement with the Python encoder is `seam.test.ts`'s job, against bytes
+ * `artifacts.encode_week` actually wrote.
+ */
+function encodeWeek(
+  bucket: number,
+  marked: { percent: number; support: number },
+  filler: { percent: number; support: number },
+  rosterId: number = ROSTER_ID,
+): ArrayBuffer {
+  const buf = new ArrayBuffer(WEEK_HEADER_SIZE + WEEK_BUCKETS * 2);
+  const dv = new DataView(buf);
+  const bytes = new Uint8Array(buf);
+  bytes.set(new TextEncoder().encode("PCW1"), 0);
+  dv.setUint8(4, 1);
+  dv.setUint32(5, BASE_DATA_TS - 3600, true); // builtTs: rebuilt daily, not per tick
+  dv.setUint16(9, 1, true); // nLots
+  dv.setUint16(11, WEEK_BUCKETS, true);
+  dv.setUint8(13, 30); // bucketMin
+  dv.setUint32(14, rosterId, true);
+  for (let b = 0; b < WEEK_BUCKETS; b += 1) {
+    const cell = b === bucket ? marked : filler;
+    bytes[WEEK_HEADER_SIZE + b * 2] = cell.percent;
+    bytes[WEEK_HEADER_SIZE + b * 2 + 1] = cell.support;
+  }
+  return buf;
 }
 
 /** The row whose lot name is `name`. Names are Chinese in both languages. */
@@ -280,14 +361,22 @@ function factText(tile: HTMLElement): string {
 }
 
 /**
- * Drive the arrival picker's hour and minute `<select>`s to `ts`, the way a
- * user reaches a specific arrival time now that there is no chip to click
- * for it directly. Every fixture in this file stays within one Taipei
- * calendar day -- the oldest age used is 383 minutes, six and a half hours
- * past a 14:48 reading -- so the day `<select>` is never touched.
+ * Drive the arrival picker's day, hour and minute `<select>`s to `ts`, the way
+ * a user reaches a specific arrival time now that there is no chip to click for
+ * it directly.
+ *
+ * The day is set first and from `dayOptions` -- the same list the picker itself
+ * renders -- because `onDayChange` carries the current hour and minute across,
+ * so setting it after them would throw the pair away. For a `ts` already on the
+ * selected day the `<select>`'s value does not move and React fires nothing,
+ * which is why every test written before the seven-day picker existed still
+ * reads the same.
  */
 function selectArrival(ts: number) {
+  const day = dayOptions(nowSec()).find((d) => d.daySec <= ts && ts < d.daySec + 24 * 3600);
+  if (day === undefined) throw new Error(`no day option contains ${ts}`);
   const [hh, mm] = formatClock(ts).split(":");
+  fireEvent.change(screen.getByLabelText(t("en").pickerDay), { target: { value: String(day.daySec) } });
   fireEvent.change(screen.getByLabelText(t("en").pickerHour), { target: { value: String(Number(hh)) } });
   fireEvent.change(screen.getByLabelText(t("en").pickerMinute), { target: { value: String(Number(mm)) } });
 }
@@ -296,8 +385,12 @@ beforeEach(() => {
   stubFetch();
   // The place index is cached per URL for the life of the module, and recent
   // picks live in `localStorage`; both would otherwise leak from one test into
-  // the next and decide what the search box offers.
+  // the next and decide what the search box offers. `week.bin` is cached the
+  // same way and for the same reason -- one fetch per session, not per render
+  // -- so a table one test served would otherwise still be in memory for the
+  // next, and "was it fetched?" would stop meaning anything.
   resetPlaceIndexCache();
+  resetWeekCache();
   window.localStorage.clear();
   // The screen now mounts the map, and MapLibre asks the canvas for a WebGL
   // context on its way up. jsdom has none and says so -- loudly, once per
@@ -680,6 +773,288 @@ describe("staleness correction", () => {
     // test is *not* exercising would have said instead.
     expect(chance.textContent).not.toContain(`${columnMark(N_HORIZONS - 1)}%`);
     expect(chance.textContent).not.toContain(t("en").noData);
+  });
+});
+
+/**
+ * Past the grid's last column, where `week.bin` is the only honest source.
+ *
+ * The picker offers seven days; `grid.bin` covers two hours. For the ~98.8% of
+ * that range the grid cannot reach, `horizonColumn` clamps to column 23 -- the
+ * +120-minute figure -- and every earlier version of this screen presented that
+ * clamp as the answer for the time the driver actually asked about, with
+ * `forecastExpired` false, the "ranked for your arrival" heading above it and a
+ * confidence pill beside it. This describe is what makes that impossible to
+ * reintroduce quietly.
+ *
+ * The grid fixture is the column-marked one, so the clamp has a value of its
+ * own (`columnMark(23)`, 96%) that no other source in the fixture can produce.
+ * Any test here that starts passing 96% is the regression.
+ */
+describe("an arrival beyond the grid's own window", () => {
+  /** The climatology in the arrival's own half-hour bucket. */
+  const FAR_PERCENT = 73;
+  /** ...and in all 335 others, so a lookup on the wrong bucket is caught by value. */
+  const OTHER_PERCENT = 20;
+  /** Five weeks of this half-hour: enough for `confidenceFor`'s support-led "high". */
+  const FAR_SUPPORT = 5 * WEEKLY_OBSERVATIONS;
+
+  /** What the grid's clamp says for every arrival past two hours. Never a right answer out here. */
+  const CLAMPED = `${columnMark(N_HORIZONS - 1)}%`;
+
+  /**
+   * The marked lot with an observed count, so `blend`'s persistence term has a
+   * reading to decay from -- `MARKED` itself publishes no `f`, which would make
+   * every number out here pure climatology and hide a missing blend.
+   */
+  const OBSERVED_LOT: Lot = { ...MARKED, f: 5 };
+
+  /** Tomorrow 21:20 Taipei: the case the user complained about, and 1,832 min from the reading. */
+  function tomorrowEvening(): number {
+    return composeArrival(dayOptions(nowSec())[1]!.daySec, 21, 20);
+  }
+
+  /** A `week.bin` whose marked bucket is the one `ts` falls in. */
+  function weekFor(ts: number, support = FAR_SUPPORT): ArrayBuffer {
+    // `weekBucket` is the client's own indexer, which makes this a wiring test
+    // and not a second statement of the bucket arithmetic: that the client's
+    // buckets agree with Python's is `seam.test.ts`'s job, against bytes the
+    // Python encoder wrote. What this pins is that `App` looks the lot up at
+    // the *arrival's* time of week rather than the reading's, which is visible
+    // here because the two land in different buckets (234 and 173).
+    return encodeWeek(weekBucket(ts), { percent: FAR_PERCENT, support }, { percent: OTHER_PERCENT, support: 0 });
+  }
+
+  /** The one rendered lot's probability cell. */
+  function chance(): string {
+    return screen.getByTestId("lot-probability").textContent ?? "";
+  }
+
+  it("answers tomorrow evening from the week table, not from the grid's last column", async () => {
+    // THE regression test. Without the week path this row reads 96% -- the
+    // +120-minute column -- labelled as tomorrow's forecast.
+    const far = tomorrowEvening();
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: weekFor(far) });
+    await renderLocated();
+
+    selectArrival(far);
+    expect(screen.getByTestId("arrival-time").textContent).toBe("21:20");
+    await waitFor(() => expect(chance()).toBe(`${FAR_PERCENT}%`));
+
+    // At 1,832 minutes from the reading the blend's persistence weight is 4e-19,
+    // so the number is this bucket's climatology to every digit shown -- and
+    // emphatically not the grid's clamp, nor another bucket's climatology.
+    expect(chance()).not.toContain(CLAMPED);
+    expect(chance()).not.toContain(`${OTHER_PERCENT}%`);
+  });
+
+  it("blends the live reading into the climatology just past the grid's edge", async () => {
+    // +122 min from the reading: one step past the grid's 120-minute span, where
+    // the persistence weight is still 0.5 ** (122/30) = 0.0597. So
+    // 0.0597 * 1 + 0.9403 * 0.73 = 0.7461 -> 75%, which is neither the bare
+    // climatology (73%) nor the grid's clamp (96%). A wiring that reached the
+    // week table but dropped `blend`, or measured its horizon from the wall
+    // clock instead of `baseDataTs`, lands on a different number than this.
+    const justPast = BASE_DATA_TS + 122 * 60;
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: weekFor(justPast) });
+    await renderLocated();
+
+    selectArrival(justPast);
+    await waitFor(() => expect(chance()).toBe("75%"));
+    expect(chance()).not.toBe(`${FAR_PERCENT}%`);
+    expect(chance()).not.toContain(CLAMPED);
+  });
+
+  it("says 'no data' when the week table is unavailable, never the grid's last column", async () => {
+    // The Worker answers 503 until the collector has uploaded a table, and a
+    // fetch can simply fail. Either way the honest answer for a time nothing
+    // covers is silence -- never the clamp standing in for it.
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: null });
+    await renderLocated();
+
+    selectArrival(tomorrowEvening());
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+    expect(chance()).toContain(t("en").noData);
+    expect(chance()).not.toMatch(/\d+%/);
+    // No forecast means no grade either: a pill over "no data" would be a claim
+    // about a number that is not there.
+    expect(screen.queryByRole("button", { name: /confidence/i })).toBeNull();
+  });
+
+  it("refuses a week table built against a different roster, rather than indexing it anyway", async () => {
+    // `week.bin` is indexed by grid row. A table whose `rosterId` disagrees
+    // describes a different ordering of lots, so every row would be answered
+    // with some other car park's history -- silently, and plausibly. Same check
+    // `loadArtifacts` already makes for the grid/lots pair.
+    const far = tomorrowEvening();
+    const foreign = encodeWeek(
+      weekBucket(far),
+      { percent: FAR_PERCENT, support: FAR_SUPPORT },
+      { percent: OTHER_PERCENT, support: 0 },
+      ROSTER_ID + 1,
+    );
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: foreign });
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+    expect(chance()).toContain(t("en").noData);
+    expect(chance()).not.toContain(`${FAR_PERCENT}%`);
+    expect(chance()).not.toContain(CLAMPED);
+  });
+
+  it("grades the confidence pill on that bucket's own support, not on how far away it is", async () => {
+    // The complaint this whole stage answers: "the further the time is the
+    // lower the confidence is is also weird". Thirty observations is five weeks
+    // of this half-hour, which reads high a day and a half out -- and says so.
+    const far = tomorrowEvening();
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: weekFor(far) });
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(chance()).toBe(`${FAR_PERCENT}%`));
+
+    fireEvent.click(screen.getByRole("button", { name: /confidence.*high/i }));
+    expect(screen.getByRole("note")).toHaveTextContent(
+      fillTemplate(t("en").confidenceWeeksTemplate, { n: 5 }),
+    );
+  });
+
+  it("says so honestly when that bucket has barely been watched", async () => {
+    // The other half of the same rule: support is what earns the grade, so a
+    // bucket with one observation behind it reads low and names the reason,
+    // even though the probability itself is as real as the one above.
+    const far = tomorrowEvening();
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: weekFor(far, 1) });
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(chance()).toBe(`${FAR_PERCENT}%`));
+
+    fireEvent.click(screen.getByRole("button", { name: /confidence.*low/i }));
+    expect(screen.getByRole("note")).toHaveTextContent(t("en").confidenceThin);
+  });
+});
+
+/**
+ * `week.bin` is 715 KB raw. Most sessions ask about the next half hour and must
+ * never pay for it -- the same bargain `PlaceSearch` strikes with the offline
+ * place index, and for the same reason.
+ */
+describe("fetching the week table lazily", () => {
+  const OBSERVED_LOT: Lot = { ...MARKED, f: 5 };
+
+  function tomorrowEvening(): number {
+    return composeArrival(dayOptions(nowSec())[1]!.daySec, 21, 20);
+  }
+
+  function weekBytes(ts: number): ArrayBuffer {
+    return encodeWeek(weekBucket(ts), { percent: 73, support: 30 }, { percent: 20, support: 0 });
+  }
+
+  it("does not fetch it on load, nor for an arrival the grid still covers", async () => {
+    const far = tomorrowEvening();
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: weekBytes(far) });
+    await renderLocated();
+    expect(weekFetchCount()).toBe(0);
+
+    // Half an hour out, and the last arrival time the grid itself reaches:
+    // both inside the window, both answered without a second artifact.
+    selectArrival(ceilToStep(nowSec() + 30 * 60));
+    selectArrival(arrivalOptions(nowSec(), GRID_SPAN).at(-1)!);
+    await screen.findByTestId("lot-list");
+    expect(weekFetchCount()).toBe(0);
+  });
+
+  it("fetches it once, however many far arrivals are chosen after that", async () => {
+    const far = tomorrowEvening();
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: weekBytes(far) });
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(screen.getByTestId("lot-probability").textContent).toBe("73%"));
+    expect(weekFetchCount()).toBe(1);
+
+    // Three more times out there, including a return through the grid's own
+    // window: the table is in memory and nothing goes back to the network.
+    selectArrival(composeArrival(dayOptions(nowSec())[1]!.daySec, 22, 30));
+    selectArrival(ceilToStep(nowSec() + 30 * 60));
+    selectArrival(composeArrival(dayOptions(nowSec())[3]!.daySec, 9, 0));
+    await screen.findByTestId("lot-list");
+    expect(weekFetchCount()).toBe(1);
+  });
+
+  it("retries on the next far arrival instead of remembering the failure", async () => {
+    // A failed fetch must not poison the rest of the session -- the flag that
+    // guards the request has to come back down, exactly as `PlaceSearch`'s
+    // `loading` does in its cleanup. Without that, the first 503 is the last
+    // word until the tab is reloaded.
+    const far = tomorrowEvening();
+    let published = false;
+    stubColumnMarkedArtifacts({
+      lot: OBSERVED_LOT,
+      week: () => (published ? weekBytes(far) : null),
+    });
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+    expect(screen.getByTestId("lot-probability").textContent).toContain(t("en").noData);
+
+    // 21:25 is the same half-hour bucket as 21:20, so the answer below is the
+    // retry landing rather than a different cell being read.
+    published = true;
+    selectArrival(composeArrival(dayOptions(nowSec())[1]!.daySec, 21, 25));
+    await waitFor(() => expect(screen.getByTestId("lot-probability").textContent).toBe("73%"));
+    expect(weekFetchCount()).toBe(2);
+  });
+
+  it("does not strand the request when the arrival moves while it is still in the air", async () => {
+    // The bug `PlaceSearch` shipped and this shape inherited the fix for. The
+    // effect's cleanup fires when the selection moves, which cancels the
+    // callback that would otherwise clear `weekLoading` -- so unless the
+    // cleanup clears it too, the flag stays raised and the guard on the
+    // effect's first line refuses every later attempt for the rest of the
+    // session. A driver who keeps turning the picker's wheel while 715 KB is
+    // downloading would never see a far-horizon number again.
+    const far = tomorrowEvening();
+    let release: (table: ArrayBuffer) => void = () => {};
+    const inFlight = new Promise<ArrayBuffer>((resolve) => {
+      release = resolve;
+    });
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: () => inFlight });
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+
+    // 21:25 is the same half-hour bucket as 21:20, so what lands below is this
+    // request finishing rather than some other cell being read.
+    selectArrival(composeArrival(dayOptions(nowSec())[1]!.daySec, 21, 25));
+    release(weekBytes(far));
+
+    await waitFor(() => expect(screen.getByTestId("lot-probability").textContent).toBe("73%"));
+    // ...and still one request: the run after the cleanup re-subscribed to the
+    // promise already in flight instead of starting a second download.
+    expect(weekFetchCount()).toBe(1);
+  });
+
+  it("leaves everything inside the grid's window working when the fetch fails", async () => {
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: null });
+    await renderLocated();
+
+    selectArrival(tomorrowEvening());
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+
+    // Back to a time the grid answers for: its own column, as if the failed
+    // fetch had never happened. The forecast never expired -- this grid is four
+    // minutes old -- so the heading still claims the order it really has.
+    const near = ceilToStep(nowSec() + 30 * 60);
+    selectArrival(near);
+    expect(screen.getByTestId("lot-probability").textContent).toBe(`${columnMark(columnFor(near))}%`);
+    expect(screen.queryByTestId("forecast-expired")).toBeNull();
+    expect(screen.getByText(t("en").rankedForArrival)).toBeInTheDocument();
+    expect(screen.getByTestId("staleness")).toBeInTheDocument();
   });
 });
 

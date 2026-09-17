@@ -242,6 +242,22 @@ describe("routeFor", () => {
     expect(worker.routeFor(request(`${SCOPE}artifacts/lots.json`), SCOPE)).toBe("network-first");
   });
 
+  it("serves the week table cache-first, alone among the artifacts", () => {
+    // The one named exception, and it has to be *before* the `artifacts/`
+    // branch or the rule above swallows it. The trade is deliberate in both
+    // directions: a forecast from the network must always beat a cached one,
+    // and a 715 KB weekly aggregate must not be re-downloaded every session to
+    // learn it has not changed. A stale copy errs conservatively -- support
+    // only grows, so an old table understates confidence rather than
+    // overstating it.
+    expect(worker.routeFor(request(`${SCOPE}artifacts/week.bin`), SCOPE)).toBe("cache-first");
+    // ...and it is an exception for that one name, not for anything that looks
+    // a bit like it: a future `week-taichung.bin` shard is a forecast artifact
+    // and stays network-first until someone decides otherwise on purpose.
+    expect(worker.routeFor(request(`${SCOPE}artifacts/week-taichung.bin`), SCOPE)).toBe("network-first");
+    expect(worker.routeFor(request(`${SCOPE}artifacts/week.bin.tmp`), SCOPE)).toBe("network-first");
+  });
+
   it("fetches the document network-first, because index.html is the one unhashed name", () => {
     expect(worker.routeFor(request(SCOPE, { mode: "navigate" }), SCOPE)).toBe("network-first");
     expect(worker.routeFor(request(`${SCOPE}index.html`, { mode: "navigate" }), SCOPE)).toBe(
@@ -329,6 +345,15 @@ describe("routeFor", () => {
 describe("cache housekeeping", () => {
   it("versions the cache name", () => {
     expect(loadWorker().CACHE_NAME).toMatch(/^parkcast-v\d+$/);
+  });
+
+  it("is on v3, the version that shipped the week table's routing rule", () => {
+    // Pinned to the exact number rather than merely "some version", because the
+    // bump is the mechanism: `activate` drops every cache that is not the
+    // current one, and a routing change that reaches installed clients without
+    // one leaves them serving the store the old rules built. Bumping this on
+    // purpose means changing this line on purpose.
+    expect(loadWorker().CACHE_NAME).toBe("parkcast-v3");
   });
 
   it("marks every cache but the current one stale", () => {

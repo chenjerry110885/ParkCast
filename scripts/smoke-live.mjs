@@ -25,6 +25,17 @@ const MUST_SERVE = [
 ];
 const TIMEOUT_MS = 15_000;
 
+/**
+ * How old `week.bin` may be before the smoke test says so.
+ *
+ * The table is rebuilt once a day, so 48 h is two missed rebuilds -- past the
+ * point where a single skipped run or a clock straddling midnight explains it,
+ * and well inside the horizon where the climatology itself is still useful
+ * (support only grows, so an old table understates confidence rather than
+ * overstating it). A warning either way: see the `week.bin` block below.
+ */
+const WEEK_MAX_AGE_H = 48;
+
 export async function smoke(origin, { fetchImpl = fetch, now = Date.now } = {}) {
   const failures = [];
   const warnings = [];
@@ -76,6 +87,34 @@ export async function smoke(origin, { fetchImpl = fetch, now = Date.now } = {}) 
         // Unparseable body (bad JSON, truncated/short bytes, ...): a pairing
         // mismatch, not a crash.
         failures.push("grid.bin and lots.json do not pair");
+      }
+    }
+  }
+
+  // `week.bin`, by HEAD: it is 715 KB and nothing here needs its body.
+  //
+  // Deliberately not in MUST_SERVE, which fails. This artifact is published on
+  // its own daily cadence, is fetched lazily by the app, and is additive by
+  // design -- a site without one works exactly as it did before the table
+  // existed, answering inside `grid.bin`'s window and saying "no data" past it.
+  // Failing the release over it would roll back a perfectly good deploy because
+  // the collector had not got round to a once-a-day job yet. So: warn, the same
+  // way a stale forecast warns, because somebody should look and nobody should
+  // be paged.
+  const week = await get("/artifacts/week.bin", { method: "HEAD" });
+  if (week !== null) {
+    if (week.status !== 200) {
+      warnings.push(`week.bin answered ${week.status} (no forecast past the grid's two-hour window)`);
+    } else {
+      // `Last-Modified` carries the table's own `builtTs` (worker/src/serve.ts)
+      // -- when the climatology was built, not when the bytes were re-uploaded,
+      // so a re-PUT of yesterday's table cannot read as fresh.
+      const builtMs = Date.parse(week.headers.get("last-modified") ?? "");
+      if (Number.isNaN(builtMs)) {
+        warnings.push("week.bin does not say when it was built");
+      } else {
+        const ageH = (now() - builtMs) / 3_600_000;
+        if (ageH > WEEK_MAX_AGE_H) warnings.push(`week table is ${Math.round(ageH)} h old (daily rebuild stalled?)`);
       }
     }
   }

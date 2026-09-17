@@ -2,12 +2,13 @@
  * The screen. One page: where you are, when you arrive, and what to do about it.
  *
  * The whole app is client-side. Two static files are fetched once -- a third,
- * the offline place index, only if the driver ever opens the search box -- the
- * ranking runs in this component, and nothing is ever sent anywhere: the
- * driver's location never leaves the phone, because there is no server to send
- * it to.
+ * `week.bin`, only if the driver ever asks about a time past the grid's own
+ * horizon, and a fourth, the offline place index, only if they ever open the
+ * search box -- the ranking runs in this component, and nothing is ever sent
+ * anywhere: the driver's location never leaves the phone, because there is no
+ * server to send it to.
  *
- * Ten things here are load-bearing rather than cosmetic:
+ * Eleven things here are load-bearing rather than cosmetic:
  *
  *   - **The staleness line.** The upstream feed publishes every five minutes
  *     with a ~3-minute lag, so the reading behind any forecast is already a few
@@ -30,6 +31,17 @@
  *     and the forecast is no longer about the time the user asked for;
  *     `forecastExpired` says so and withholds the probability rather than
  *     dressing a clamp up as an answer. The rest of the page keeps working.
+ *   - **The *horizon* limit, and the second artifact that lifts it.** The same
+ *     clamp is reached from the other direction by a driver asking about
+ *     tomorrow evening, and the picker offers seven days of those: past +120
+ *     min every arrival reads column 23, the +120-minute number, for a time it
+ *     was not computed for. So past that point the number is not read from the
+ *     grid at all -- `week.bin`'s climatology is blended against the same live
+ *     reading, by the same formula the server used to build the grid, which is
+ *     why the two agree where they meet. The table is fetched lazily, on the
+ *     first arrival that needs it, and while it is missing the honest answer
+ *     out there is "no data" rather than the clamp wearing the answer's
+ *     clothes. See `probabilityForLot`.
  *   - **Geolocation never leaves the user on a spinner.** Denial, failure, a
  *     browser without the API and a permission prompt closed without an answer
  *     all land in the same visible end state, with the rest of the page still
@@ -74,7 +86,7 @@
  */
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MAX_LEAD_SEC, MIN_LEAD_SEC, ceilToStep, clampArrival, defaultArrival, horizonFromReading } from "./arrival";
-import { artifactsBase, horizonColumn, loadArtifacts, probabilityAt } from "./artifacts";
+import { artifactsBase, horizonColumn, loadArtifacts, loadWeek, probabilityAt } from "./artifacts";
 import { ArrivalPicker } from "./components/ArrivalPicker";
 import { FreshnessBadge } from "./components/FreshnessBadge";
 import { LangToggle } from "./components/LangToggle";
@@ -91,8 +103,9 @@ import { snapHeights, type Snap } from "./layout/sheet";
 import { toMapLot } from "./map/lotSource";
 import type { Place } from "./places";
 import { listRows, rankLots } from "./rank";
-import type { Grid, Lot, LotsDoc } from "./types";
+import type { Grid, Lot, LotsDoc, WeekTable } from "./types";
 import { useGeolocation } from "./useGeolocation";
+import { blend, probabilityAt as weekProbabilityAt } from "./week";
 
 /**
  * The location watchdog's deadline, re-exported from the hook that now owns it.
@@ -219,8 +232,14 @@ interface Artifacts {
   lots: LotsDoc;
 }
 
+/** How far ahead of its own reading `grid.bin` forecasts, in minutes: 120 as built. */
+function gridSpanMin(grid: Grid): number {
+  return grid.stepMin * grid.nHorizons;
+}
+
 /**
- * P(at least one space) for one lot at one arrival time.
+ * P(at least one space) for one lot at one arrival time, from whichever
+ * artifact actually covers that time.
  *
  * Read at the row the lot *declares*, never at its position in the array:
  * `fetchLots` drops a row it cannot place, and reading by position after that
@@ -229,13 +248,79 @@ interface Artifacts {
  * through here, so the two cannot disagree about which row belongs to which car
  * park.
  *
- * Guarded rather than raw: a roster longer than the grid would otherwise throw
- * mid-render and take the whole page down, when "no data" for the extra rows is
- * both true and survivable.
+ * Guarded rather than raw at every index: a roster longer than either artifact
+ * would otherwise throw mid-render and take the whole page down, when "no data"
+ * for the extra rows is both true and survivable.
+ *
+ * **Which artifact answers is the whole point of this function.**
+ *
+ *   - **Inside the grid's own window** (`horizonMin <= gridSpanMin`), the grid
+ *     answers. It is a number the server computed and the backtests in
+ *     `docs/state-of-play.md` actually measured, and it stays the source there
+ *     even once `week` is in memory.
+ *   - **Past it**, the grid has nothing left: `horizonColumn` clamps, and every
+ *     arrival from +121 minutes to +7 days reads the same column 23 -- the
+ *     +120-minute figure. That clamp is the right behaviour for an accessor
+ *     asked a question off the end of its own data; presenting its output as an
+ *     answer for tomorrow evening is not. Since the picker widened to seven
+ *     days, about 98.8% of the range it offers lands there. So past the window
+ *     the number comes from `week.bin` instead, through the same
+ *     `blend(f, climatology, minutesFromReading)` the server computes its own
+ *     grid with -- which is why the two agree at the seam (`seam.test.ts`)
+ *     rather than jumping as a driver drags across the two-hour mark.
+ *   - **With no week table** -- never fetched, still in flight, 503, a failed
+ *     request, a bucket this lot has never been observed in -- the answer is
+ *     `null`. "No data" is the honest thing to say about a time nothing we hold
+ *     covers. There is deliberately no path from here back to the clamp, and no
+ *     `p ?? 0`: zero is a claim ("reliably full at this hour"), and `week.ts`'s
+ *     `blend` spells out at length why resolving that `null` is the caller's
+ *     job and never a coercion.
+ *
+ * `blend`'s `minutesFromReading` is `horizonMin`, which `horizonFromReading`
+ * measured from `baseDataTs` -- the reading -- and not from the wall clock. At
+ * these horizons the persistence weight has decayed to nothing anyway, but the
+ * two must not be allowed to drift apart at the seam, where it has not.
  */
-function probabilityForLot(grid: Grid, lot: Lot | undefined, horizonMin: number): number | null {
+function probabilityForLot(
+  grid: Grid,
+  week: WeekTable | null,
+  lot: Lot | undefined,
+  horizonMin: number,
+  arrivalTs: number,
+): number | null {
+  if (lot === undefined) return null;
+  const row = lot.i;
+  if (horizonMin <= gridSpanMin(grid)) {
+    return row >= grid.nLots ? null : probabilityAt(grid, row, horizonMin);
+  }
+  if (week === null || row >= week.nLots) return null;
+  const { p } = weekProbabilityAt(week, row, arrivalTs);
+  // `f` is absent when the lot was not observed at the reading and `null` when
+  // it was observed reporting nothing; neither is a count, and `blend` falls
+  // back to climatology alone for both.
+  return p === null ? null : blend(lot.f ?? null, p, horizonMin);
+}
+
+/**
+ * How many observations stand behind this lot's half-hour-of-week cell, which
+ * is what `confidenceFor` grades a forecast on.
+ *
+ * Zero whenever the week table is not in hand -- "we have not watched this lot
+ * at this hour often enough yet" is exactly what an unfetched table can honestly
+ * claim, and `confidence.ts` reads 0 as its thinnest evidence rather than as a
+ * missing input. Read at the *arrival's* time of week, the same bucket the
+ * probability came from, so the grade and the number can never describe
+ * different half-hours.
+ *
+ * Not gated on the grid's window: support is evidence about a time of week, not
+ * about which artifact happened to answer. Once the table is in memory a lot
+ * with four weeks of 21:20s behind it reads "high" whether the arrival is ninety
+ * minutes away or a day and a half.
+ */
+function supportForLot(week: WeekTable | null, lot: Lot | undefined, arrivalTs: number): number {
   const row = lot?.i;
-  return row === undefined || row >= grid.nLots ? null : probabilityAt(grid, row, horizonMin);
+  if (week === null || row === undefined || row >= week.nLots) return 0;
+  return weekProbabilityAt(week, row, arrivalTs).support;
 }
 
 /**
@@ -264,6 +349,11 @@ function MapPlaceholder({ lang }: { lang: Lang }) {
 export default function App() {
   const [lang, setLang] = useState<Lang>(detectLang);
   const [artifacts, setArtifacts] = useState<Artifacts | null>(null);
+  /**
+   * `week.bin`, or `null` until an arrival past the grid's window has asked for
+   * it. Never fetched on load: see the effect below.
+   */
+  const [weekTable, setWeekTable] = useState<WeekTable | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [refresh, setRefresh] = useState(0);
@@ -311,6 +401,11 @@ export default function App() {
   const loadedRef = useRef(false);
   /** When the artifacts were last asked for, so `MIN_REFETCH_MS` has something to measure. */
   const lastFetchRef = useRef(0);
+  /**
+   * Whether a `week.bin` request is in the air. See the effect that owns it
+   * below for why it is a ref and not a piece of state.
+   */
+  const weekLoadingRef = useRef(false);
   /**
    * `useGeolocation`'s `abandon` and `clearFailure`, held in refs because
    * `pickDestination` is what the hook is *given* -- the two would otherwise
@@ -489,6 +584,93 @@ export default function App() {
     horizonColumn(grid, grid.stepMin + ageMin) === grid.nHorizons - 1;
 
   /**
+   * The chosen arrival is past everything `grid.bin` covers, so the number can
+   * only come from `week.bin`.
+   *
+   * Also the trigger for fetching it, which is why `forecastExpired` is part of
+   * the test: when the grid is that stale the probability is dropped at source
+   * below whatever the horizon is, so the table would be downloaded to be
+   * thrown away. This predicate is "the week table would actually be read",
+   * and the fetch follows the read rather than the clock.
+   */
+  const needsWeek =
+    grid !== null && !forecastExpired && horizonFromReadingMin > gridSpanMin(grid);
+
+  /**
+   * `week.bin`, on the first arrival chosen outside the grid's window and never
+   * before it.
+   *
+   * 715 KB for a table most sessions never consult: a driver asking about the
+   * next half hour is answered entirely from the 26 KB grid, and paying for the
+   * climatology up front would be a worse first paint for the common case in
+   * exchange for nothing. Same bargain `PlaceSearch` strikes with the offline
+   * place index on its first focus, and this is deliberately the same shape --
+   * **including the lesson that cost that component a bug**: the cleanup lowers
+   * `weekLoadingRef` as well as cancelling. The `.then` below returns at
+   * `cancelled` before it can clear the flag, so without that line a selection
+   * moved mid-request would leave the flag stuck `true` and the guard on the
+   * first line would refuse every retry for the rest of the session.
+   *
+   * Retrying at all is `loadWeek`'s half of the bargain: a failed attempt drops
+   * itself from its cache, so the next far arrival genuinely goes back to the
+   * network instead of inheriting the first answer forever. Between the two,
+   * a 503 from a Worker whose collector has not uploaded a table yet costs one
+   * request and nothing else.
+   *
+   * `arrivalTs` is in the dependency list so that each new far arrival is a new
+   * attempt after a failure. It cannot turn into a request per selection: while
+   * one is genuinely in flight `loadWeek` hands back the same promise to every
+   * caller, so the extra runs re-subscribe rather than re-download.
+   *
+   * **The in-flight flag is a `useRef`, and that is not a stylistic choice.**
+   * `PlaceSearch` can hold its equivalent in state because the dependency that
+   * re-runs its effect (`focused`) always changes in a *later* render than the
+   * cleanup that lowered the flag, so the next run reads a fresh closure.
+   * `arrivalTs` does not: the cleanup and the re-run happen in the same commit,
+   * and a `useState` flag would still read `true` from the render that is being
+   * cleaned up -- so the guard on the first line would refuse the very run that
+   * is meant to take over, `cancelled` would swallow the response, and the
+   * screen would say "no data" for the rest of the session. A ref is read at
+   * effect time, which is when the cleanup has already lowered it. (It is also
+   * the right primitive on its own terms: nothing renders from this.)
+   */
+  useEffect(() => {
+    if (!needsWeek || weekTable !== null || weekLoadingRef.current) return;
+    weekLoadingRef.current = true;
+    let cancelled = false;
+    void loadWeek(ARTIFACTS_BASE).then((table) => {
+      weekLoadingRef.current = false;
+      if (cancelled) return;
+      // `null` is a failed or refused load, which must not be committed as
+      // "loaded": that is what leaves the next attempt free to try again.
+      if (table !== null) setWeekTable(table);
+    });
+    return () => {
+      cancelled = true;
+      // ...and the flag goes with it, or a selection moved mid-request strands
+      // it raised forever. See the paragraph above.
+      weekLoadingRef.current = false;
+    };
+    // `weekTable` is set BY this effect; listing it would rerun the effect on
+    // its own state change, calling the cleanup above and cancelling the
+    // fetch's own callback before the response ever arrives.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, [needsWeek, arrivalTs]);
+
+  /**
+   * The week table, but only while it describes the same roster the grid does.
+   *
+   * `week.bin` is indexed by grid row, so a table built against a different
+   * ordering answers every lot with some other car park's history -- silently,
+   * and plausibly. It is the same `rosterId` check `loadArtifacts` makes across
+   * the grid/lots pair, applied here rather than at fetch time so that the
+   * refreshed grid two minutes later can heal a table fetched across a
+   * republish without anything being re-downloaded. Until it matches, the
+   * honest answer past the grid's window is "no data".
+   */
+  const week = weekTable !== null && grid !== null && weekTable.rosterId === grid.rosterId ? weekTable : null;
+
+  /**
    * A destination, from whichever of the three ways the user said it.
    *
    * Whatever the pending location request was about to say, it is answering a
@@ -528,9 +710,9 @@ export default function App() {
     return lots.lots.map((lot) =>
       // No forecast survives an artifact this stale, and the dot goes grey --
       // the same "no data" the map already draws for an unknown cell.
-      toMapLot(lot, forecastExpired ? null : probabilityForLot(g, lot, horizonFromReadingMin)),
+      toMapLot(lot, forecastExpired ? null : probabilityForLot(g, week, lot, horizonFromReadingMin, arrivalTs)),
     );
-  }, [artifacts, horizonFromReadingMin, forecastExpired]);
+  }, [artifacts, week, horizonFromReadingMin, arrivalTs, forecastExpired]);
 
   /**
    * Every lot, ranked. Not sliced: `listRows` decides what the list shows.
@@ -548,15 +730,29 @@ export default function App() {
       lots: rows,
       // `rows[i]`, resolved through `Lot.i` inside: `rankLots` reports the array
       // position it scored, and the grid row is the lot's own business.
-      probability: (i, h) => (forecastExpired ? null : probabilityForLot(g, rows[i], h)),
+      probability: (i, h) => (forecastExpired ? null : probabilityForLot(g, week, rows[i], h, arrivalTs)),
     });
-  }, [artifacts, destination, horizonFromReadingMin, forecastExpired]);
+  }, [artifacts, week, destination, horizonFromReadingMin, arrivalTs, forecastExpired]);
 
   /**
    * What the list draws: the head of the ranking, grown if the cap would
    * otherwise drop a nearby lot the ranker kept on purpose. See `listRows`.
    */
   const listed = useMemo(() => listRows(ranked, LIST_LIMIT), [ranked]);
+
+  /**
+   * How much history stands behind each rendered card's arrival hour, by lot id.
+   *
+   * A map rather than a callback because `LotList` is memoised: a fresh closure
+   * every render would defeat that memo on every mouse move across the list,
+   * which is the exact cost the memo was added to avoid. Built over `listed`
+   * alone -- twenty rows, not the whole 1,075-lot roster -- because a card is
+   * the only thing that shows a confidence grade.
+   */
+  const supportById = useMemo(
+    () => new Map(listed.map((r) => [r.id, supportForLot(week, r.lot, arrivalTs)])),
+    [listed, week, arrivalTs],
+  );
 
   /**
    * The destination is somewhere this app cannot answer for.
@@ -769,6 +965,7 @@ export default function App() {
             ageMin={ageMin ?? 0}
             arrivalTs={arrivalTs}
             horizonFromReadingMin={horizonFromReadingMin}
+            supportById={supportById}
             bestId={bestId}
             selectedId={selectedLotId}
             onSelect={selectLot}

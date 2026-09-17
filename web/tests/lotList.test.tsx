@@ -22,7 +22,10 @@ import type { Lot } from "../src/types";
 const BASE = 1788677280;
 const lot = (id: string): Lot => ({ i: 0, id, n: `車場 ${id}`, a: "信義區", y: 25.03, x: 121.56, c: 400, t: "民營停車場", p: { k: "exact", lo: 60, hi: 60 }, f: 38 });
 const row = (id: string): Ranked => ({ lot: lot(id), id, index: 0, probability: 0.86, hourly: 60, perEntry: null, priceKnown: true, meters: 320, walkMin: 4, cost: 100 });
-const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, arrivalTs: BASE + 22 * 60, horizonFromReadingMin: 22, bestId: null, onSelect: vi.fn() };
+// An empty `supportById` is what an unfetched `week.bin` looks like: every card
+// reads 0, which honestly says there is no history behind this hour yet. This
+// file is about the reorder animation, so that is all it needs.
+const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, arrivalTs: BASE + 22 * 60, horizonFromReadingMin: 22, supportById: new Map<string, number>(), bestId: null, onSelect: vi.fn() };
 
 const A = row("A");
 const B = row("B");

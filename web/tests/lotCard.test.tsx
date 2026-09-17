@@ -11,7 +11,10 @@ const lot = (over: Partial<Lot> = {}): Lot => ({ i: 0, id: "TPE1", n: "台北101
 const row = (over: Partial<Ranked> = {}, lotOver: Partial<Lot> = {}): Ranked => ({
   lot: lot(lotOver), id: lotOver.id ?? "TPE1", index: 0, probability: 0.86, hourly: 60, perEntry: null, priceKnown: true, meters: 320, walkMin: 4, cost: 100, ...over,
 });
-const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, arrivalTs: BASE + 22 * 60, horizonFromReadingMin: 22, onSelect: vi.fn(), index: 0 };
+// `support: 0` is the honest default, not a placeholder: a card the week table
+// has never been consulted for has no history behind this half-hour to cite.
+// Tests that want history say so themselves.
+const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, arrivalTs: BASE + 22 * 60, horizonFromReadingMin: 22, support: 0, onSelect: vi.fn(), index: 0 };
 
 beforeEach(() => vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} }))));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -98,6 +101,21 @@ describe("LotCard", () => {
     expect(within(card).getByRole("note")).toHaveTextContent(t("en").confidenceThin);
   });
 
+  it("counts the support it was handed, not one it decided on", () => {
+    // The other side of the test above, now that `support` is a prop rather
+    // than a literal in this file: the same far horizon, the same lot, and
+    // four weeks of this half-hour behind it reads high and says how many.
+    // A card that ignored its `support` prop would still read "low · thin"
+    // here, and one that rounded the weeks differently would name the wrong
+    // number.
+    render(<ol><LotCard row={row()} {...props} horizonFromReadingMin={100} support={26} best={false} selected={false} /></ol>);
+    const card = screen.getByTestId("lot-row");
+    fireEvent.click(within(card).getByRole("button", { name: /confidence.*high/i }));
+    expect(within(card).getByRole("note")).toHaveTextContent(
+      fillTemplate(t("en").confidenceWeeksTemplate, { n: 4 }),
+    );
+  });
+
   it("keeps the name Chinese under English and selects on tap", () => {
     const onSelect = vi.fn();
     render(<ol><LotCard row={row()} {...props} onSelect={onSelect} best={false} selected /></ol>);
@@ -110,12 +128,34 @@ describe("LotCard", () => {
 });
 
 describe("LotList", () => {
+  const rows = () => [row(), row({ id: "TPE2", probability: 0.5 }, { id: "TPE2", n: "二號停車場" })];
+
   it("is an ordered list keyed by lot, with exactly one best pick", () => {
-    const rows = [row(), row({ id: "TPE2", probability: 0.5 }, { id: "TPE2", n: "二號停車場" })];
-    render(<LotList rows={rows} {...props} bestId="TPE1" selectedId={null} />);
+    render(<LotList rows={rows()} {...props} supportById={new Map()} bestId="TPE1" selectedId={null} />);
     const list = screen.getByTestId("lot-list");
     expect(list.tagName).toBe("OL");
     expect(within(list).getAllByTestId("lot-row").length).toBe(2);
     expect(within(list).getAllByText(t("en").bestPick).length).toBe(1);
+  });
+
+  it("gives each card its own lot's support, not the first row's", () => {
+    // The horizon is past MEDIUM_MAX_MIN, so nothing but support can earn a
+    // grade here and the two cards must disagree: five weeks of history for
+    // one lot, none for the other. A list that looked the support up once and
+    // reused it -- or keyed it by position rather than by lot id -- would
+    // render two identical pills.
+    render(
+      <LotList
+        rows={rows()}
+        {...props}
+        horizonFromReadingMin={100}
+        supportById={new Map([["TPE1", 30]])}
+        bestId={null}
+        selectedId={null}
+      />,
+    );
+    const [first, second] = within(screen.getByTestId("lot-list")).getAllByTestId("lot-row");
+    expect(within(first!).getByRole("button", { name: /confidence.*high/i })).toBeInTheDocument();
+    expect(within(second!).getByRole("button", { name: /confidence.*low/i })).toBeInTheDocument();
   });
 });

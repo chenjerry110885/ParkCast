@@ -50,6 +50,18 @@ export interface LotCardProps {
   arrivalTs: number;
   /** Minutes from the reading to `arrivalTs`, for the confidence pill. */
   horizonFromReadingMin: number;
+  /**
+   * Observations behind this lot's half-hour-of-week cell in `week.bin`
+   * (`week.ts`'s `probabilityAt`), for the confidence pill.
+   *
+   * `0` is a real answer and the honest default: it says "we have not watched
+   * this lot at this hour often enough yet", which is exactly true before
+   * `week.bin` has been fetched. It is never a stand-in for a number nobody
+   * looked up -- a non-zero value here claims weeks of history for this
+   * half-hour, and `lotCard.test.tsx` opens the popover to read that claim
+   * back.
+   */
+  support: number;
   /** Whether this is the list's single top pick. */
   best: boolean;
   /** Whether this card is the one currently selected on the map. */
@@ -79,6 +91,7 @@ export function LotCard({
   ageMin,
   arrivalTs,
   horizonFromReadingMin,
+  support,
   best,
   selected,
   onSelect,
@@ -91,9 +104,7 @@ export function LotCard({
   const confidence = confidenceFor({
     minutesFromReading: horizonFromReadingMin,
     readingAgeMin: ageMin,
-    // Task 10 wires the week table through to the card; until then there is
-    // no history behind this hour to report, and 0 says exactly that.
-    support: 0,
+    support,
     updating: row.lot.u === undefined,
     probability: row.probability,
   });

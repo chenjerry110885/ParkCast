@@ -22,6 +22,8 @@ function site(overrides = {}) {
     "GET /artifacts/grid.bin": () => new Response(gridBytes(7, NOW / 1000 - 240)),
     "GET /artifacts/lots.json": () => new Response(JSON.stringify({ roster_id: 7 })),
     "PUT /artifacts/latest": () => new Response("", { status: 401 }),
+    // Built an hour ago: the daily rebuild is keeping up.
+    "HEAD /artifacts/week.bin": () => new Response(null, { headers: { "last-modified": new Date(NOW - 3_600_000).toUTCString() } }),
     "HEAD /basemap/tiles/0/0/0.pbf": () => new Response(null),
     "HEAD /basemap/fonts/Noto%20Sans%20Regular/0-255.pbf": () => new Response(null),
     "HEAD /places/taipei.json": () => new Response(null),
@@ -82,6 +84,38 @@ test("only warns when nothing is stored yet, so the first release is not rolled 
   });
   assert.deepEqual(failures, []);
   assert.ok(warnings.some((w) => w.includes("no forecast stored yet")));
+});
+
+test("only warns when no week table is published, because the site works without one", async () => {
+  const { failures, warnings } = await smoke(ORIGIN, {
+    fetchImpl: site({ "HEAD /artifacts/week.bin": () => new Response(null, { status: 503 }) }),
+    now: () => NOW,
+  });
+  assert.deepEqual(failures, []);
+  assert.ok(warnings.some((w) => w.includes("week.bin") && w.includes("503")));
+});
+
+test("only warns when the week table is older than 48 h, not at 47", async () => {
+  const at = (hoursOld) =>
+    site({ "HEAD /artifacts/week.bin": () => new Response(null, { headers: { "last-modified": new Date(NOW - hoursOld * 3_600_000).toUTCString() } }) });
+
+  const fresh = await smoke(ORIGIN, { fetchImpl: at(47), now: () => NOW });
+  assert.deepEqual([fresh.failures, fresh.warnings], [[], []]);
+
+  const stale = await smoke(ORIGIN, { fetchImpl: at(49), now: () => NOW });
+  assert.deepEqual(stale.failures, []);
+  assert.ok(stale.warnings.some((w) => w.includes("49 h old")));
+});
+
+test("only warns when the week table will not say when it was built", async () => {
+  // A worker that stopped sending Last-Modified would otherwise make the age
+  // check above silently vacuous rather than visibly unanswerable.
+  const { failures, warnings } = await smoke(ORIGIN, {
+    fetchImpl: site({ "HEAD /artifacts/week.bin": () => new Response(null) }),
+    now: () => NOW,
+  });
+  assert.deepEqual(failures, []);
+  assert.ok(warnings.some((w) => w.includes("does not say when it was built")));
 });
 
 test("does not throw when a request rejects, and names the failing path", async () => {

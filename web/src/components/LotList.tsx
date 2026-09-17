@@ -27,6 +27,16 @@ export interface LotListProps {
   arrivalTs: number;
   /** Minutes from the reading to `arrivalTs`, for each card's confidence pill. */
   horizonFromReadingMin: number;
+  /**
+   * Observations behind each lot's half-hour-of-week cell (`week.ts`'s
+   * `probabilityAt`), by lot id, for each card's confidence pill.
+   *
+   * A map rather than a lookup function so this component's `memo` still holds:
+   * see the note on the export below. A row missing from it reads as `0`, which
+   * is the same thing an unfetched `week.bin` honestly says -- no history to
+   * point at yet.
+   */
+  supportById: ReadonlyMap<string, number>;
   /** Id of the list's single top pick, or `null` when none applies. */
   bestId: string | null;
   /** Id of the card currently selected on the map, or `null`. */
@@ -43,6 +53,7 @@ function LotListInner({
   ageMin,
   arrivalTs,
   horizonFromReadingMin,
+  supportById,
   bestId,
   selectedId,
   onSelect,
@@ -108,6 +119,7 @@ function LotListInner({
           ageMin={ageMin}
           arrivalTs={arrivalTs}
           horizonFromReadingMin={horizonFromReadingMin}
+          support={supportById.get(row.id) ?? 0}
           best={row.id === bestId}
           selected={row.id === selectedId}
           onSelect={onSelect}

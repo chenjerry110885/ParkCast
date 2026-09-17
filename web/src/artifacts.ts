@@ -1,12 +1,15 @@
 /**
- * Read the two static artifacts the collector publishes. There is no API:
- * the browser downloads `grid.bin` and `lots.json` and does the rest locally.
+ * Read the static artifacts the collector publishes. There is no API: the
+ * browser downloads `grid.bin` and `lots.json` -- and `week.bin`, but only if
+ * it is ever asked about a time past the grid's horizon -- and does the rest
+ * locally.
  *
  * The binary layout is fixed by `src/parkcast/artifacts.py`, which packs with
  * struct format `<4sBIIHBBI` -- little-endian, no alignment padding -- so the
  * offsets below are byte-identical to little-endian `DataView` reads.
  */
-import type { Grid, Lot, LotsDoc } from "./types";
+import type { Grid, Lot, LotsDoc, WeekTable } from "./types";
+import { parseWeek } from "./week";
 
 /** `magic(4) version(1) generatedAt(4) baseDataTs(4) nLots(2) nHorizons(1) stepMin(1) rosterId(4)`. */
 export const HEADER_SIZE = 21;
@@ -201,4 +204,57 @@ export async function loadArtifacts(base: string): Promise<{ grid: Grid; lots: L
     );
   }
   return { grid, lots: fresh };
+}
+
+/**
+ * In-flight and completed `week.bin` loads, one per URL.
+ *
+ * The pair above is refetched every two minutes, because the forecast behind it
+ * ages. This one is not: `week.bin` is a climatology rebuilt once a day, and it
+ * is 715 KB. One load per session is the whole point, so the promise is what is
+ * cached rather than the result -- two callers that ask while the first request
+ * is still in the air share it instead of racing to download the same file
+ * twice.
+ */
+const weekCache = new Map<string, Promise<WeekTable | null>>();
+
+/** Test-only: drops every cached/in-flight load, so each test starts clean. */
+export function resetWeekCache(): void {
+  weekCache.clear();
+}
+
+/**
+ * `week.bin`, fetched at most once per URL per session.
+ *
+ * A failure -- a 503 from a Worker whose collector has not uploaded one yet, a
+ * dead network, a body `parseWeek` refuses -- resolves to `null` rather than
+ * rejecting, and **drops itself from the cache on the way out** so the next
+ * caller genuinely retries. That second half is the load-bearing one, and it is
+ * lifted verbatim from `loadPlaceIndex` in `./places`: without it the first
+ * failure is the last word for the rest of the session, which for an artifact
+ * that is only fetched on demand means one unlucky moment costs every later
+ * question the user asks.
+ *
+ * `null` is also why this returns rather than throws. There is exactly one
+ * honest thing to show for an arrival nothing covers -- "no data" -- and a
+ * rejected promise would have to be translated into that same `null` by every
+ * caller anyway. What must never happen is the absence being filled in with a
+ * number computed for some other time; see `App.tsx`'s `probabilityForLot`.
+ */
+export function loadWeek(base: string): Promise<WeekTable | null> {
+  const url = artifactUrl(base, "week.bin");
+  const pending = weekCache.get(url);
+  if (pending) return pending;
+  const attempt = (async () => {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`week.bin: HTTP ${res.status}`);
+      return parseWeek(await res.arrayBuffer());
+    } catch {
+      weekCache.delete(url);
+      return null;
+    }
+  })();
+  weekCache.set(url, attempt);
+  return attempt;
 }
