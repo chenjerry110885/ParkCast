@@ -388,6 +388,14 @@ Include the case the whole change exists for: **21:20 tomorrow with four weeks o
 ## Verification before the branch is finished
 
 - Every suite green: Python, web, Worker, scripts.
+- **The Python suite must also be run in the main checkout, not only in the worktree.** Three tests
+  read the real collected corpus and *skip* wherever `data/` is absent:
+  `tests/test_artifacts_integration.py:36` and `tests/test_history_bounds.py:39,60`
+  ("no collected data on this machine"). A worktree run is therefore three tests weaker than
+  main's, and `test_artifacts_integration.py` is the very test that caught the id-convention
+  defect at merge on the collector branch. Stage A modifies `artifacts.py`. A green worktree run
+  is necessary and not sufficient. Do **not** close the gap by copying `data/` into the worktree:
+  the live collector owns it, and a mid-write snapshot would make a passing test meaningless.
 - `week.bin`'s real size and gzip measured against the spec's ≤ 600 KB gate — if it exceeds it, the fallback is a narrower support byte, **not** a wider gate.
 - A browser pass on both layouts, light and dark: pick a time tomorrow evening and confirm the probability, the confidence pill and its reason all change coherently, and that nothing animates at rest.
 - `npm run deploy:check --prefix worker` clean. The release itself is the user's.
