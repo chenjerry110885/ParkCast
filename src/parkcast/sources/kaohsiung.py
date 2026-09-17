@@ -20,6 +20,16 @@ from parkcast.sources import SourceTick, geo, http
 CITY = "kaohsiung"
 URL = "https://kpp.tbkc.gov.tw/ParkingLocation/ParkingLotPost"
 
+# Measured in-container 2026-09-17 (python 3.13.15, OpenSSL 3.5.7, certifi
+# 2026.07.22): a default-context fetch of this URL fails with "certificate
+# verify failed: Missing Subject Key Identifier", and clearing
+# `ssl.VERIFY_X509_STRICT` -- and nothing else -- makes it verify. The
+# certificate without the SKI is certifi's own `TWCA Global Root CA`, the
+# trust anchor at the top of this chain; all five certificates kpp.tbkc.gov.tw
+# actually sends carry one. Hostname checking, CERT_REQUIRED and the path to
+# that trusted root all stay in force. See `http.TlsPolicy`.
+TLS = http.TlsPolicy(x509_strict=False)
+
 
 def _serves_cars(raw: object) -> bool:
     """Does this lot have car spaces at all?
@@ -104,4 +114,7 @@ class Source:
     city = CITY
 
     def fetch(self, *, now: int) -> SourceTick:
-        return parse(http.post_json(URL, body=b"{}", content_type="application/json"), now=now)
+        return parse(
+            http.post_json(URL, body=b"{}", content_type="application/json", tls=TLS),
+            now=now,
+        )

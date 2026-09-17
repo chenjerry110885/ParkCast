@@ -15,6 +15,18 @@ dist/
 .wrangler/
 docker/secrets/
 *.pem
+# ONE named exception to `*.pem`: the CA intermediate that
+# www.parkinginfo.ntpc.gov.tw does not send, without which New Taipei cannot
+# build a chain and fails every tick (docs/sources.md, "Known limits"). It is a
+# PUBLIC certificate and nothing else -- no private key is committed anywhere
+# in this repo, and none should ever be. The file's own header block says what
+# it is and where it came from.
+#
+# Keep this list at one entry. The rule above is a deliberate guard, and a hole
+# carved in it for convenience is how such guards stop meaning anything; test
+# fixtures in particular never need one (see tests/test_sources_tls.py, which
+# proves certificate rejection with a public certificate and no key at all).
+!src/parkcast/sources/twca-ssl-ca-2023.pem
 worker/node_modules/
 web/.dev-artifacts/
 # Brainstorm mockups and SDD ledgers (superpowers plugin scratch)

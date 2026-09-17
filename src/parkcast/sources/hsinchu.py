@@ -54,6 +54,17 @@ from parkcast.sources import SourceTick, geo, http
 CITY = "hsinchu"
 URL = "https://hispark.hccg.gov.tw/OpenData/GetParkInfo"
 
+# Measured in-container 2026-09-17 (python 3.13.15, OpenSSL 3.5.7, certifi
+# 2026.07.22): a default-context fetch of this URL fails with "certificate
+# verify failed: Missing Subject Key Identifier", and clearing
+# `ssl.VERIFY_X509_STRICT` -- and nothing else -- makes it verify. Same cause
+# as Kaohsiung: both chains end at certifi's `TWCA Global Root CA`, and it is
+# that root, not either server's own certificates, that carries no Subject Key
+# Identifier. Both certificates hispark.hccg.gov.tw sends have one. Hostname
+# checking, CERT_REQUIRED and the path to that trusted root all stay in force.
+# See `http.TlsPolicy`.
+TLS = http.TlsPolicy(x509_strict=False)
+
 
 def _parse_update_time(raw: object) -> int | None:
     """'2026-09-16T09:01:45.08' (Taipei local) -> epoch seconds, or None."""
@@ -164,4 +175,4 @@ class Source:
     city = CITY
 
     def fetch(self, *, now: int) -> SourceTick:
-        return parse(http.get_json(URL), now=now)
+        return parse(http.get_json(URL, tls=TLS), now=now)

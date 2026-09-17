@@ -249,8 +249,10 @@ honestly.
 
 ## Known limits — read before trusting a number
 
-Four things that are **true today, deliberately not fixed, and easy to trip over**. None is a bug in
-an adapter; each is a place where a measurement means less than it looks like it does.
+Four things that are **true today and easy to trip over**. The first three are deliberately not
+fixed; the fourth (TLS) was fixed on 2026-09-17 and is kept here because the shape of the fix is
+something anyone reading a certificate error later needs to know. None is a bug in an adapter; each
+is a place where a measurement means less than it looks like it does.
 
 - **`evaluate.py` is not scoped per city.** Its origin selection and its labels run over the whole
   store. With realistic clock phases across six cities it selected **only Kaohsiung origins and
@@ -272,15 +274,65 @@ an adapter; each is a place where a measurement means less than it looks like it
   learning to stamp its records, or a per-fetch content hash (an unchanged hash over N consecutive
   polls is the evidence a record timestamp would give directly). `ok=False` on an outright failure is
   the only thing those two lines can honestly report.
-- **TLS verification failed from the host for three of six feeds, and has not been checked from
-  inside the container.** During review on 2026-09-16, host Python rejected **New Taipei** (missing
-  intermediate certificate) and **Kaohsiung** and **Hsinchu** (missing Subject Key Identifier, which
-  OpenSSL 3.x requires), while `curl` succeeded against all three. That is a CA-trust question about
-  the machine, not a defect in any adapter, and it **must be checked from inside the collector
-  container at rollout** — see the rollout checklist in
-  [`state-of-play.md`](state-of-play.md). **Never work around it with `verify=False`**: that turns a
-  trust question into a silent acceptance of any certificate, on feeds this project already treats as
-  strangers' processes.
+- **Three of six feeds need a per-source TLS policy to verify at all — fixed 2026-09-17, but the
+  relaxation is a standing thing to know about.** All six now verify from inside the collector image
+  (python 3.13.15, OpenSSL 3.5.7, certifi 2026.07.22), each by the narrowest fix that works. **No
+  feed is fetched unverified; there is no `verify=False` anywhere, and `tests/test_sources_tls.py`
+  fails the suite if anyone adds one.** Measured in-container 2026-09-17 — every line below is a
+  reproduced result, not an inference:
+
+  | Host | Without a policy | What it gets, and why |
+  |---|---|---|
+  | `kpp.tbkc.gov.tw` (kaohsiung) | `certificate verify failed: Missing Subject Key Identifier` | `TlsPolicy(x509_strict=False)` — clears **only** `ssl.VERIFY_X509_STRICT`, which alone makes it verify |
+  | `hispark.hccg.gov.tw` (hsinchu) | same | same |
+  | `www.parkinginfo.ntpc.gov.tw` (newtaipei) | `unable to get local issuer certificate` | `TlsPolicy(extra_ca_file=…)` — the server sends **only its leaf**; clearing the strict flag does **not** help. Strict stays **on** |
+
+  ### The SKI failure is not a misconfigured city server. Do not report it to them.
+
+  **The certificate missing its Subject Key Identifier is `TWCA Global Root CA` — a root in
+  certifi's own bundle, the trust anchor at the top of both chains.** Every certificate the two
+  servers actually send carries an SKI: all five from `kpp.tbkc.gov.tw`, both from
+  `hispark.hccg.gov.tw` (enumerated 2026-09-17). The chains are fine. The anchor is a 2010-vintage
+  root that predates the RFC 5280 formality Python 3.13 began enforcing when it turned
+  `VERIFY_X509_STRICT` on by default in `create_default_context()` — a rule browsers and `curl` have
+  never applied, which is why `curl` succeeded against all three during the 2026-09-16 host review.
+
+  So this is not "two municipal servers are misconfigured". It is "**a root in the public trust store
+  predates a requirement Python 3.13 now enforces, and no site chaining to that root can verify from
+  modern Python**" — Kaohsiung and Hsinchu are simply two such sites. **Neither city can fix it**;
+  nothing they could change about their own certificates or server configuration would help, and
+  emailing a city government about their TLS setup would waste a day and be wrong. It resolves by
+  itself only when Mozilla rotates or removes that root and certifi ships the change.
+
+  Clearing the flag drops that encoding formality and nothing else: hostname checking,
+  `CERT_REQUIRED`, signatures, validity, basic constraints and the path to a trusted root all still
+  apply, and `tests/test_sources_tls.py` proves each policy still rejects an untrusted certificate.
+  **The relaxation is per source.** Taipei, Tainan and Taoyuan declare no policy and reach `requests`
+  on the untouched default path; there is no global switch to reach for.
+
+  New Taipei's intermediate ships as [`src/parkcast/sources/twca-ssl-ca-2023.pem`](../src/parkcast/sources/twca-ssl-ca-2023.pem),
+  whose own header block carries the provenance and the chain proof. It **adds no trust anchor**: its
+  issuer, `TWCA CYBER Root CA`, is already a certifi root, so it only lets a path complete — and it is
+  loaded *in addition to* certifi's bundle, never instead of it (121 CAs → 122, asserted by test).
+  It needs `[tool.setuptools.package-data]` in `pyproject.toml` to reach the image: the container
+  imports `parkcast` out of site-packages, not out of `/app/src`, so `COPY src ./src` alone puts the
+  file in the image and still out of reach.
+
+  **What breaks, and how you will hear about it.** The intermediate expires 2033-02-23; a test
+  asserts its validity window, so it fails the suite before it fails a fetch. If it is rotated,
+  swapped or expires unnoticed, or if a chain breaks, the fetch raises `requests.exceptions.SSLError`,
+  `collect_all` records `ok=False`, and the source reads **`FAILED`** on its per-source health line.
+  There is no path by which it degrades to unverified.
+
+  **After any dependency bump — `certifi` above all, but also `requests`, `urllib3` or the base
+  Python image — re-run the five-city check inside the container.** The expiry test is a tripwire for
+  the shipped intermediate only; it says nothing about the trust store around it, and every reason
+  these three feeds need a policy lives in that store. A certifi update can move this picture in
+  either direction: dropping or rotating `TWCA Global Root CA` would break Kaohsiung and Hsinchu
+  outright (or make their relaxation unnecessary), and adding `TWCA SSL Certification Authority` as a
+  root would make the shipped intermediate redundant. Nothing in the unit suite can see any of that,
+  because none of it can reach the real feeds. The check is the script in the rollout notes; all five
+  must read `OK`.
 
 ## Turning cities on: `PARKCAST_CITIES`
 

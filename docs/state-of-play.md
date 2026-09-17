@@ -286,9 +286,11 @@ single task's own review could see. All six are fixed on the branch:
 | **A failed migration silently switched off withholding** | The log called it "precision"; measured, `liveness.not_updating` returns `{}` for a Taipei lot frozen 48 h, so stuck sensors publish as certainties again for about a day. Comment and log message corrected. |
 | **The staged rollout had no mechanism** | `PARKCAST_CITIES` now selects the enabled cities, validated and logged at boot; default is all six. |
 
-Three further findings are **recorded and deliberately not fixed** — `evaluate.py`'s missing per-city
-scoping, `liveness`'s Taipei-cadence constants, and TLS verification failing from the host for three
-of six feeds. See "Known limits" in [`docs/sources.md`](sources.md) and the rollout checklist below.
+Two further findings are **recorded and deliberately not fixed** — `evaluate.py`'s missing per-city
+scoping and `liveness`'s Taipei-cadence constants. A third, TLS verification failing for three of six
+feeds, **was fixed on 2026-09-17**: all six now verify from inside the container, each by the
+narrowest per-source policy that works, with no feed fetched unverified. See "Known limits" in
+[`docs/sources.md`](sources.md) and the rollout checklist below.
 
 **The hot-store id migration has never run in production.** `store.migrate_to_namespaced_ids` runs
 once at startup (`__main__.main`, before anything else touches the store) and rewrites every
@@ -351,13 +353,15 @@ do today.
    The remaining steps, unchanged:
    1. ~~**Back up `data/hot.sqlite`**~~ — done, see above. Keep the backup until the corpus has been
       through a compaction cycle or two on the new ids.
-   2. **Check TLS from inside the container, before enabling anything but Taipei.** During review,
-      host Python failed certificate verification for **New Taipei** (missing intermediate),
-      **Kaohsiung** and **Hsinchu** (missing Subject Key Identifier under OpenSSL 3.x), while `curl`
-      succeeded against all three. The container has a different trust store, so this must be
-      measured where the collector actually runs — one `python -c` per URL inside
-      `docker-collector:latest`. **Never `verify=False`.** If a feed genuinely needs an intermediate,
-      the fix is the container's CA bundle, not switching verification off.
+   2. ~~**Check TLS from inside the container, before enabling anything but Taipei.**~~ — done
+      2026-09-17, and fixed. Measured inside `docker-collector:latest`, **New Taipei** (missing
+      intermediate), **Kaohsiung** and **Hsinchu** (missing Subject Key Identifier) all failed there
+      too, exactly as they had on the host. Each now carries its own `sources.http.TlsPolicy`: the
+      missing intermediate is shipped for New Taipei with strict verification still on, and Kaohsiung
+      and Hsinchu clear `ssl.VERIFY_X509_STRICT` and nothing else. All five non-Taipei sources fetch
+      OK in-container; Taipei's transport was deliberately not touched. Nothing was worked around
+      with `verify=False`, and a test now fails the suite if anyone adds one. Full detail, including
+      the certificate's provenance, is under "Known limits" in [`docs/sources.md`](sources.md).
    3. ~~Restart with **`PARKCAST_CITIES=taipei`**~~ — done; the boot log read
       `collecting 1 of 6 cities: taipei` and publishing resumed unchanged.
    4. **`PARKCAST_CITIES=taipei,newtaipei`.** Let it run a day, then read `data/cold/`'s actual growth
