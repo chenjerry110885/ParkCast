@@ -83,7 +83,9 @@ export function parseWeek(buf: ArrayBuffer): WeekTable {
   // rather than fail loudly, so it is refused here instead.
   if (nBuckets !== N_BUCKETS || bucketMin !== BUCKET_MIN) {
     throw new Error(
-      `week.bin declares ${nBuckets} buckets at ${bucketMin} min, this client reads ${N_BUCKETS} at ${BUCKET_MIN} min`,
+      `week.bin declares ${nBuckets} buckets at ${bucketMin} min, this client reads ${N_BUCKETS} at ${BUCKET_MIN} min -- ` +
+        `this file was built by a different version of the encoder than this client understands; rebuild week.bin ` +
+        `with a matching encoder, or update this client to the bucket geometry it now writes.`,
     );
   }
 
@@ -138,9 +140,21 @@ export function weekBucket(ts: number): number {
  * `p` is `null` when the bucket has no observation for this lot -- see
  * `WEEK_UNKNOWN` -- and a real number (including `0`) otherwise. `support` is
  * the raw observation count behind that bucket, capped at 255 by the encoder;
- * it is `0` whether or not `p` is `null`, since an unshrunk bucket still
+ * it can be `0` whether or not `p` is `null`, since an unshrunk bucket still
  * falls back through the lot and citywide tiers and can carry a probability
  * with zero of its own support.
+ *
+ * `ts` is validated for the same reason `lotIndex` is: `weekBucket` does no
+ * range-checking of its own and happily turns a non-finite `ts` into a
+ * non-finite bucket, which the lookup below would then read as `cells[NaN]`
+ * -- `undefined`, not a thrown error -- and hand back a `NaN` `p`. `typeof
+ * NaN === "number"`, so that `NaN` would clear every "is this a real
+ * probability" check a caller writes and reach a driver as a confident
+ * forecast, exactly the failure `WEEK_UNKNOWN` exists to prevent. `ts` is not
+ * reachable from anywhere in this app yet, but the time picker that will
+ * drive it reads an HTML `<select>`, and a malformed or empty selection is
+ * precisely how a `NaN` timestamp would arrive here. Throwing catches that
+ * at the seam instead of laundering it into a plausible-looking number.
  */
 export function probabilityAt(
   table: WeekTable,
@@ -149,6 +163,9 @@ export function probabilityAt(
 ): { p: number | null; support: number } {
   if (!Number.isInteger(lotIndex) || lotIndex < 0 || lotIndex >= table.nLots) {
     throw new RangeError(`lot index ${lotIndex} is outside 0..${table.nLots - 1}`);
+  }
+  if (!Number.isFinite(ts)) {
+    throw new RangeError(`ts ${ts} is not a finite timestamp`);
   }
   const bucket = weekBucket(ts);
   const offset = (lotIndex * N_BUCKETS + bucket) * 2;
@@ -175,10 +192,38 @@ export function probabilityAt(
  * for the reading term to contribute, so this falls back to climatology
  * alone, exactly as `Blend.predict` returns `far` outright when its own
  * `near` is `None`.
+ *
+ * `climatologyP`, by contrast, is a plain `number` -- this signature has no
+ * way to say "no climatology either." `probabilityAt` can return `p: null`
+ * for a bucket this lot has never been observed in, and a caller sitting at
+ * that seam must resolve the `null` *before* reaching this function, never
+ * by passing it through as `p ?? 0`. Zero is a claim -- "reliably full at
+ * this hour" -- and coercing an absence of history into that claim is the
+ * same honesty violation `WEEK_UNKNOWN` exists to prevent, just moved one
+ * function over. Python's `Blend.predict` can express the symmetric case
+ * directly: when its `far` (climatology) is `None`, it returns `near`
+ * (persistence) outright, with no blending at all. `blend`'s signature
+ * cannot represent "climatology unavailable" as an input, so that fallback
+ * is the caller's to implement -- resolve to persistence alone (or to no
+ * prediction, if `observedFree` is unavailable too) before ever calling
+ * `blend`, rather than inventing a climatology figure to hand it.
+ *
+ * `minutesFromReading` is clamped to `0` here, which is a deliberate
+ * divergence from `Blend.predict`: the server only ever calls it with a
+ * horizon from `grid.horizons()`, a fixed schedule of positive step
+ * multiples, so a negative horizon never reaches the Python side and it does
+ * not guard against one. This client's caller is a user-driven time picker,
+ * which can legitimately be pointed at a moment before the reading it is
+ * blending against. Left unclamped, a negative `minutesFromReading` drives
+ * `weight` above `1` (`blend(5, 0.2, -60)` returns `3.4`), a "probability"
+ * greater than one that is exactly the kind of dishonest number this module
+ * exists to refuse. Clamping the horizon to `0` instead reads as "no earlier
+ * than the reading itself" -- the most confidence the reading can ever lend
+ * -- rather than extrapolating false certainty backwards in time.
  */
 export function blend(observedFree: number | null, climatologyP: number, minutesFromReading: number): number {
   if (observedFree === null) return climatologyP;
-  const weight = Math.pow(0.5, minutesFromReading / BLEND_HALF_LIFE_MIN);
+  const weight = Math.pow(0.5, Math.max(0, minutesFromReading) / BLEND_HALF_LIFE_MIN);
   const near = observedFree >= 1 ? 1 : 0;
   return weight * near + (1 - weight) * climatologyP;
 }

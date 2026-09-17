@@ -147,13 +147,15 @@ describe("probabilityAt", () => {
   });
 
   it("indexes by the actual time-of-week bucket, not just any cell", () => {
+    // Pulled from the same fixture `weekBucket` is checked against above,
+    // rather than hand-typing the bucket number a second time here.
+    const { ts: mondayMidnight, bucket } = WEEK_BUCKET_FIXTURE.rows.find((r) => r.label === "Mon 00:00 Taipei")!;
     const row = uniformRow(0, 0);
-    // Bucket 192 is Monday 00:00 Taipei; give it a distinct, recognisable cell.
-    row[192 * 2] = 42;
-    row[192 * 2 + 1] = 7;
+    // Give that bucket a distinct, recognisable cell.
+    row[bucket * 2] = 42;
+    row[bucket * 2 + 1] = 7;
     const table = parseWeek(makeWeek(1, [row]));
-    const mondayMidnight = 1789315200; // fixture-confirmed bucket 192
-    expect(weekBucket(mondayMidnight)).toBe(192);
+    expect(weekBucket(mondayMidnight)).toBe(bucket);
     expect(probabilityAt(table, 0, mondayMidnight)).toEqual({ p: 0.42, support: 7 });
     // A different bucket on the same row reads its own (zeroed) cell.
     expect(probabilityAt(table, 0, mondayMidnight - 3600).p).toBe(0);
@@ -163,6 +165,18 @@ describe("probabilityAt", () => {
     const table = parseWeek(makeWeek(1, [uniformRow(50, 1)]));
     expect(() => probabilityAt(table, 1, 1789315200)).toThrow(RangeError);
     expect(() => probabilityAt(table, -1, 1789315200)).toThrow(RangeError);
+  });
+
+  it("throws for a non-finite ts instead of laundering it into a NaN probability", () => {
+    // A malformed or empty <select> value is exactly how NaN would arrive
+    // here from the (not yet built) time picker -- see the docstring above
+    // `probabilityAt`. Without this guard, weekBucket(NaN) is NaN, the cell
+    // lookup reads cells[NaN] (undefined, not a thrown error), and p comes
+    // back NaN: a number, passing any "is this real" check a caller writes.
+    const table = parseWeek(makeWeek(1, [uniformRow(50, 1)]));
+    expect(() => probabilityAt(table, 0, NaN)).toThrow(RangeError);
+    expect(() => probabilityAt(table, 0, Infinity)).toThrow(RangeError);
+    expect(() => probabilityAt(table, 0, -Infinity)).toThrow(RangeError);
   });
 });
 
@@ -191,5 +205,17 @@ describe("blend", () => {
   it("treats any observedFree >= 1 as full confidence in availability", () => {
     expect(blend(1, 0, 0)).toBe(1);
     expect(blend(99, 0, 0)).toBe(1);
+  });
+
+  it("clamps a negative minutesFromReading instead of returning a probability above 1", () => {
+    // A user-driven time picker can legitimately ask about a moment before
+    // the reading it is blending against, unlike the server, which only ever
+    // calls this formula with a positive step from grid.horizons(). Left
+    // unclamped, weight = 0.5 ** (-60/30) = 4 and blend(5, 0.2, -60) would
+    // return 3.4 -- a "probability" above 1. Clamping to a 0-minute horizon
+    // instead caps confidence at exactly what the reading itself supports.
+    expect(blend(5, 0.2, -60)).toBe(blend(5, 0.2, 0));
+    expect(blend(5, 0.2, -60)).toBe(1);
+    expect(blend(0, 0.9, -120)).toBe(blend(0, 0.9, 0));
   });
 });
