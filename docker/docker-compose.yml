@@ -29,10 +29,15 @@ services:
       # is set to Taipei alone on purpose, because the spec's rollout (§9) and
       # the runbook in docs/state-of-play.md both start there and a first boot
       # after the merge must not turn six untried feeds on at once. Widen it
-      # one step at a time -- "taipei,newtaipei", then the rest -- restarting
-      # between steps; an unknown name stops the boot and names the valid ones.
-      # See docs/sources.md, "Turning cities on".
-      PARKCAST_CITIES: taipei
+      # one step at a time, restarting between steps; an unknown name stops the
+      # boot and names the valid ones. See docs/sources.md, "Turning cities on".
+      #
+      # 2026-09-17: all six. Tainan and Taoyuan joined Taipei first because they
+      # were the only others that verified; New Taipei, Kaohsiung and Hsinchu
+      # followed once their certificate chains were fixed properly, per source
+      # and without weakening verification (see docs/sources.md, "Known limits",
+      # and src/parkcast/sources/http.py's TlsPolicy).
+      PARKCAST_CITIES: taipei,newtaipei,kaohsiung,tainan,taoyuan,hsinchu
     secrets:
       - parkcast_upload_secret
 
