@@ -363,12 +363,26 @@ do today.
       with `verify=False`, and a test now fails the suite if anyone adds one. Full detail, including
       the certificate's provenance, is under "Known limits" in [`docs/sources.md`](sources.md).
    3. ~~Restart with **`PARKCAST_CITIES=taipei`**~~ — done; the boot log read
-      `collecting 1 of 6 cities: taipei` and publishing resumed unchanged.
-   4. **`PARKCAST_CITIES=taipei,newtaipei`.** Let it run a day, then read `data/cold/`'s actual growth
-      and compare it against the spec's 150–400 MB/month estimate — the number this plan deliberately
-      left unmeasured.
-   5. Add the remaining four, one per tick-cycle, watching the per-source report. Unsetting
-      `PARKCAST_CITIES` entirely is the same as naming all six.
+      `collecting 1 of 6 cities: taipei` and publishing resumed unchanged. A second boot's migration
+      reported **0 rows in 0.1 s**, which is idempotence and the index seek both confirmed in
+      production.
+   4. ~~Widen and watch~~ — done 2026-09-17. Tainan and Taoyuan joined first, being the only others
+      that verified before the TLS fix; all six have been collecting since **08:51 Taipei**.
+      Published across six shards: **2,852 lots** — taipei 1089, kaohsiung 948, newtaipei 316,
+      tainan 252, taoyuan 196, hsinchu 51. That is lots with a *usable* count, not the ~4,550 the
+      feeds list; the gap is lots that report nothing, and it is the honest number.
+
+      **The plausibility bound earns its keep every tick.** New Taipei ships 84 of 1,372 readings
+      stamped outside the window — the worst 1,258 days old — and Tainan 16 of 268, the worst 835
+      days. Before that bound they were stored and pruned in the same slot: silent corpus loss, on
+      every tick, forever.
+
+      Memory after the first six-city tick: **207 MiB**, which answers the open question about
+      `counts.bucket` at this scale. No memory limit is set in compose, deliberately.
+
+   5. **Still open: measure the disk.** Read `data/cold/`'s growth after a full day of six cities
+      (baseline 2026-09-17: 29 MB total, ~235 KB/day for Taipei alone) and compare it against the
+      spec's 150–400 MB/month estimate — the number the plan deliberately left unmeasured.
    6. The app keeps showing Taipei only until a following spec teaches it to read the other
       cities' shards — the shards will exist on disk, but nothing reads them yet.
 
