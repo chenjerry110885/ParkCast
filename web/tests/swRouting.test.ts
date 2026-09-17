@@ -54,6 +54,8 @@ interface FakeResponse {
   status: number;
   type: string;
   body?: string;
+  /** Only `Last-Modified` is ever read (see `agedOut`), so only it is modelled. */
+  headers?: { get(name: string): string | null };
   clone(): FakeResponse;
 }
 
@@ -87,9 +89,25 @@ interface WorkerOptions {
   status?: Record<string, number>;
 }
 
-function response(status = 200, type = "basic", body = "ok"): FakeResponse {
-  const res: FakeResponse = { status, type, body, clone: () => ({ ...res }) };
+function response(status = 200, type = "basic", body = "ok", lastModified?: string): FakeResponse {
+  const res: FakeResponse = {
+    status,
+    type,
+    body,
+    // Deliberately absent unless a test asks for it: a response that cannot say
+    // when it was built must behave exactly as it did before `agedOut` existed,
+    // and leaving `headers` off entirely is the strongest way to check that.
+    ...(lastModified === undefined
+      ? {}
+      : { headers: { get: (name: string) => (name.toLowerCase() === "last-modified" ? lastModified : null) } }),
+    clone: () => ({ ...res }),
+  };
   return res;
+}
+
+/** An HTTP-date `n` days before now, the way the Worker stamps `week.bin`'s `builtTs`. */
+function daysAgo(n: number): string {
+  return new Date(Date.now() - n * 24 * 60 * 60 * 1000).toUTCString();
 }
 
 function request(url: string, init: Partial<FakeRequest> & { range?: string } = {}): FakeRequest {
@@ -489,6 +507,57 @@ describe("what actually lands in the cache", () => {
     const url = `${SCOPE}assets/index-B7xK1a2c.js`;
     await expect(respondTo(worker, request(url))).resolves.toMatchObject({ body: `network:${url}` });
     expect(worker.cacheStore.get(url)).toMatchObject({ body: `network:${url}` });
+  });
+
+  it("serves a cached week table without touching the network while it is recent", async () => {
+    const worker = loadWorker();
+    const url = `${SCOPE}artifacts/week.bin`;
+    worker.cacheStore.set(url, response(200, "basic", "cached week", daysAgo(3)));
+    await expect(respondTo(worker, request(url))).resolves.toMatchObject({ body: "cached week" });
+    // The whole point of rule 4a: no conditional request per session either.
+    expect(worker.fetch).not.toHaveBeenCalled();
+  });
+
+  it("revalidates a cached week table once it is older than the bound", async () => {
+    // Cache-first has no expiry of its own, so without `agedOut` a device keeps
+    // the first table it ever downloaded until `VERSION` moves. The
+    // probabilities in it drift even though its support only grows.
+    const worker = loadWorker();
+    const url = `${SCOPE}artifacts/week.bin`;
+    worker.cacheStore.set(url, response(200, "basic", "stale week", daysAgo(9)));
+    await expect(respondTo(worker, request(url))).resolves.toMatchObject({ body: `network:${url}` });
+    // ...and the fresh copy replaces it, or every later load pays again.
+    expect(worker.cacheStore.get(url)).toMatchObject({ body: `network:${url}` });
+  });
+
+  it("still serves an aged-out week table when the network is gone", async () => {
+    // The driver this worker exists for is the one who has just lost signal.
+    // A fortnight-old climatology is a far smaller problem for them than "no
+    // data", so the bound must never turn a cache hit into a network error.
+    const worker = loadWorker({ networkFails: true });
+    const url = `${SCOPE}artifacts/week.bin`;
+    worker.cacheStore.set(url, response(200, "basic", "stale week", daysAgo(30)));
+    await expect(respondTo(worker, request(url))).resolves.toMatchObject({ body: "stale week" });
+  });
+
+  it("bounds the week table's age and nothing else's", async () => {
+    // `/assets/*` is hashed, so a cached copy cannot be stale however old the
+    // file is -- revalidating it would spend a request per load to be told so.
+    const worker = loadWorker();
+    const asset = `${SCOPE}assets/index-B7xK1a2c.js`;
+    worker.cacheStore.set(asset, response(200, "basic", "cached asset", daysAgo(400)));
+    await expect(respondTo(worker, request(asset))).resolves.toMatchObject({ body: "cached asset" });
+    expect(worker.fetch).not.toHaveBeenCalled();
+  });
+
+  it("serves a cached week table that does not say when it was built", async () => {
+    // A response with no `Last-Modified` is not old, it is undated -- and that
+    // is how this path behaved before the Worker sent the header at all.
+    const worker = loadWorker();
+    const url = `${SCOPE}artifacts/week.bin`;
+    worker.cacheStore.set(url, response(200, "basic", "undated week"));
+    await expect(respondTo(worker, request(url))).resolves.toMatchObject({ body: "undated week" });
+    expect(worker.fetch).not.toHaveBeenCalled();
   });
 
   it("consults isCacheable before storing, so a 206 or a 404 never lands", async () => {

@@ -41,13 +41,20 @@ export async function smoke(origin, { fetchImpl = fetch, now = Date.now } = {}) 
   const warnings = [];
 
   // Every request gets a timeout, and a rejection (DNS/TLS/reset/timeout) is
-  // recorded as a failure naming the path and the error, never headers or
-  // tokens -- and never re-thrown, so the rest of the checks still run.
-  async function get(path, init = {}) {
+  // recorded naming the path and the error, never headers or tokens -- and
+  // never re-thrown, so the rest of the checks still run.
+  //
+  // `warnOnly` routes that rejection to `warnings` instead of `failures`, for
+  // the one path whose absence must never roll a release back. Without it a
+  // transport hiccup is the *third* way `week.bin` can be unavailable, and the
+  // only one that would have failed the deploy -- the checks below it handle a
+  // non-200 and a stale table, but a rejection returns `null` and skips them
+  // entirely, after the failure has already been recorded.
+  async function get(path, init = {}, { warnOnly = false } = {}) {
     try {
       return await fetchImpl(origin + path, { redirect: "manual", signal: AbortSignal.timeout(TIMEOUT_MS), ...init });
     } catch (err) {
-      failures.push(`${path} request failed: ${err.name}: ${err.message}`);
+      (warnOnly ? warnings : failures).push(`${path} request failed: ${err.name}: ${err.message}`);
       return null;
     }
   }
@@ -101,7 +108,13 @@ export async function smoke(origin, { fetchImpl = fetch, now = Date.now } = {}) 
   // the collector had not got round to a once-a-day job yet. So: warn, the same
   // way a stale forecast warns, because somebody should look and nobody should
   // be paged.
-  const week = await get("/artifacts/week.bin", { method: "HEAD" });
+  //
+  // `warnOnly` covers the third way this can go wrong, and it is the one that
+  // used to slip through: a reset, a DNS blip or the 15 s timeout never reaches
+  // the branches below, because `get` returns `null` -- so without it the
+  // promise two paragraphs up held for a 503 and for a stale table and broke on
+  // a transient network error, which is the least deserving of the three.
+  const week = await get("/artifacts/week.bin", { method: "HEAD" }, { warnOnly: true });
   if (week !== null) {
     if (week.status !== 200) {
       warnings.push(`week.bin answered ${week.status} (no forecast past the grid's two-hour window)`);

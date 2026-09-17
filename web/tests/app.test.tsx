@@ -881,6 +881,57 @@ describe("an arrival beyond the grid's own window", () => {
     expect(screen.queryByRole("button", { name: /confidence/i })).toBeNull();
   });
 
+  it("says 'no data' for a bucket this lot has never been observed in, never 0%", async () => {
+    // The rule this whole branch is built around, and the one place it is
+    // easiest to break by accident. `WEEK_UNKNOWN` (255) is the absence of an
+    // observation, not an observation of nothing: a lot nobody has ever watched
+    // at 21:20 on a Monday must read "no data", because "0%" is the claim
+    // "reliably full at this hour" and a driver hunting for a space would
+    // believe it. `week.ts`'s `blend` spends three paragraphs forbidding the
+    // one-character version of this bug -- `p ?? 0` -- and this is the test
+    // that catches it: the coercion renders 0% here and nothing else in the
+    // suite notices.
+    const far = tomorrowEvening();
+    const unobserved = encodeWeek(
+      weekBucket(far),
+      { percent: 255, support: 0 },
+      { percent: OTHER_PERCENT, support: 0 },
+    );
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: unobserved });
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+
+    // The table loaded and the row exists -- this is the *cell* saying nothing.
+    expect(chance()).toContain(t("en").noData);
+    expect(chance()).not.toMatch(/\d+%/);
+    expect(chance()).not.toContain(CLAMPED);
+    // ...and no grade over a number that is not there.
+    expect(screen.queryByRole("button", { name: /confidence/i })).toBeNull();
+  });
+
+  it("stays silent about an unobserved bucket however much support it carries", async () => {
+    // Support and probability are different facts, and the pill is gated on the
+    // second. A cell can hold observations for the lot or the city that never
+    // resolved into a rate for *this* half-hour; grading that as "high, five
+    // weeks" would put a confident label beside a blank ring.
+    const far = tomorrowEvening();
+    const unobserved = encodeWeek(
+      weekBucket(far),
+      { percent: 255, support: FAR_SUPPORT },
+      { percent: OTHER_PERCENT, support: 0 },
+    );
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: unobserved });
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+
+    expect(chance()).toContain(t("en").noData);
+    expect(screen.queryByRole("button", { name: /confidence/i })).toBeNull();
+  });
+
   it("refuses a week table built against a different roster, rather than indexing it anyway", async () => {
     // `week.bin` is indexed by grid row. A table whose `rosterId` disagrees
     // describes a different ordering of lots, so every row would be answered
@@ -933,6 +984,47 @@ describe("an arrival beyond the grid's own window", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /confidence.*low/i }));
     expect(screen.getByRole("note")).toHaveTextContent(t("en").confidenceThin);
+  });
+
+  it("upgrades an in-window grade once the week table has landed, without moving the number", async () => {
+    // `supportForLot` is deliberately not gated on the grid's window, which
+    // makes an in-window grade path-dependent inside a session: the same lot at
+    // the same arrival reads "low · thin" cold and "high · 5 weeks" after the
+    // driver has been out past the horizon and back. Pinned here so that gating
+    // it later is a decision somebody makes rather than a regression nobody
+    // notices -- and pinned together with the probability, which must NOT move:
+    // inside the window the grid is still the source, and only the label is
+    // better informed. See `supportForLot`'s doc comment.
+    const inWindow = BASE_DATA_TS + 102 * 60; // > MEDIUM_MAX_MIN, <= the grid's 120
+    stubColumnMarkedArtifacts({
+      lot: OBSERVED_LOT,
+      week: encodeWeek(
+        weekBucket(inWindow),
+        { percent: FAR_PERCENT, support: FAR_SUPPORT },
+        { percent: OTHER_PERCENT, support: 0 },
+      ),
+    });
+    await renderLocated();
+
+    selectArrival(inWindow);
+    const grid = `${columnMark(columnFor(inWindow))}%`;
+    expect(chance()).toBe(grid);
+    // Nothing has been fetched: this arrival is one the grid answers.
+    expect(weekFetchCount()).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: /confidence.*low/i }));
+    expect(screen.getByRole("note")).toHaveTextContent(t("en").confidenceThin);
+
+    // Out past the horizon, which is what pays for the table...
+    selectArrival(tomorrowEvening());
+    await waitFor(() => expect(chance()).toBe(`${OTHER_PERCENT}%`));
+
+    // ...and back to exactly the arrival we started at.
+    selectArrival(inWindow);
+    expect(chance()).toBe(grid);
+    fireEvent.click(screen.getByRole("button", { name: /confidence.*high/i }));
+    expect(screen.getByRole("note")).toHaveTextContent(
+      fillTemplate(t("en").confidenceWeeksTemplate, { n: 5 }),
+    );
   });
 });
 
@@ -1010,13 +1102,17 @@ describe("fetching the week table lazily", () => {
   });
 
   it("does not strand the request when the arrival moves while it is still in the air", async () => {
-    // The bug `PlaceSearch` shipped and this shape inherited the fix for. The
-    // effect's cleanup fires when the selection moves, which cancels the
-    // callback that would otherwise clear `weekLoading` -- so unless the
-    // cleanup clears it too, the flag stays raised and the guard on the
-    // effect's first line refuses every later attempt for the rest of the
-    // session. A driver who keeps turning the picker's wheel while 715 KB is
-    // downloading would never see a far-horizon number again.
+    // Two properties at once, and this test exists because an earlier draft of
+    // the effect broke the first of them. A driver turning the picker's wheel
+    // while 715 KB is downloading moves `arrivalTs`, which fires the effect's
+    // cleanup and re-runs it within the same commit. That draft held an
+    // in-flight flag in component state, so the re-run read `true` from the
+    // render being cleaned up, refused itself, `cancelled` swallowed the
+    // response, and the screen said "no data" for the rest of the session.
+    // There is no flag now, so what is pinned here is the behaviour and not the
+    // mechanism: the table still lands -- whatever guards this effect must not
+    // refuse the run that takes over -- and it still costs exactly one request,
+    // because `loadWeek`'s promise cache is what makes "fetched once" true.
     const far = tomorrowEvening();
     let release: (table: ArrayBuffer) => void = () => {};
     const inFlight = new Promise<ArrayBuffer>((resolve) => {

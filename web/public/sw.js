@@ -81,6 +81,36 @@ const PRECACHE = [
   "./icon-maskable-512.png",
 ];
 
+/**
+ * How old a cached `week.bin` may be before it is revalidated instead of served
+ * outright, in milliseconds.
+ *
+ * Rule 4a below buys one download per device instead of one per session, but
+ * cache-first on its own has no expiry at all: nothing retires an entry until
+ * `VERSION` moves, so without this a device would answer from the very first
+ * table it ever downloaded for the whole life of a release. "Support only grows"
+ * defends the *confidence grade* against that, and only that -- the
+ * probabilities do drift, and a car park that lost a floor to construction has a
+ * climatology that is wrong in both directions while the grade attached to it
+ * keeps rising. The freshness badge on screen reports the grid's age and says
+ * nothing about this table's, so a driver has no way to see it happening.
+ *
+ * Note this bound can only live *here*. `week.bin` is served cache-first, and
+ * `caches.match` does not consider a request's `cache` mode -- so a client-side
+ * `builtTs` check, or a `fetch(..., { cache: "reload" })` of the kind
+ * `loadArtifacts` uses to escape a stale `lots.json`, is answered from this
+ * store like any other request and cannot reach past it.
+ *
+ * Seven days: the table spans exactly one week and is rebuilt daily, so a device
+ * that revalidates at most weekly can never answer from a table built before the
+ * week it is describing, at a cost of at most one 715 KB request per week. And a
+ * stale copy is still served whenever the network is not there to replace it --
+ * see `cacheFirst`. Requires the `Last-Modified` the Worker sends from the
+ * table's own `builtTs` (`worker/src/serve.ts`); with no such header the bound
+ * simply does not apply, which is the same behaviour as before it existed.
+ */
+const WEEK_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
 /** Serve from cache, fall back to the network. */
 const CACHE_FIRST = "cache-first";
 /** Try the network, fall back to cache. */
@@ -119,11 +149,14 @@ const PASSTHROUGH = "passthrough";
  *     a day, fetched lazily by the app on the first arrival chosen past the
  *     grid's two-hour window. Network-first would spend a conditional request
  *     on it every session to be told it has not changed. A stale copy errs in
- *     the conservative direction on its own: support only ever grows, so an old
- *     table understates confidence rather than overstating it, and a bumped
- *     `VERSION` is what retires one. The exception is spelt out in full, not by
- *     prefix or extension, so a future `week-{city}.bin` shard is a forecast
- *     artifact under rule 4 until somebody decides otherwise on purpose.
+ *     the conservative direction where the *confidence grade* is concerned:
+ *     support only ever grows, so an old table understates confidence rather
+ *     than overstating it. It does not defend the probabilities, which do
+ *     drift, so the copy is age-bounded rather than kept until a `VERSION`
+ *     bump -- see `WEEK_MAX_AGE_MS` and `agedOut`. The exception is spelt out
+ *     in full, not by prefix or extension, so a future `week-{city}.bin` shard
+ *     is a forecast artifact under rule 4 until somebody decides otherwise on
+ *     purpose.
  *
  *  4. **The artifacts** -- network-first. A forecast from the network beats one
  *     from disk every time. The cached copy is the fallback, and it carries its
@@ -230,12 +263,47 @@ async function keep(request, response) {
   }
 }
 
+/**
+ * Whether a cached response has aged out of being servable on its own.
+ *
+ * True for `week.bin` alone, and only when it says how old it is. Every other
+ * cache-first URL is either hashed -- a changed file has a different name, so a
+ * cached one cannot be stale -- or an icon or the manifest, whose names are
+ * fixed and which `VERSION` retires on purpose (rule 6). See `WEEK_MAX_AGE_MS`.
+ *
+ * Matched on the request's own URL rather than on the scope-relative path so
+ * that `routeFor` keeps its single definition of that path. It cannot misfire:
+ * only a request `routeFor` already placed on this origin, inside this scope and
+ * at exactly `artifacts/week.bin` reaches `cacheFirst` at all, so a same-suffix
+ * URL elsewhere was returned `PASSTHROUGH` long before this runs.
+ *
+ * `headers` is read defensively for the same reason `routeFor` reads the
+ * request's: a response that cannot say when it was built is simply not old,
+ * which is exactly how this path behaved before the header existed.
+ */
+function agedOut(request, response) {
+  if (!request.url.endsWith("/artifacts/week.bin")) return false;
+  const builtAt = Date.parse(response.headers?.get?.("last-modified") ?? "");
+  return !Number.isNaN(builtAt) && Date.now() - builtAt > WEEK_MAX_AGE_MS;
+}
+
 async function cacheFirst(request) {
   const hit = await cached(request);
-  if (hit) return hit;
-  const response = await fetch(request);
-  await keep(request, response);
-  return response;
+  if (hit && !agedOut(request, hit)) return hit;
+  try {
+    const response = await fetch(request);
+    await keep(request, response);
+    return response;
+  } catch (error) {
+    // Only reachable with a hit that aged out, because every other path here
+    // either returned above or had nothing cached to fall back to -- so this
+    // rethrows exactly where it always did. A stale table beats no table: the
+    // driver this worker exists for is the one who has just lost signal, and
+    // "the climatology is a fortnight old" is a far smaller problem for them
+    // than "no data".
+    if (hit) return hit;
+    throw error;
+  }
 }
 
 async function networkFirst(request, scope) {

@@ -107,6 +107,37 @@ test("only warns when the week table is older than 48 h, not at 47", async () =>
   assert.ok(stale.warnings.some((w) => w.includes("49 h old")));
 });
 
+test("only warns when the week.bin request itself rejects, so a reset cannot roll a release back", async () => {
+  // The third way this artifact can be unavailable, and the one the shared
+  // `get` helper used to turn into a deploy-blocking failure: a rejection never
+  // reaches the status or staleness branches at all.
+  const { failures, warnings } = await smoke(ORIGIN, {
+    fetchImpl: site({
+      "HEAD /artifacts/week.bin": () => {
+        throw new Error("connection reset");
+      },
+    }),
+    now: () => NOW,
+  });
+  assert.deepEqual(failures, []);
+  assert.ok(warnings.some((w) => w.includes("/artifacts/week.bin") && w.includes("connection reset")));
+});
+
+test("still fails when a request for the forecast itself rejects", async () => {
+  // The counterpart, so `warnOnly` cannot quietly spread: `week.bin` is
+  // additive and warns, the pair the whole site is built on still fails.
+  const { failures, warnings } = await smoke(ORIGIN, {
+    fetchImpl: site({
+      "GET /artifacts/grid.bin": () => {
+        throw new Error("connection reset");
+      },
+    }),
+    now: () => NOW,
+  });
+  assert.ok(failures.some((f) => f.includes("/artifacts/grid.bin") && f.includes("connection reset")));
+  assert.ok(!warnings.some((w) => w.includes("grid.bin")));
+});
+
 test("only warns when the week table will not say when it was built", async () => {
   // A worker that stopped sending Last-Modified would otherwise make the age
   // check above silently vacuous rather than visibly unanswerable.

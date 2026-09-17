@@ -316,6 +316,21 @@ function probabilityForLot(
  * about which artifact happened to answer. Once the table is in memory a lot
  * with four weeks of 21:20s behind it reads "high" whether the arrival is ninety
  * minutes away or a day and a half.
+ *
+ * **That makes an in-window grade path-dependent within a session, on purpose.**
+ * A driver who picks 100 minutes out cold sees "low · thin"; one who went out to
+ * tomorrow first and came back sees "high · 5 weeks" for the same lot at the
+ * same arrival, because the table is now in hand. Both labels are true when they
+ * are shown -- the second is simply better informed, and `confidenceThin`'s own
+ * wording ("not watched at this time of week often enough **yet**") is the
+ * honest thing to say while we are holding no history to point at. The number
+ * beside it does not move: inside the window it is the grid's column either way.
+ * Gating support on the window would trade that for the opposite fault -- a
+ * grade decided by how far away the arrival is, which is exactly the behaviour
+ * this whole stage exists to remove (see `confidence.ts`'s header). Pinned by
+ * `tests/app.test.tsx`'s "upgrades an in-window grade once the week table has
+ * landed", so gating it later is a decision somebody makes rather than a
+ * regression nobody notices.
  */
 function supportForLot(week: WeekTable | null, lot: Lot | undefined, arrivalTs: number): number {
   const row = lot?.i;
@@ -401,11 +416,6 @@ export default function App() {
   const loadedRef = useRef(false);
   /** When the artifacts were last asked for, so `MIN_REFETCH_MS` has something to measure. */
   const lastFetchRef = useRef(0);
-  /**
-   * Whether a `week.bin` request is in the air. See the effect that owns it
-   * below for why it is a ref and not a piece of state.
-   */
-  const weekLoadingRef = useRef(false);
   /**
    * `useGeolocation`'s `abandon` and `clearFailure`, held in refs because
    * `pickDestination` is what the hook is *given* -- the two would otherwise
@@ -604,42 +614,35 @@ export default function App() {
    * next half hour is answered entirely from the 26 KB grid, and paying for the
    * climatology up front would be a worse first paint for the common case in
    * exchange for nothing. Same bargain `PlaceSearch` strikes with the offline
-   * place index on its first focus, and this is deliberately the same shape --
-   * **including the lesson that cost that component a bug**: the cleanup lowers
-   * `weekLoadingRef` as well as cancelling. The `.then` below returns at
-   * `cancelled` before it can clear the flag, so without that line a selection
-   * moved mid-request would leave the flag stuck `true` and the guard on the
-   * first line would refuse every retry for the rest of the session.
+   * place index on its first focus.
    *
-   * Retrying at all is `loadWeek`'s half of the bargain: a failed attempt drops
+   * **`loadWeek`'s promise cache is what makes "once" true, and it is the only
+   * thing that does.** There is deliberately no in-flight flag here. This effect
+   * re-runs on every new far arrival, so it can call `loadWeek` several times
+   * over; each call while a request is in the air hands back the *same* promise,
+   * so the extra runs re-subscribe rather than re-download, and the callbacks
+   * they attach are gated by their own `cancelled`. `PlaceSearch` does hold such
+   * a flag, and an earlier draft of this effect copied it -- which is how this
+   * task rediscovered the bug that flag is famous for, in a nastier form: the
+   * dependency that re-runs *this* effect (`arrivalTs`) changes in the same
+   * commit as the cleanup that lowers the flag, so a `useState` version still
+   * read `true` from the render being cleaned up, refused the very run meant to
+   * take over, and left the screen saying "no data" for the rest of the session.
+   * A ref fixed the instance; deleting the flag removes the failure mode, and
+   * costs nothing, because it was never what prevented the second download.
+   * `tests/app.test.tsx`'s "does not strand the request when the arrival moves
+   * while it is still in the air" is what holds that line.
+   *
+   * Retrying is `loadWeek`'s half of the bargain too: a failed attempt drops
    * itself from its cache, so the next far arrival genuinely goes back to the
-   * network instead of inheriting the first answer forever. Between the two,
-   * a 503 from a Worker whose collector has not uploaded a table yet costs one
+   * network instead of inheriting the first answer forever. Between the two, a
+   * 503 from a Worker whose collector has not uploaded a table yet costs one
    * request and nothing else.
-   *
-   * `arrivalTs` is in the dependency list so that each new far arrival is a new
-   * attempt after a failure. It cannot turn into a request per selection: while
-   * one is genuinely in flight `loadWeek` hands back the same promise to every
-   * caller, so the extra runs re-subscribe rather than re-download.
-   *
-   * **The in-flight flag is a `useRef`, and that is not a stylistic choice.**
-   * `PlaceSearch` can hold its equivalent in state because the dependency that
-   * re-runs its effect (`focused`) always changes in a *later* render than the
-   * cleanup that lowered the flag, so the next run reads a fresh closure.
-   * `arrivalTs` does not: the cleanup and the re-run happen in the same commit,
-   * and a `useState` flag would still read `true` from the render that is being
-   * cleaned up -- so the guard on the first line would refuse the very run that
-   * is meant to take over, `cancelled` would swallow the response, and the
-   * screen would say "no data" for the rest of the session. A ref is read at
-   * effect time, which is when the cleanup has already lowered it. (It is also
-   * the right primitive on its own terms: nothing renders from this.)
    */
   useEffect(() => {
-    if (!needsWeek || weekTable !== null || weekLoadingRef.current) return;
-    weekLoadingRef.current = true;
+    if (!needsWeek || weekTable !== null) return;
     let cancelled = false;
     void loadWeek(ARTIFACTS_BASE).then((table) => {
-      weekLoadingRef.current = false;
       if (cancelled) return;
       // `null` is a failed or refused load, which must not be committed as
       // "loaded": that is what leaves the next attempt free to try again.
@@ -647,9 +650,6 @@ export default function App() {
     });
     return () => {
       cancelled = true;
-      // ...and the flag goes with it, or a selection moved mid-request strands
-      // it raised forever. See the paragraph above.
-      weekLoadingRef.current = false;
     };
     // `weekTable` is set BY this effect; listing it would rerun the effect on
     // its own state change, calling the cleanup above and cancelling the
