@@ -10,11 +10,9 @@ to pin the *shape* of the relaxation rather than its effect.
 """
 import ast
 import hashlib
-import socket
 import ssl
-import threading
+import struct
 import time
-from contextlib import contextmanager
 from pathlib import Path
 
 import certifi
@@ -22,7 +20,39 @@ import pytest
 
 from parkcast.sources import hsinchu, http, kaohsiung, newtaipei, tainan, taipei, taoyuan
 
-FIXTURE_KEYCERT = Path(__file__).parent / "fixtures" / "selfsigned-localhost-keycert.pem"
+# A PUBLIC certificate, and only a certificate: no private key is committed
+# anywhere in this repo. It was generated once with `openssl req -x509` on
+# 2026-09-17, the key was destroyed in the same command that made it, and none
+# is needed -- `_present_certificate` below drives OpenSSL's verification
+# without a TLS peer, so nothing ever has to prove possession of this key.
+#
+# `.invalid` is the RFC 2606 reserved TLD, it is self-signed by a key that no
+# longer exists, and it is in no trust store on earth. It is valid until 2126,
+# so it will not become a mystery failure.
+UNTRUSTED_CERT_PEM = """\
+-----BEGIN CERTIFICATE-----
+MIIDeDCCAmCgAwIBAgIUS2z1Oyys3BaMOIPc4nhho/fucRIwDQYJKoZIhvcNAQEL
+BQAwJTEjMCEGA1UEAwwadW50cnVzdGVkLnBhcmtjYXN0LmludmFsaWQwIBcNMjYw
+OTE3MDA0MDMwWhgPMjEyNjA4MjQwMDQwMzBaMCUxIzAhBgNVBAMMGnVudHJ1c3Rl
+ZC5wYXJrY2FzdC5pbnZhbGlkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKC
+AQEA2jPZIS3NzKONtbEuXFKFgyAUl5N4EeDD5BUS2oOWm+uA6s7G9lB3I6UywDzH
+vW6Cf8/bt8wUvT53uyacffAGDn5iMel1a+a8SdGHamfGPigrueZvIUnHwzRkNoYb
+VLcLDINrd0KdSL8dnowt3Xu+XcBa6Tp+OXfG+3Q8b4TpVB6BtbBqxRjJVrLH2r3y
+d07tIYFk+GGeW+zzFVDPwdRKVlWX5rcCz+6NsK1nV++RohSkrcBUBqd0RZ3OXu3/
+e97iMeYHqpfP6Ut3M++h9PU2keZ4FC9MUGwUBGBmtd0GBo9fO5KeRWXquPb7JVvw
+KXenGJ3ZZfMT2UCGuj4YsaB9kQIDAQABo4GdMIGaMB0GA1UdDgQWBBRdSfLdoI3A
+x7SWSzua3+nr/hgUmDAfBgNVHSMEGDAWgBRdSfLdoI3Ax7SWSzua3+nr/hgUmDAl
+BgNVHREEHjAcghp1bnRydXN0ZWQucGFya2Nhc3QuaW52YWxpZDAMBgNVHRMBAf8E
+AjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcDATANBgkqhkiG
+9w0BAQsFAAOCAQEAo9urLz7BsrNi4TJjhmpFh1st1nDdAyM8JTN1ZmWD6jNS/D2O
+/2MFw78tXKewIDKxiVWPJyRcFiBe3K3rjqMjY2gzoT3K06hj/t3Wu+QbQUvq0MIV
+A1IjIVXaG+cqC/LwGzPNbL/k0pCowfXYUywhBb359sw3R4Jml6Gm2WTJeYxAZWEi
+Nu447YQZEF8tyM3ptMhpnlzbrfH+X0NhWmkI0R6uEqXeYf/H6unO9cMTx05xyqDb
+dn3BC2JIQ4E3N4b7QSYXHUzUSGtFQEWTKAcVxXqP5ZHktBEAQJzVfLpXJkVTiT/z
+0rl9eSoypeQzE67gaFnBWNN1KKThzHpqBfM7YA==
+-----END CERTIFICATE-----
+"""
+UNTRUSTED_HOST = "untrusted.parkcast.invalid"
 
 # Pinned from the certificate as fetched from its AIA URL on 2026-09-17 and
 # recorded in the .pem's own header block. Pinned, not merely "some CA parses",
@@ -173,72 +203,123 @@ def test_the_relaxed_context_clears_only_the_strict_flag():
     assert relaxed.cert_store_stats() == strict.cert_store_stats()
 
 
-@contextmanager
-def _self_signed_tls_server():
-    """A TLS server on 127.0.0.1 presenting the throwaway self-signed cert."""
-    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_context.load_cert_chain(FIXTURE_KEYCERT)
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
+def _present_certificate(context: ssl.SSLContext, pem: str, *, hostname: str):
+    """Make `context` verify `pem` as a server's certificate. Returns the error.
 
-    def serve():
-        try:
-            connection, _ = listener.accept()
-        except OSError:
-            return
-        try:
-            # The handshake is expected to fail for the rejection test; the
-            # client hanging up mid-handshake surfaces here as an OSError and
-            # is not this thread's business to report.
-            with server_context.wrap_socket(connection, server_side=True) as tls:
-                tls.recv(64)
-        except OSError:
-            pass
-        finally:
-            connection.close()
+    WHY THIS EXISTS RATHER THAN A TLS SERVER. Proving that a context still
+    *rejects* something requires driving real OpenSSL verification, and the
+    obvious way -- a loopback TLS server -- needs a server private key. A key
+    in this repo would mean carving a named hole in `.gitignore`'s blanket
+    `*.pem` ("Never commit these"), which is how a deliberate guard stops
+    meaning anything, and it would trip secret scanners on every push for
+    someone to investigate and conclude it was fine.
 
-    thread = threading.Thread(target=serve, daemon=True)
-    thread.start()
+    None is needed. A TLS client validates the server's certificate chain
+    when it processes the Certificate message, which in TLS 1.2 arrives in
+    the clear and *before* the server has proved possession of anything. So
+    this hand-writes just enough of a server flight -- a ServerHello naming a
+    cipher suite the client offered, then the Certificate message -- and feeds
+    it to a client `SSLObject` over a `MemoryBIO`. OpenSSL verifies, and
+    raises. Nothing secret is involved, nothing listens on a port, no thread
+    runs, and the result is deterministic.
+
+    Returns the exception rather than raising, so callers can assert on both
+    the failures and the non-failures.
+    """
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    connection = context.wrap_bio(incoming, outgoing, server_hostname=hostname)
     try:
-        yield listener.getsockname()[1]
-    finally:
-        listener.close()
-        thread.join(timeout=5)
+        connection.do_handshake()
+    except ssl.SSLWantReadError:
+        pass  # expected: the ClientHello is written, nothing has answered yet
+    client_hello = outgoing.read()
+
+    # Walk the ClientHello to the cipher-suite list: 5 bytes of record header,
+    # 4 of handshake header, 2 of legacy_version, 32 of random, then a
+    # length-prefixed session id.
+    at = 5 + 4 + 2 + 32
+    at += 1 + client_hello[at]
+    count = struct.unpack(">H", client_hello[at:at + 2])[0]
+    at += 2
+    offered = {struct.unpack(">H", client_hello[at + n:at + n + 2])[0]
+               for n in range(0, count, 2)}
+    # Any suite the client offered will do; the handshake never gets far
+    # enough to use it. ECDHE-RSA-AES128-GCM-SHA256 is in every default list.
+    suite = 0xC02F if 0xC02F in offered else sorted(offered)[0]
+
+    def record(payload: bytes) -> bytes:
+        return b"\x16\x03\x03" + struct.pack(">H", len(payload)) + payload
+
+    def handshake(kind: int, body: bytes) -> bytes:
+        return bytes([kind]) + len(body).to_bytes(3, "big") + body
+
+    # ServerHello: TLS 1.2, a fixed random, no session id, the chosen suite,
+    # no compression, and an empty renegotiation_info -- which OpenSSL clients
+    # require before they will look at anything else.
+    server_hello = handshake(2, (
+        b"\x03\x03" + bytes(32) + b"\x00" + struct.pack(">H", suite) + b"\x00"
+        + struct.pack(">H", 5) + b"\xff\x01\x00\x01\x00"
+    ))
+    der = ssl.PEM_cert_to_DER_cert(pem)
+    entry = len(der).to_bytes(3, "big") + der
+    certificate = handshake(11, len(entry).to_bytes(3, "big") + entry)
+
+    incoming.write(record(server_hello))
+    incoming.write(record(certificate))
+    try:
+        connection.do_handshake()
+    except ssl.SSLError as error:
+        return error
+    return None
 
 
-def test_the_relaxed_context_still_rejects_an_untrusted_certificate():
-    """Proof that `x509_strict=False` did not become "trust everything".
+@pytest.mark.parametrize("policy, label", [
+    (http.TlsPolicy(x509_strict=False), "kaohsiung and hsinchu"),
+    (http.TlsPolicy(), "every source that declares nothing"),
+    (newtaipei.TLS, "newtaipei, which also gained a CA"),
+])
+def test_every_policy_still_rejects_an_untrusted_certificate(policy, label):
+    """Proof that no policy here became "trust everything".
 
-    Kaohsiung's and Hsinchu's exact policy, pointed at a real TLS server
-    holding a certificate no store anywhere trusts. `verify_code` 18/19 are
-    OpenSSL's self-signed verdicts, asserted instead of the message text so
-    this pins a *trust* refusal rather than, say, a hostname mismatch that
-    would have failed for the wrong reason.
+    Run against all three shapes, not just the relaxed one: clearing
+    `VERIFY_X509_STRICT` is the obvious place to over-reach, but so is adding
+    a CA file, and a context that skipped verification would sail through
+    every other test in this repo.
+
+    Asserted on `verify_code` rather than message text, so this pins a *trust*
+    refusal -- 18/19 are OpenSSL's self-signed verdicts -- rather than, say, a
+    hostname mismatch that would have failed for the wrong reason.
+
+    Checked by doing the damage on purpose: replacing the context under test
+    with `verify_mode = CERT_NONE` makes this the assertion that fails, and
+    only this one.
     """
-    relaxed = http.tls_context(http.TlsPolicy(x509_strict=False))
-    with _self_signed_tls_server() as port:
-        with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
-            with pytest.raises(ssl.SSLCertVerificationError) as caught:
-                relaxed.wrap_socket(raw, server_hostname="localhost")
+    error = _present_certificate(http.tls_context(policy), UNTRUSTED_CERT_PEM,
+                                 hostname=UNTRUSTED_HOST)
+
+    assert isinstance(error, ssl.SSLCertVerificationError), label
+    assert error.reason == "CERTIFICATE_VERIFY_FAILED"
     # 18 = DEPTH_ZERO_SELF_SIGNED_CERT, 19 = SELF_SIGNED_CERT_IN_CHAIN.
-    assert caught.value.verify_code in (18, 19)
+    assert error.verify_code in (18, 19)
 
 
-def test_the_relaxed_context_still_completes_a_handshake_it_should_trust():
-    """The control for the test above: the refusal is about trust, not breakage.
+def test_the_relaxed_context_accepts_a_certificate_it_should_trust():
+    """The control: the refusal above is about trust, not about breakage.
 
-    Same relaxed policy, same server -- but with the self-signed certificate
-    added to this one context's store, the handshake succeeds. Without this,
-    a context that rejected *everything* (a typo that broke TLS outright)
-    would pass the rejection test and look like proof of good behaviour.
+    Same relaxed policy, same certificate, same harness -- but with that
+    certificate in this one context's store, verification passes and the
+    handshake goes on to want the rest of the server flight that
+    `_present_certificate` never sends. Without this, a context that rejected
+    *everything*, or a harness that was simply broken, would pass the test
+    above and look like proof of good behaviour.
     """
     relaxed = http.tls_context(http.TlsPolicy(x509_strict=False))
-    relaxed.load_verify_locations(cafile=str(FIXTURE_KEYCERT))
-    with _self_signed_tls_server() as port:
-        with socket.create_connection(("127.0.0.1", port), timeout=5) as raw:
-            with relaxed.wrap_socket(raw, server_hostname="localhost") as tls:
-                assert tls.getpeercert() is not None
+    relaxed.load_verify_locations(cadata=UNTRUSTED_CERT_PEM)
+
+    error = _present_certificate(relaxed, UNTRUSTED_CERT_PEM, hostname=UNTRUSTED_HOST)
+
+    assert not isinstance(error, ssl.SSLCertVerificationError)
+    assert isinstance(error, ssl.SSLWantReadError)
 
 
 # --------------------------------------------------------------------------
