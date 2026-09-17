@@ -19,12 +19,12 @@ the label fonts are static assets. See [`docs/deploy.md`](deploy.md).
 The five newest things in this document: the collector's first unbroken days on the desktop turned up
 **car parks whose readings never move**, which the app was publishing as certainties; a second and
 third evaluation **reversed the first one's verdict** on long horizons; the app is now **map-first**
-after a UI/UX redesign shipped the same day as deployment — see "UI redesign — 2026-09-15" below; a
-**nationwide collector** for five more cities is code-complete and tested on a branch, not yet live
-— see "Nationwide collection" below; and **Stage A** lets the app answer any arrival within seven
-days instead of only the next two hours, and turns the confidence label into a statement about how
-much history backs a forecast rather than how far away it is — code-complete and tested on
-`feat/stage-a`, not yet deployed — see "Stage A" below.
+after a UI/UX redesign shipped the same day as deployment — see "UI redesign — 2026-09-15" below; the
+**nationwide collector** has been live on the desktop since 2026-09-17, polling six cities and
+publishing 2,852 lots — see "Nationwide collection" below; and **Stage A** lets the app answer any
+arrival within seven days instead of only the next two hours, and turns the confidence label into a
+statement about how much history backs a forecast rather than how far away it is — merged to `main`
+on 2026-09-17, **not yet deployed** — see "Stage A" below.
 
 ## Which machine is which
 
@@ -238,7 +238,7 @@ transparent pseudo-element carrying the target.
 
 ---
 
-## Nationwide collection — built 2026-09-16 on `feat/nationwide-collector`, not yet live
+## Nationwide collection — built 2026-09-16, live on the desktop since 2026-09-17
 
 Twelve tasks against [`docs/superpowers/specs/2026-09-16-nationwide-collector-design.md`](superpowers/specs/2026-09-16-nationwide-collector-design.md)
 took the collector from one feed to six: 臺北市, 新北市, 高雄市, 臺南市, 桃園市, 新竹市, each behind its
@@ -317,7 +317,7 @@ do today.
 
 ---
 
-## Stage A: any-time arrival — built 2026-09-16 → 2026-09-17 on `feat/stage-a`, not yet deployed
+## Stage A: any-time arrival — built 2026-09-16 → 2026-09-17, merged to `main`, not yet deployed
 
 `grid.bin` forecasts 120 minutes ahead; the picker let a driver ask about tomorrow evening anyway,
 and `horizonColumn` quietly clamped that to the +120-minute column and presented it as the answer.
@@ -363,10 +363,15 @@ Three tests skip wherever `data/` is absent — `tests/test_artifacts_integratio
 `tests/test_history_bounds.py:39,60`, both `"no collected data on this machine"` — because this
 worktree has none. They run in the main checkout. `test_artifacts_integration.py` is the exact
 test that caught the id-convention defect at merge on the nationwide-collector branch, and Stage A
-also modifies `artifacts.py`, so this green worktree run is necessary and not sufficient: **the
-suite must run again in the main checkout before Stage A is considered verified**, and not by
-copying `data/` into the worktree — the live collector owns it, and a mid-write snapshot would
-make a passing test meaningless.
+also modifies `artifacts.py`, so the green worktree run was necessary and not sufficient. Copying
+`data/` into the worktree was never an option — the live collector owns it, and a mid-write
+snapshot would make a passing test meaningless.
+
+**That gap is now closed.** After the merge, the suite was re-run in the main checkout, where the
+corpus exists: **616 passed, 0 skipped** — the three `data/`-reading tests ran and passed, against
+Stage A's code. `npm run deploy:check --prefix worker` passed there too (**bundle check: 711
+files**, 0 vulnerabilities); it cannot pass in a worktree, which has never held the gitignored
+basemap tiles or place index it verifies.
 
 ---
 
