@@ -351,7 +351,11 @@ def _read_parquet_day(path: Path):
                 yield lot_id, start + slot * SLOT_SECONDS, free
 
 
-BUCKETS_PER_WEEK = 7 * 24 * 60 // config.CLIMATOLOGY_BUCKET_MIN
+# Alias of `config.WEEK_BUCKETS`. `artifacts.encode_week` needs the identical
+# count and reaches it through `config` directly -- `artifacts` must not import
+# this module -- so the arithmetic lives in exactly one place and this name
+# just carries it into the forecasting layer where `week_bucket` needs it too.
+BUCKETS_PER_WEEK = config.WEEK_BUCKETS
 
 
 def week_bucket(ts: int) -> int:

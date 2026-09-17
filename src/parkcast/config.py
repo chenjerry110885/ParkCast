@@ -102,6 +102,14 @@ HORIZON_COUNT = 24            # +5 min through +120 min
 # counts would depend on which side of a midnight compaction each reading was
 # seen on, and would shift under themselves as days rolled into the cold store.
 CLIMATOLOGY_BUCKET_MIN = 30
+# Buckets in one full week at that width (336 at 30 min). This is the one
+# place the number is computed: `forecast.BUCKETS_PER_WEEK` is an alias of it,
+# and `artifacts.encode_week` reads it through `config` rather than `forecast`
+# to keep the artifact layer from depending on the forecasting layer. Two
+# independent copies of `7 * 24 * 60 // CLIMATOLOGY_BUCKET_MIN` would agree
+# today and silently diverge the moment either the bucket width changed or the
+# arithmetic was "simplified" in only one of the two places.
+WEEK_BUCKETS = 7 * 24 * 60 // CLIMATOLOGY_BUCKET_MIN
 # Hierarchical shrinkage strengths, in pseudo-observations. A 30-min bucket at a
 # 5-min cadence accrues only 6 observations per week, so an unsmoothed bucket
 # rate is 0/6 or 6/6 far more often than not: measured, 96.1% of bucket rates

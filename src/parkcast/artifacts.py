@@ -3,6 +3,11 @@
 One pair per city -- `grid-{city}.bin` and `lots-{city}.json` -- plus a
 `cities.json` index naming them. Taipei's pair keeps the original unsuffixed
 names, because the deployed app already fetches them.
+
+`week-{city}.bin` is a third, independent artifact per city: a per-lot
+time-of-week climatology table, republished on the corpus's own schedule
+rather than every tick. It is purely additive -- the grid/lots pair's format
+and bytes are unchanged by its existence.
 """
 import json
 import math
@@ -20,6 +25,16 @@ VERSION = 1
 HEADER_FORMAT = "<4sBIIHBBI"         # magic, version, generated_at, base_data_ts,
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)   # n_lots, n_horizons,
                                                # horizon_step_min, roster_id
+
+WEEK_MAGIC = b"PCW1"
+WEEK_HEADER_FORMAT = "<4sBIHHBI"    # magic, version, built_ts, n_lots,
+WEEK_HEADER_SIZE = struct.calcsize(WEEK_HEADER_FORMAT)  # n_buckets, bucket_min, roster_id
+
+# The probability byte that means "no observation", not "0%". Rounding a
+# fraction in [0, 1] to a percentage can never reach 255, so the sentinel is
+# unreachable by any real measurement -- a null cannot be mistaken for a value,
+# in either direction, without the reader special-casing anything.
+WEEK_UNKNOWN = 255
 
 CITIES_NAME = "cities.json"
 # The one city whose shard keeps the original, unsuffixed filenames. The live
@@ -89,6 +104,91 @@ def decode_header(blob: bytes) -> dict:
         "magic": magic, "version": version, "generated_at": generated_at,
         "base_data_ts": base_data_ts, "n_lots": n_lots,
         "n_horizons": n_horizons, "horizon_step_min": step, "roster_id": roster,
+    }
+
+
+def _week_prob_byte(probability: float | None) -> int:
+    """One cell's probability as a percentage byte, or `WEEK_UNKNOWN`.
+
+    `None` is the caller's "no observation in this bucket" -- an empty tier,
+    not a measured rate -- and must never collapse onto a real percentage.
+    Rounding-then-clamping a genuine `[0, 1]` handles the only failure mode
+    left after that: floating point can hand back `-1e-17` for a rate that is
+    exactly zero, or `1.0000000001` for one that is exactly one, and either
+    would raise `ValueError` out of the `bytearray` assignment below without
+    the clamp. It is not a defense against a probability the contract doesn't
+    allow; upstream owns computing a valid rate, this only owns the rounding.
+    """
+    if probability is None:
+        return WEEK_UNKNOWN
+    return max(0, min(100, round(probability * 100)))
+
+
+def encode_week(
+    lot_ids: Sequence[str],
+    cells: Mapping[str, Sequence[tuple[float | None, int]]],
+    *, built_ts: int,
+) -> bytes:
+    """Pack one city's climatology table: `WEEK_BUCKETS` cells per lot, in
+    `lot_ids` order, each cell two bytes -- a percentage (or `WEEK_UNKNOWN`)
+    and a capped support count.
+
+    This function computes nothing; every probability and support in `cells`
+    is trusted to already be the right number for its bucket (Task 2's job).
+    Its only work is the honesty-preserving trip through a byte: rounding a
+    `[0, 1]` fraction to a percentage, capping support at what a byte can hold,
+    and keeping a real 0% distinguishable from "never observed" the same way
+    `WEEK_UNKNOWN` keeps a real 0% distinguishable everywhere else in this
+    file. Support is capped, not clamped -- the contract already guarantees
+    non-negative, so there is nothing below zero to protect against, only an
+    unbounded count above what one byte can carry.
+
+    `cells` is keyed by lot id, but the row order actually written is
+    `lot_ids`' -- the same discipline `encode_grid` uses for the grid's rows --
+    so a cell dict built in a different order, or holding an extra key nobody
+    asked to publish, cannot silently reorder the table underneath its header.
+
+    Like `encode_grid`, `n_lots` and `roster_id` are *derived* from `lot_ids`
+    rather than accepted alongside it, so the header cannot describe a roster
+    the body does not have. `lot_ids` must be **bare**, published ids -- see
+    `roster_id` -- for the same reason `build_lots_json` insists on them: a
+    shard is one city, so the namespace would be a constant nobody needs, and
+    hashing the namespaced form would move the value the client compares
+    against `grid.bin`'s.
+
+    `built_ts` is the one freshness stamp this table carries. Unlike the grid,
+    which is republished every tick and so carries both `generated_at` and
+    `base_data_ts` for staleness display, the week table changes on the
+    timescale of the corpus it was learned from -- there is no "base reading"
+    for a climatology, only the moment it was built.
+    """
+    n_lots = len(lot_ids)
+    body = bytearray(n_lots * config.WEEK_BUCKETS * 2)
+    for i, lot_id in enumerate(lot_ids):
+        row = cells[lot_id]
+        if len(row) != config.WEEK_BUCKETS:
+            raise ValueError(
+                f"{lot_id!r} has {len(row)} buckets, expected {config.WEEK_BUCKETS}"
+            )
+        base = i * config.WEEK_BUCKETS * 2
+        for b, (probability, support) in enumerate(row):
+            off = base + b * 2
+            body[off] = _week_prob_byte(probability)
+            body[off + 1] = min(255, support)
+    header = struct.pack(
+        WEEK_HEADER_FORMAT, WEEK_MAGIC, VERSION, built_ts,
+        n_lots, config.WEEK_BUCKETS, config.CLIMATOLOGY_BUCKET_MIN, roster_id(lot_ids),
+    )
+    return header + bytes(body)
+
+
+def decode_week_header(blob: bytes) -> dict:
+    (magic, version, built_ts, n_lots, n_buckets, bucket_min,
+     roster) = struct.unpack(WEEK_HEADER_FORMAT, blob[:WEEK_HEADER_SIZE])
+    return {
+        "magic": magic, "version": version, "built_ts": built_ts,
+        "n_lots": n_lots, "n_buckets": n_buckets, "bucket_min": bucket_min,
+        "roster_id": roster,
     }
 
 
@@ -207,6 +307,11 @@ def lots_name(city: str) -> str:
     return "lots.json" if city == UNSUFFIXED_CITY else f"lots-{city}.json"
 
 
+def week_name(city: str) -> str:
+    """The published week-table filename for one city's shard."""
+    return "week.bin" if city == UNSUFFIXED_CITY else f"week-{city}.bin"
+
+
 def _write_atomic(out_dir: Path, name: str, blob: bytes) -> None:
     """One file, via a temp file in the same directory and a rename."""
     tmp = out_dir / f"{name}.tmp"
@@ -237,6 +342,22 @@ def publish(out_dir: Path, city: str, *, grid_blob: bytes, lots_blob: bytes) -> 
     out_dir.mkdir(parents=True, exist_ok=True)
     for name, blob in ((grid_name(city), grid_blob), (lots_name(city), lots_blob)):
         _write_atomic(out_dir, name, blob)
+
+
+def publish_week(out_dir: Path, city: str, *, week_blob: bytes) -> None:
+    """Write one city's week table via a temp file and rename, like `publish`.
+
+    Kept separate from `publish` rather than folded into its grid/lots pair:
+    the week table is built from the whole corpus and republished on its own,
+    much slower schedule, while `publish`'s pair moves every tick. Forcing
+    them through one call would tie a table that rarely changes to a rename it
+    does not need, for no reader that benefits from the two landing together --
+    `week.bin` carries its own `roster_id` for exactly the cross-file check
+    `publish`'s pair uses `generated_at`/`base_data_ts` for.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _write_atomic(out_dir, week_name(city), week_blob)
 
 
 def bbox(lots: Sequence[Lot]) -> list[float]:
