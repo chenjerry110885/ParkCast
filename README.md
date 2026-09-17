@@ -51,7 +51,8 @@ arrival-time forecast is the same machinery extended.
 ## Status
 
 Collecting since 2026-09-04 — on a laptop that slept until 2026-09-10, on an always-on desktop since.
-Figures at the time of writing (2026-09-14):
+Corpus figures below are at the time of writing (2026-09-14); test counts are refreshed to
+2026-09-17, on `feat/stage-a`:
 
 | | |
 |---|---|
@@ -61,7 +62,7 @@ Figures at the time of writing (2026-09-14):
 | Lots withheld as *not updating* | **112** at the first live publish (2026-09-14 09:11); 133 on a snapshot at 01:13 — the count moves as feeds freeze and recover (see the limitations) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **34.5 KB gzipped**, both files |
-| Tests | **527** Python (3 skipped) · **288** web · **66** Worker · **50** scripts |
+| Tests | **613** Python (3 skipped) · **414** web · **114** Worker · **55** scripts |
 
 Plans 1 through 3e are complete: the collector, the forecast grid, the ranked list, a map-first
 installable offline-capable app with place search, and — 3e — no forecast at all for a car park
@@ -69,9 +70,13 @@ whose feed has stopped updating. The **nationwide collector** — six cities' fe
 `Source` protocol, namespaced lot ids, per-city artifacts (`docs/sources.md`) — is code-complete and
 tested on `feat/nationwide-collector`, staged for a live rollout one city at a time; the app itself
 still shows Taipei only until that rollout finishes and a following spec teaches it to read the other
-cities' shards. **The forecast has been evaluated three times**; see the limitations below for what
-that found. A *trained* model is still to come, and deliberately so: the corpus needs weeks more
-before beating the baselines would mean anything.
+cities' shards. **Stage A** adds a per-lot, per-half-hour-of-week climatology table (`week.bin`) so
+the app can answer any arrival within seven days instead of only the next two hours, and turns the
+confidence label into a statement about how much history backs a forecast rather than how far away
+it is — code-complete and tested on `feat/stage-a`, not yet deployed. **The forecast has been
+evaluated three times**; see the limitations below for what that found. A *trained* model is still
+to come, and deliberately so: the corpus needs weeks more before beating the baselines would mean
+anything.
 
 ## The app
 
@@ -80,13 +85,15 @@ amber → teal probability ramp — never green, so the map stays readable under
 blindness. On a phone the ranked list lives in a frosted bottom sheet that peeks, half-opens or
 fills the screen on a drag (or the grip button, for keyboard and screen-reader users); at 768 px and
 wider it becomes a 420 px side panel, with locate and language buttons floating over the map instead
-of docked in a top bar. Arrival is a clock time — "18:35", not "in 15 min" — picked from a chip strip
-that only offers times inside the forecast's own window; each card shows a probability ring, a
-confidence label (High / Medium / Low, built from the blend's own 30-minute half-life, not a
-per-lot statistic), walking time, price, and — when the reading carried one — the observed free
-count at its age. Search finds car parks, MRT stations, landmarks, and streets and lanes down to the
-lane, from an offline place index built out of the basemap tiles: no geocoder, no key, nothing that
-leaves the phone. Every animation is gated by `prefers-reduced-motion`.
+of docked in a top bar. Arrival is a clock time — "18:35", not "in 15 min" — chosen from day, hour
+and minute pickers for any moment up to seven days out, not only the next two hours; each card shows
+a probability ring, a confidence label (High / Medium / Low, graded on the evidence behind it — a
+fresh live reading, or accumulated weeks of history at that half-hour of the week, whichever is
+stronger — never on how far away the arrival is), walking time, price, and — when the reading
+carried one — the observed free count at its age. Search finds car parks, MRT stations, landmarks,
+and streets and lanes down to the lane, from an offline place index built out of the basemap tiles:
+no geocoder, no key, nothing that leaves the phone. Every animation is gated by
+`prefers-reduced-motion`.
 
 ---
 
@@ -271,10 +278,10 @@ npm run dev --prefix web
 **Tests:**
 
 ```bash
-python -m pytest                       # 355, 3 skipped (or in a docker-collector container; see docker/README.md)
-npm test --prefix web                  # 288
-npm test --prefix worker               # 66
-node --test scripts/tests/*.test.mjs   # 50
+python -m pytest                       # 613, 3 skipped (or in a docker-collector container; see docker/README.md)
+npm test --prefix web                  # 414
+npm test --prefix worker               # 114
+node --test scripts/tests/*.test.mjs   # 55
 ```
 
 ---

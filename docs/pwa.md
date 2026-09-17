@@ -86,12 +86,53 @@ as haunted code rather than as a caching problem.
 | request | strategy | why |
 |---|---|---|
 | anything under `basemap/` (tiles and label glyphs), anything with a `Range` header | **never intercepted** | 44 MB of tiles is far more than an offline cache should hold, and the browser's own HTTP cache already keeps the ones a visitor has seen. A `Range` request comes back `206 Partial Content`, and caching that naively is a well-known way to serve corrupt data. |
+| `artifacts/week.bin` | **cache-first**, age-bounded at seven days | The one exception under `artifacts/` -- a climatology table rebuilt once a day, not a forecast rebuilt every five minutes. See below. |
 | `artifacts/grid.bin`, `artifacts/lots.json` | **network-first**, cache as fallback | A forecast from the network beats one from disk every time. |
 | navigations (`index.html`) | **network-first**, cache as fallback, and **never written back** | `index.html` is the one file Vite does *not* hash, so it is the one file for which "a cached URL cannot be stale" is false. Cache-first would pin the app to whichever hashed bundle names the first visit saw. The fallback copy is the one `install` stored and the runtime never replaces it -- see [one writer for the shell](#the-cached-shell-has-exactly-one-writer). |
 | hashed assets (`assets/*`) | **cache-first** | Vite hashes these filenames, so a changed file has a different name and is simply a cache miss. |
 | unhashed files under scope (`manifest.webmanifest`, `favicon.svg`, `icon-*.png`) | **cache-first, and nothing revalidates them** | A real if minor caveat, and the reason this is its own row: their names are fixed, so unlike `assets/*` a cached copy genuinely *can* be stale, and it stays until `VERSION` is bumped and `activate` drops the old cache. Traded on purpose -- an icon is not worth a conditional request on every load -- but it does mean re-running `build-icons.py` is not enough to ship a new icon. |
 | `places/taipei.json` | **cache-first, and nothing revalidates it** | Same rule as the row above -- the filename is fixed, not hashed -- reached the same way, since it falls out of rule 6 rather than a dedicated check: nothing in `routeFor` names `places/` specially. The difference is *when* it is first fetched: on demand, the first time a driver focuses the search box, not at install (see "Place index" in `docs/basemap.md`). A changed index needs the same `VERSION` bump as a changed icon would. |
 | non-GET, other origins, outside scope | **never intercepted** | The origin check is not redundant with the scope check. Under the default base `/` the scope prefix is `/`, which every path starts with, so origin is the only thing left. |
+
+### The one cache-first exception under `artifacts/`
+
+`week.bin` is a per-lot, per-half-hour-of-week climatology table -- 715 KB raw at Taipei's roster
+-- rebuilt once a day and fetched lazily, the first time a driver asks about an arrival past
+`grid.bin`'s own two-hour window (`docs/state-of-play.md`'s Stage A section has the measured
+gzip figure). Every other artifact is network-first because a forecast that is minutes old is a
+worse answer than one that is seconds old, and the whole point of `grid.bin`/`lots.json` is that
+the network copy is never something a cached one should be allowed to shadow. `week.bin` is the
+opposite kind of file: it barely moves day to day, so spending a conditional request on it every
+session just to be told "unchanged" is a cost with no matching benefit, and paying for 715 KB up
+front on a phone, on a metered connection, for a table most sessions never consult, would be a
+worse trade than answering instantly from whatever a device already has.
+
+Cache-first on its own has no expiry, though -- nothing retires an entry until `VERSION` moves, so
+without a second check a device would keep answering from the very first table it ever downloaded
+for the whole life of a release. `WEEK_MAX_AGE_MS` bounds that at seven days: the table spans
+exactly one week and is rebuilt daily, so a device that revalidates at least weekly can never be
+serving a table built before the week it is describing. A stale copy is still served whenever the
+network cannot supply a fresh one -- offline is exactly when "the climatology is a fortnight old"
+beats "no data" -- so the bound only ever forces one extra request a week, never a failure. The
+trade defends the *confidence grade* specifically, and only that: support behind a bucket only
+ever grows, so an old table can understate confidence but never overstate it. It does not defend
+the probabilities themselves, which do drift -- a car park that lost a floor to construction has a
+climatology that is wrong in both directions while the grade attached to it keeps climbing -- and
+the freshness badge on screen reports `grid.bin`'s age, not this table's, so a driver has no way
+to see that happening on their own.
+
+**That bound has to live in `sw.js`, and cannot live in the client, because `caches.match` ignores
+a request's `cache` mode.** `loadWeek` (`web/src/artifacts.ts`) does not even try to force a fresh
+copy, but it would not matter if it did: `artifacts.ts` already uses `fetch(url, { cache: "reload" })`
+elsewhere, in `loadArtifacts`'s roster-mismatch retry for `lots.json`, and rule 4a answers a
+matching request for `week.bin` from the worker's own cache regardless -- the `reload` mode is a
+request property the Fetch API defines for `fetch()` itself, and `caches.match` simply does not
+look at it. So a `builtTs` check written into the app could ask the browser to bypass every cache
+it knows about and still be handed the same stale bytes back. Only code running inside the service
+worker, ahead of the `caches.match` call, can decide a cached response is too old to serve -- which
+is what `agedOut` does, reading the `Last-Modified` header the Worker sends from the table's own
+`builtTs` (`worker/src/serve.ts`), the moment the climatology was built, not the moment it was
+last uploaded.
 
 ### The cached shell has exactly one writer
 
@@ -225,7 +266,13 @@ cache that is not the current one, and old hashed assets are never evicted other
 The map-first redesign is the worked example: it renamed every hashed asset in `assets/*` and added
 `places/taipei.json` as a new unhashed file, so the release bumped `VERSION` from `v1` to `v2` --
 without that bump, a visitor who had already loaded the app would keep serving the old bundle names
-and never fetch the new place index at all, since rule 6 only fetches a cache-first URL once.
+and never fetch the new place index at all, since rule 6 only fetches a cache-first URL once. Stage A
+bumped `v2` to `v3` for a subtler reason: `artifacts/week.bin` did not exist as a route at all before
+rule 4a introduced it, so there was no stale entry of its own to invalidate. Every already-installed
+client's cache was still a v2 cache, though, built under rules that had never heard of `week.bin` --
+and reasoning out whether that particular routing change was safe to leave an old cache running under
+is a harder question than simply not asking it. Any change to `routeFor` bumps `VERSION` on that
+principle now, whether or not a specific stale entry can be named.
 
 `web/public/_headers` serves `/sw.js` with `Cache-Control: no-cache` -- the browser always revalidates
 it, so a visitor's next load sees a bumped `VERSION` immediately rather than an HTTP-cached copy of

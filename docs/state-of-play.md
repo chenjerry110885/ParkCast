@@ -1,4 +1,4 @@
-# State of play — 2026-09-15
+# State of play — 2026-09-17
 
 Written for a session starting cold. `CLAUDE.md` has the standing facts; this has
 **where things are right now, what was just learned, and what to do next**.
@@ -11,17 +11,20 @@ Plans 1 through 3e are complete: collector, forecast grid, ranked list, a map-fi
 offline-capable app with place search, and — Plan 3e — no forecast for a car park whose feed has stopped
 updating. **355 Python tests (3 skipped) · 288 web TypeScript across 29 files · 66 Worker TypeScript · 50
 script tests** (real runs on the `feat/ui-redesign` branch, 2026-09-15; `node --test scripts/tests/*.test.mjs`
-needs the explicit glob — a bare directory runs nothing on this Node). **The app is live at
-<https://parkcast.tpe-dev.workers.dev>** (Cloudflare Workers Free, since 2026-09-15): the desktop collector
-uploads each forecast to one KV key, and the app, the basemap tiles and the label fonts are static assets.
-See [`docs/deploy.md`](deploy.md).
+needs the explicit glob — a bare directory runs nothing on this Node; **Stage A's own, newer counts are
+below**). **The app is live at <https://parkcast.tpe-dev.workers.dev>** (Cloudflare Workers Free, since
+2026-09-15): the desktop collector uploads each forecast to one KV key, and the app, the basemap tiles and
+the label fonts are static assets. See [`docs/deploy.md`](deploy.md).
 
-The four newest things in this document: the collector's first unbroken days on the desktop turned up
+The five newest things in this document: the collector's first unbroken days on the desktop turned up
 **car parks whose readings never move**, which the app was publishing as certainties; a second and
 third evaluation **reversed the first one's verdict** on long horizons; the app is now **map-first**
-after a UI/UX redesign shipped the same day as deployment — see "UI redesign — 2026-09-15" below; and
-a **nationwide collector** for five more cities is code-complete and tested on a branch, not yet live
-— see "Nationwide collection" below.
+after a UI/UX redesign shipped the same day as deployment — see "UI redesign — 2026-09-15" below; a
+**nationwide collector** for five more cities is code-complete and tested on a branch, not yet live
+— see "Nationwide collection" below; and **Stage A** lets the app answer any arrival within seven
+days instead of only the next two hours, and turns the confidence label into a statement about how
+much history backs a forecast rather than how far away it is — code-complete and tested on
+`feat/stage-a`, not yet deployed — see "Stage A" below.
 
 ## Which machine is which
 
@@ -218,9 +221,11 @@ the map, through a dedicated `lots-hover-halo` layer whose filter is swapped to 
 `setFilter` on one layer, never a rebuilt source, because a pointer crossing the list changes it many
 times a second.
 
-**Deferred, per the spec's own out-of-scope list (§12):** forecasts beyond the grid's window; a
-forecast free-space count; per-lot statistical confidence (today's label is model-structure, not
-per-lot); dot clustering; house-number geocoding. Also deferred: re-branding the app icon —
+**Deferred, per the spec's own out-of-scope list (§12):** forecasts beyond the grid's window
+(built by Stage A; see "Stage A" below); a forecast free-space count; per-lot statistical
+confidence (true when this shipped — Stage A replaced the distance-only label with one graded on
+evidence, itself per-lot; see below); dot clustering; house-number geocoding. Also deferred:
+re-branding the app icon —
 `theme-color` and the manifest icons stay `#1d5fd0` because the generated icons still carry that
 accent, and recolouring one without the other would be a worse mismatch than the current colour.
 
@@ -309,6 +314,59 @@ explicitly (`tick_based=False`, no `ticks_seen`/`lots_with_gaps` figure) rather 
 that would look like the tick-based cities' but measure something else. Lifting this would need one of
 those feeds to distinguish "still reporting the same number" from "not answering," which none of them
 do today.
+
+---
+
+## Stage A: any-time arrival — built 2026-09-16 → 2026-09-17 on `feat/stage-a`, not yet deployed
+
+`grid.bin` forecasts 120 minutes ahead; the picker let a driver ask about tomorrow evening anyway,
+and `horizonColumn` quietly clamped that to the +120-minute column and presented it as the answer.
+Stage A adds a second artifact, `week.bin` — a per-lot, per-half-hour-of-week climatology table,
+rebuilt once a day — so the app can answer any arrival up to seven days out for real, and a new
+`ArrivalPicker` (day/hour/minute `<select>`s) replaces the old two-hour-capped chip strip. Full
+mechanics, including the seam arithmetic and the Thursday-anchored bucket 0, are in `CLAUDE.md`'s
+"Stage A" section; this is the measured numbers.
+
+**Size, measured 2026-09-17 at Taipei's real roster (1,090 lots, from
+`web/.dev-artifacts/lots.json`), via `scripts/build-dev-week.py`** — which builds a table shaped
+exactly like the published one without ever reading `data/`: **732,498 bytes raw (715.3 KiB)**,
+exact arithmetic (`18` header bytes `+ 1,090 × 336 buckets × 2`), independent of any particular
+climatology. **Gzipped at level 9: 4,206 bytes.** That number is real but optimistic: the script's
+synthetic corpus has no day-of-week variation and identical support in every bucket, both of which
+compress far better than real history will. A repetition-blind lower bound on the same bytes (the
+probability byte's own Shannon entropy, crediting no repeated runs at all) is still only ~167 KB.
+Either figure sits comfortably inside the spec's **≤ 600 KB gzipped** gate. If a live table ever
+does approach it, the documented fallback is to narrow the *support* byte — never to raise the
+gate, and never to narrow the *probability* byte, which the seam tolerance below depends on at
+full precision. Confirmed live the same day: `/artifacts/week.bin` on the deployed site answers
+`404` — this branch has not shipped.
+
+**The seam.** Inside +120 min the grid answers; beyond it, `week.bin`'s cell for the arrival's own
+bucket, blended with the live reading through the same `blend()` the server's `Blend.predict`
+uses, answers instead. At exactly +120 min both are defined and `seam.test.ts` requires them to
+agree within **1 percentage point** — arithmetic, not slack: the grid's own rounding and the
+week cell's rounding (scaled by the blend weight at that horizon) together can reach at most
+0.96875 pp of honest disagreement, leaving **0.03125 pp of headroom**. A real bug lands 10–42 pp
+outside it.
+
+**Confidence changed meaning.** The High/Medium/Low label used to be pure distance-from-now; it now
+grades the evidence behind a forecast — a fresh live reading, or accumulated weeks of history at
+that half-hour of the week, whichever is stronger. A lot with a month of Tuesday-21:20 history can
+read "high" a day and a half out; a lot nobody has watched at 3 a.m. can read "low" five minutes
+out. See `confidence.ts` and `CLAUDE.md`'s Stage A section for the exact bars.
+
+**Test counts, all real runs, 2026-09-17, in this worktree:** `./.venv/Scripts/python.exe -m
+pytest -q` → **613 passed, 3 skipped** · `npx vitest run` (`web/`) → **414 passed**, 32 files ·
+`npm test` (`worker/`) → **114 passed**, 4 files · `node --test scripts/tests/*.test.mjs` →
+**55 passed**. **The Python count is a worktree count, not main's, and that gap is load-bearing.**
+Three tests skip wherever `data/` is absent — `tests/test_artifacts_integration.py:36` and
+`tests/test_history_bounds.py:39,60`, both `"no collected data on this machine"` — because this
+worktree has none. They run in the main checkout. `test_artifacts_integration.py` is the exact
+test that caught the id-convention defect at merge on the nationwide-collector branch, and Stage A
+also modifies `artifacts.py`, so this green worktree run is necessary and not sufficient: **the
+suite must run again in the main checkout before Stage A is considered verified**, and not by
+copying `data/` into the worktree — the live collector owns it, and a mid-write snapshot would
+make a passing test meaningless.
 
 ---
 

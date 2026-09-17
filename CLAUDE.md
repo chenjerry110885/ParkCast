@@ -441,7 +441,7 @@ decides layout.
 | `web/src/layout/{Shell,BottomSheet,SidePanel}.tsx`, `layout/sheet.ts`, `layout/useMediaQuery.ts` | the two arrangements, and the pure snap-point arithmetic behind the sheet |
 | `web/src/map/{MapView.tsx,useMapLibre.ts,basemapStyle.ts,lotSource.ts,colour.ts}` | the map itself: MapLibre lifecycle, the self-hosted basemap style, the lots GeoJSON source with its selected, best-pick and hovered-card halo layers (the hover one is a `setFilter` on the hovered id, under the other two), and the red→amber→teal ramp (`colour.ts`) |
 | `web/src/{arrival,confidence,places,motion}.ts`, `web/src/useGeolocation.ts` | the redesign's pure logic modules, each independently tested (beside the older `rank.ts`, `geo.ts`, `format.ts`, `i18n.ts`, `artifacts.ts`) |
-| `web/src/components/{TopBar,PlaceSearch,ArrivalStrip,LotCard,LotList,ProbabilityRing,ConfidencePill,FreshnessBadge,Skeleton,Notice,LocateButton,LangToggle}.tsx` | UI |
+| `web/src/components/{TopBar,PlaceSearch,ArrivalPicker,LotCard,LotList,ProbabilityRing,ConfidencePill,FreshnessBadge,Skeleton,Notice,LocateButton,LangToggle}.tsx` | UI |
 | `web/src/styles/{tokens,base,motion,components}.css` | replaces `index.css`, imported from `main.tsx` in that order |
 | `web/src/icons.tsx` | inline SVG icon components, no icon pack, no emoji |
 
@@ -574,6 +574,113 @@ that would look like the others but measure something else; `polls_seen` (the co
 count) stands in as evidence the collector kept asking, without claiming to be a per-lot check.
 Lifting this would need each of those three feeds to distinguish "still X" from "not answering,"
 which none of them do today.
+
+### Stage A: any-time arrival (built 2026-09-16 → 2026-09-17 on `feat/stage-a`, not yet deployed)
+
+`grid.bin` only ever forecast 120 minutes ahead. A driver asking about tomorrow evening got the
++120-minute column presented as if it answered that question, because `horizonColumn` clamps to
+the grid's last column rather than refusing an out-of-range horizon — silently correct as an
+accessor, silently wrong as an answer. Stage A closes that gap with a second artifact,
+`week.bin`, and a picker that can reach it.
+
+**The artifact.** A per-lot, per-half-hour-of-week climatology table: one row per lot, `336`
+buckets a row (`config.WEEK_BUCKETS = 7 * 24 * 60 // CLIMATOLOGY_BUCKET_MIN`), two bytes a
+bucket — a probability (`0..100`, or `255` for "no observation here") and its support, the raw
+observation count behind that cell, capped at `255`. `WEEK_HEADER_FORMAT = "<4sBIHHBI"`: magic
+`PCW1`, schema version, `built_ts`, `n_lots`, `n_buckets`, `bucket_min`, `roster_id` — the same
+CRC32-over-ordered-ids check `grid.bin` already uses, so a table indexed against the wrong roster
+is refused rather than silently misattributing one car park's history to another. Built once a
+day from the corpus's own shrinkage chain (`week.build_week_cells`, through the same
+`forecast.Climatology` the live forecast uses, never a re-derivation of it), not every five
+minutes — a half-hour bucket is the resolution the climatology is *computed* at, so anything
+finer would be interpolation dressed as knowledge.
+
+**Measured: 732,498 bytes (715.3 KiB) raw at Taipei's real roster — 1,090 lots**, exactly
+`18 + 1,090 × 336 × 2`, so this is arithmetic on the published lot count and not something that
+can drift from a sample. Measured 2026-09-17 with `scripts/build-dev-week.py`, which builds a
+real table shaped exactly like the published one — against `web/.dev-artifacts/lots.json`'s
+actual roster, through the real encoder — without ever reading `data/`; its climatology numbers
+are synthetic (deterministic per-lot, per-hour rates, not the live corpus), so treat the raw size
+as exact and the specific *probabilities* as illustrative only. **Gzipped (level 9): 4,206
+bytes.** That number is real but not a promise about the live table: this synthetic corpus has no
+day-of-week variation and gives every bucket the same support count, both of which compress far
+better than real, noisier history will. A repetition-blind bound on the same bytes — Shannon
+entropy of the probability byte alone, ignoring every repeated run — is still only ~167 KB. Either
+way, both figures sit far inside the spec's **≤ 600 KB gzipped** gate, with wide margin either
+side of the uncertainty. **If a live table ever does approach the gate, the fallback is to narrow
+the *support* byte** — e.g. to a 2-bit bucket, four tiers instead of 256 — **never to widen the
+gate, and never to narrow the *probability* byte**: the seam tolerance below has only 0.03125 pp
+of headroom, and it is spent entirely on the probability byte's own rounding — a coarser
+probability breaks the seam test for real, where a coarser support byte costs only how finely
+`confidence.ts` can grade evidence. Confirmed 2026-09-17: `/artifacts/week.bin` on the live site
+still answers `404` — this branch has not shipped, and the deployed app still answers only from
+`grid.bin`/`lots.json`.
+
+**Confidence now means evidence, not distance.** Before Stage A the High/Medium/Low label was
+purely a function of how far the arrival was from now — a car park with a month of consistent
+Tuesday-21:20 history read "low" for an arrival three hours out, for no reason but the clock.
+`confidence.ts`'s `confidenceFor` grades on two kinds of evidence instead, either sufficient on
+its own: a **fresh live reading** — no more than 15 min old itself (`READING_FRESH_MAX_MIN`), for
+an arrival no more than 30 min from that reading (`HIGH_MAX_MIN`, mirroring the blend's own
+`BLEND_HALF_LIFE_MIN`, where persistence still carries at least half the weight) — or
+**accumulated support** — the raw observation count behind this half-hour-of-week bucket, `support / 6`
+(`WEEKLY_OBSERVATIONS`) floored to roughly how many weeks of this exact slot stand behind it:
+`≥ 24` observations (~4 weeks) reads high, `≥ 6` (~1 week) reads medium. A lot with a month of
+history at this hour now reads "high" a day and a half out; a lot nobody has watched at 3 a.m.
+reads "low" five minutes out. `reason` names which kind of evidence earned the grade — the
+reading wins ties at the high bar (it is the more specific claim), the weeks win ties at the
+medium bar (it is the more durable one, and citing it keeps the popover's wording from flapping
+as the clock runs) — see the header of `confidence.ts` for the full derivation of why the split
+sits exactly on the blend's own half-life.
+
+**The seam: `grid.bin` answers inside +120 min, `week.bin` answers beyond it, and they must agree
+where they meet to within 1 percentage point.** `probabilityForLot` (`web/src/App.tsx`) is the
+switch: `horizonMin <= gridSpanMin` reads the grid; past it, `week.bin`'s cell for the arrival's
+own bucket is blended with the live reading through the *same* `blend(f, climatology,
+minutesFromReading)` the server's `Blend.predict` computes the grid with, so the two sides are
+never independent restatements of the model. At exactly +120 min both are defined, and
+`seam.test.ts` pins the gap between them to `TOLERANCE_PP = 1`, which is arithmetic, not slack:
+the grid rounds its finished blend once (≤ 0.5 pp), the week cell rounds its climatology *first*
+and the client then scales that rounding error by `1 - weight = 0.9375` at this horizon
+(≤ 0.46875 pp) — nothing honest can exceed 0.96875 pp, leaving **0.03125 pp of headroom** under
+the 1 pp gate. A real bug (a wrong `weight`, bucket, row, or a swapped cell byte) lands 10–42 pp
+outside it, nowhere near the boundary, so do not widen this tolerance to make a failure go away —
+the fix is in the code. Every byte the test compares is written by Python
+(`scripts/build-seam-fixture.py`, pinned byte-identical by `tests/test_seam_fixture.py`), never
+constructed in TypeScript, because a fixture built on one side of the language boundary could only
+ever prove the client agrees with itself.
+
+**Bucket 0 is Thursday 00:00 Taipei, not Monday — and this cost real time on this branch.**
+`forecast.week_bucket` anchors on the bare Unix epoch and does no calendar arithmetic:
+`local_min = (ts + 8h) // 60`, `bucket = (local_min // 30) % 336`. 1970-01-01 was a **Thursday**,
+so bucket 0 falls there, not on a Monday. An early draft of this plan asserted a Monday-anchored
+table; a client written to satisfy it would have disagreed with Python by 192 buckets — four full
+days — while still passing a test written to match the same wrong assumption, because a
+hand-typed expectation table can only ever restate one author's arithmetic back at itself.
+`web/src/week.ts`'s `weekBucket` must match `week_bucket` exactly (including floor division, not
+truncation, so negative timestamps bucket correctly), and `scripts/build-seam-fixture.py` now
+generates every fixture row by calling the real Python function rather than restating its
+arithmetic — the same discipline `build-dev-week.py` applies to the artifact's bytes.
+
+**`ArrivalPicker` replaced `ArrivalStrip`.** The chip strip answered two real complaints —
+"limiting the prediction to two hours is weird," and a scroll that dragged like a slider on
+desktop when a driver expected two ordinary dropdowns — with three native `<select>`s for day,
+hour and minute (`MAX_LEAD_SEC = 7 * 24 * 3600`), keyboard- and screen-reader-complete for free
+and impossible to drag into a value change. `web/src/components/ArrivalStrip.tsx` no longer
+exists.
+
+**Test counts, all real runs, 2026-09-17, in this worktree:** `./.venv/Scripts/python.exe -m
+pytest -q` → **613 passed, 3 skipped**; `npx vitest run` in `web/` → **414 passed** (32 files);
+`npm test` in `worker/` → **114 passed** (4 files); `node --test scripts/tests/*.test.mjs` →
+**55 passed**. **The Python figure is a worktree figure, not main's.** Three tests skip wherever
+`data/` is absent — `tests/test_artifacts_integration.py:36` and `tests/test_history_bounds.py:39,60`,
+both `"no collected data on this machine"` — because this worktree has no corpus. In the main
+checkout, which does, they run. `test_artifacts_integration.py` is the exact test that caught the
+id-convention defect at merge on the nationwide-collector branch, and Stage A also modifies
+`artifacts.py`, so a green worktree run here is necessary and not sufficient: **the suite must run
+again in the main checkout, where `data/` exists, before this branch is considered verified** —
+and not by copying `data/` into the worktree, since the live collector owns it and a mid-write
+snapshot would make a passing test meaningless.
 
 ---
 
