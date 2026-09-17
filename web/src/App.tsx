@@ -608,6 +608,19 @@ export default function App() {
   /**
    * The chosen arrival is past everything `grid.bin` covers, so the number can
    * only come from `week.bin`.
+   *
+   * **The order of the three predicates below matters, and this is the reason.**
+   * `needsWeek = beyondGrid && !withheld` only says what it means because
+   * `distantArrival` implies this -- and that implication holds only while
+   * `baseDataTs <= nowSec`, since `beyondGrid` measures from the reading and
+   * `distantArrival` from the clock. Under a device clock running behind the
+   * server an arrival could be distant (so not withheld) without being past the
+   * grid, and `probabilityForLot` would then take the grid path and hand back
+   * the clamped last column for a time past its span. It needs a wrong client
+   * clock to happen, `ageMin`'s own `Math.max(0, ...)` already keeps
+   * `forecastExpired` false in that state, and the pre-10b code clamped the
+   * same way -- but a future reader rearranging these three has nothing else
+   * telling them the order is load-bearing.
    */
   const beyondGrid = grid !== null && horizonFromReadingMin > gridSpanMin(grid);
 
@@ -1068,6 +1081,7 @@ export default function App() {
             arrivalTs={arrivalTs}
             horizonFromReadingMin={horizonFromReadingMin}
             supportById={supportById}
+            fromHistory={fromHistory}
             bestId={bestId}
             selectedId={selectedLotId}
             onSelect={selectLot}

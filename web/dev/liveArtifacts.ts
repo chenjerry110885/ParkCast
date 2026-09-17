@@ -13,9 +13,24 @@ export interface DevResponse {
 }
 export type Next = () => void;
 
+/**
+ * The artifact paths the dev server answers for. Anything not listed here
+ * falls through to Vite, which answers `index.html` -- so a missing entry is
+ * not a 404 the client can recognise but an HTML body served as the artifact,
+ * and `loadWeek` meets `<!doctype` where a `PCW1` magic should be.
+ *
+ * `week.bin` was missing until Task 10b went looking for it: the client fetches
+ * it lazily, only for an arrival past the grid's two-hour window, so the whole
+ * climatology half of the screen was unreachable in dev and nobody had cause
+ * to notice. `scripts/build-dev-week.py` writes a local one (the live copy is
+ * ~715 KB, and `sync-artifacts.mjs` copies out of `data/`, which a live
+ * collector owns); with `PARKCAST_LIVE_ORIGIN` set the same entry relays the
+ * published table, lazily and inside the same per-hour budget as the rest.
+ */
 export const ARTIFACT_TYPES: ReadonlyMap<string, string> = new Map([
   ["/artifacts/grid.bin", "application/octet-stream"],
   ["/artifacts/lots.json", "application/json; charset=utf-8"],
+  ["/artifacts/week.bin", "application/octet-stream"],
 ]);
 
 export interface LiveOptions {

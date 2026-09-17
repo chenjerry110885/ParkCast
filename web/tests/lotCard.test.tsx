@@ -14,7 +14,7 @@ const row = (over: Partial<Ranked> = {}, lotOver: Partial<Lot> = {}): Ranked => 
 // `support: 0` is the honest default, not a placeholder: a card the week table
 // has never been consulted for has no history behind this half-hour to cite.
 // Tests that want history say so themselves.
-const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, arrivalTs: BASE + 22 * 60, horizonFromReadingMin: 22, support: 0, onSelect: vi.fn(), index: 0 };
+const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, arrivalTs: BASE + 22 * 60, horizonFromReadingMin: 22, support: 0, fromHistory: false, onSelect: vi.fn(), index: 0 };
 
 beforeEach(() => vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} }))));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -53,6 +53,29 @@ describe("LotCard", () => {
     render(<ol><LotCard row={row({ probability: null, cost: null }, { u: BASE - 30 * 3600 })} {...props} best={false} selected={false} /></ol>);
     expect(screen.getByTestId("lot-probability")).toHaveTextContent(t("en").notUpdating);
     expect(screen.getByTestId("lot-row")).toHaveTextContent("No change in 30 h");
+  });
+
+  it("keeps saying it when the number beside it is climatology rather than a reading", () => {
+    // A grid number is direct evidence this lot moved at the reading, so it
+    // cancels a stale `u` from an older `lots.json`. A week number is what the
+    // lot usually does at this hour and is evidence of nothing about its feed,
+    // so it must not -- otherwise a car park that stopped reporting renders as
+    // a bare confident percentage at every arrival past the grid's window.
+    const stalledLot = { u: BASE - 30 * 3600 };
+    const { rerender } = render(
+      <ol><LotCard row={row({}, stalledLot)} {...props} best={false} selected={false} /></ol>,
+    );
+    expect(screen.getByTestId("lot-probability")).toHaveTextContent("86%");
+    expect(screen.queryByTestId("lot-stalled")).toBeNull();
+
+    // Same row, same 86%, different source.
+    rerender(
+      <ol><LotCard row={row({}, stalledLot)} {...props} fromHistory best={false} selected={false} /></ol>,
+    );
+    expect(screen.getByTestId("lot-probability")).toHaveTextContent("86%");
+    const stalled = screen.getByTestId("lot-stalled");
+    expect(stalled).toHaveTextContent(t("en").notUpdating);
+    expect(stalled).toHaveTextContent("No change in 30 h");
   });
 
   it("shows an unparsed fare as words, a per-entry fare per entry, and a range as a range", () => {

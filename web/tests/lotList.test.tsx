@@ -25,7 +25,7 @@ const row = (id: string): Ranked => ({ lot: lot(id), id, index: 0, probability: 
 // An empty `supportById` is what an unfetched `week.bin` looks like: every card
 // reads 0, which honestly says there is no history behind this hour yet. This
 // file is about the reorder animation, so that is all it needs.
-const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, arrivalTs: BASE + 22 * 60, horizonFromReadingMin: 22, supportById: new Map<string, number>(), bestId: null, onSelect: vi.fn() };
+const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, arrivalTs: BASE + 22 * 60, horizonFromReadingMin: 22, supportById: new Map<string, number>(), fromHistory: false, bestId: null, onSelect: vi.fn() };
 
 const A = row("A");
 const B = row("B");

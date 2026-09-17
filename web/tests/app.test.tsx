@@ -322,21 +322,29 @@ function encodeWeek(
   marked: { percent: number; support: number },
   filler: { percent: number; support: number },
   rosterId: number = ROSTER_ID,
+  nLots = 1,
 ): ArrayBuffer {
-  const buf = new ArrayBuffer(WEEK_HEADER_SIZE + WEEK_BUCKETS * 2);
+  const buf = new ArrayBuffer(WEEK_HEADER_SIZE + nLots * WEEK_BUCKETS * 2);
   const dv = new DataView(buf);
   const bytes = new Uint8Array(buf);
   bytes.set(new TextEncoder().encode("PCW1"), 0);
   dv.setUint8(4, 1);
   dv.setUint32(5, BASE_DATA_TS - 3600, true); // builtTs: rebuilt daily, not per tick
-  dv.setUint16(9, 1, true); // nLots
+  dv.setUint16(9, nLots, true);
   dv.setUint16(11, WEEK_BUCKETS, true);
   dv.setUint8(13, 30); // bucketMin
   dv.setUint32(14, rosterId, true);
-  for (let b = 0; b < WEEK_BUCKETS; b += 1) {
-    const cell = b === bucket ? marked : filler;
-    bytes[WEEK_HEADER_SIZE + b * 2] = cell.percent;
-    bytes[WEEK_HEADER_SIZE + b * 2 + 1] = cell.support;
+  // Row-major, lot then bucket, matching `probabilityAt`'s
+  // `(lotIndex * N_BUCKETS + bucket) * 2`. Every lot gets the same pair, which
+  // is all the multi-lot callers need: they are about which *card* says what,
+  // not about telling two lots' climatologies apart.
+  for (let lot = 0; lot < nLots; lot += 1) {
+    for (let b = 0; b < WEEK_BUCKETS; b += 1) {
+      const cell = b === bucket ? marked : filler;
+      const at = WEEK_HEADER_SIZE + (lot * WEEK_BUCKETS + b) * 2;
+      bytes[at] = cell.percent;
+      bytes[at + 1] = cell.support;
+    }
   }
   return buf;
 }
@@ -530,12 +538,24 @@ describe("a car park whose feed is not updating", () => {
   const NAME = "中山區行政中心停車場";
 
   /** The standard fixture, with the unpriced lot marked not updating. */
-  function stubNotUpdating(cell: number = UNKNOWN) {
+  function stubNotUpdating(cell: number = UNKNOWN, week: WeekStub = null) {
     const lots = LOTS.map((lot) => (lot.id === "TPE_UNPRICED" ? { ...lot, u: LAST_UPDATE } : lot));
     const perLot = [88, 61, 45, cell];
     const body: number[] = [];
     for (const lot of lots) for (let h = 0; h < N_HORIZONS; h += 1) body.push(perLot[lot.i] ?? UNKNOWN);
-    stubFetch(encodeGrid(body, lots.length), { ...makeLotsDoc(), lots });
+    stubFetch(encodeGrid(body, lots.length), { ...makeLotsDoc(), lots }, week);
+  }
+
+  /** The whole roster's climatology, so a far arrival has a number for every card. */
+  const FAR_CLIMATOLOGY = 73;
+  function weekForRoster(ts: number): ArrayBuffer {
+    return encodeWeek(
+      weekBucket(ts),
+      { percent: FAR_CLIMATOLOGY, support: 30 },
+      { percent: 20, support: 0 },
+      ROSTER_ID,
+      LOTS.length,
+    );
   }
 
   it("says so, and for how long, instead of a probability", async () => {
@@ -563,9 +583,16 @@ describe("a car park whose feed is not updating", () => {
   it("lets a fresher grid's forecast win over a stale lots.json", async () => {
     stubNotUpdating(72);
     await renderLocated();
-    const chance = within(rowFor(NAME)).getByTestId("lot-probability");
+    const row = rowFor(NAME);
+    const chance = within(row).getByTestId("lot-probability");
     expect(chance.textContent).toContain("72%");
     expect(chance.textContent).not.toContain(t("en").notUpdating);
+    // Nowhere else on the card either. The grid is built from the same reading
+    // `u` is measured to, so a number in it is direct evidence this lot moved
+    // and the stale `u` is the older file being wrong. That is the half of the
+    // rule a week-sourced number must NOT inherit -- see the far-arrival test
+    // at the bottom of this describe.
+    expect(within(row).queryByTestId("lot-stalled")).toBeNull();
   });
 
   it("still says 'no data' for a lot with no forecast and no last update", async () => {
@@ -585,6 +612,74 @@ describe("a car park whose feed is not updating", () => {
     const row = rowFor(NAME);
     expect(within(row).getByTestId("lot-probability").textContent).toContain("資料未更新");
     expect(row.textContent).toContain("已 30 小時未變動");
+  });
+
+  it("still says so at an arrival answered from the week table, and keeps the number", async () => {
+    // Two independent facts, and the driver is owed both. The climatology for
+    // tomorrow at 21:20 is a real answer -- it is what this car park usually
+    // has free at that hour, and it does not depend on a recent reading. This
+    // lot's own feed stopped 30 hours before the reading, and that is still
+    // true. `notUpdatingHours` used to drop the second the moment the first
+    // existed, on a rationale written for the grid: a *grid* number proves the
+    // lot moved, a week number proves nothing of the kind. So out here a dead
+    // car park rendered as a bare confident percentage that said nothing.
+    const far = tomorrowEvening();
+    stubNotUpdating(UNKNOWN, weekForRoster(far));
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() =>
+      expect(within(rowFor(NAME)).getByTestId("lot-probability").textContent).toContain(`${FAR_CLIMATOLOGY}%`),
+    );
+
+    const row = rowFor(NAME);
+    // The number is kept -- suppressing it would throw away a good answer...
+    expect(within(row).getByTestId("lot-probability").textContent).toContain(`${FAR_CLIMATOLOGY}%`);
+    // ...and the card says the feed has stopped, in words and in hours, among
+    // the lot's own facts rather than as a hedge on the forecast.
+    const stalled = within(row).getByTestId("lot-stalled");
+    expect(stalled.textContent).toContain(t("en").notUpdating);
+    expect(stalled.textContent).toContain(fillTemplate(t("en").unchangedForTemplate, { n: 30 }));
+
+    // A lot whose feed is fine says nothing of the kind at the same arrival:
+    // this is per-lot, and must not become a property of the arrival.
+    const healthy = rowFor("市府路一號停車場");
+    expect(within(healthy).getByTestId("lot-probability").textContent).toContain(`${FAR_CLIMATOLOGY}%`);
+    expect(within(healthy).queryByTestId("lot-stalled")).toBeNull();
+
+    // ...and back inside the grid's window, where the ring itself carries the
+    // words, the card still says it. The near path is unchanged.
+    selectArrival(ceilToStep(nowSec() + 30 * 60));
+    const near = rowFor(NAME);
+    expect(within(near).getByTestId("lot-probability").textContent).toContain(t("en").notUpdating);
+    expect(within(near).getByTestId("lot-stalled").textContent).toContain(
+      fillTemplate(t("en").unchangedForTemplate, { n: 30 }),
+    );
+  });
+
+  it("says so during a stale period too, which is when this collector is paused", async () => {
+    // The state 10b opened up: the reading has expired, so a near arrival is
+    // withheld and a far one is answered from history. A dead lot must say so
+    // in both halves -- this is about one car park's feed, never about the
+    // global reading, and the two must not be allowed to merge.
+    ageArtifact(383);
+    const far = tomorrowEvening();
+    stubNotUpdating(UNKNOWN, weekForRoster(far));
+    await renderLocated();
+
+    // Near, and withheld: no number at all, and the ring carries the words.
+    expect(within(rowFor(NAME)).getByTestId("lot-probability").textContent).toContain(t("en").notUpdating);
+    expect(within(rowFor(NAME)).getByTestId("lot-stalled").textContent).toContain(
+      fillTemplate(t("en").unchangedForTemplate, { n: 30 }),
+    );
+
+    selectArrival(far);
+    await waitFor(() =>
+      expect(within(rowFor(NAME)).getByTestId("lot-probability").textContent).toContain(`${FAR_CLIMATOLOGY}%`),
+    );
+    const stalled = within(rowFor(NAME)).getByTestId("lot-stalled");
+    expect(stalled.textContent).toContain(t("en").notUpdating);
+    expect(stalled.textContent).toContain(fillTemplate(t("en").unchangedForTemplate, { n: 30 }));
   });
 });
 
@@ -1568,9 +1663,15 @@ describe("a stale reading and an arrival past the grid's window", () => {
     // granularity the picker actually offers.
     const inside = floorToStep(nowSec() + SPAN_SEC);
     const outside = ceilToStep(nowSec() + SPAN_SEC);
-    // A fixture that did not straddle the line would prove nothing.
+    // A fixture that did not straddle the line would prove nothing...
     expect(inside - nowSec()).toBeLessThanOrEqual(SPAN_SEC);
     expect(outside - nowSec()).toBeGreaterThan(SPAN_SEC);
+    // ...and one that straddled a *bucket* edge as well would prove less than
+    // this test claims below: the near arrival would then read the filler 20%
+    // if it were answered, rather than the identical 73% that makes the silence
+    // unambiguous. Asserted rather than left to a comment, because a constant
+    // moving five minutes would quietly falsify it.
+    expect(weekBucket(inside)).toBe(weekBucket(outside));
     stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: weekFor(outside) });
     await renderLocated();
 

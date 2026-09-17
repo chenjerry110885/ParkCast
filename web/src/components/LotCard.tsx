@@ -62,6 +62,15 @@ export interface LotCardProps {
    * back.
    */
   support: number;
+  /**
+   * Whether `row.probability` was read out of `week.bin` rather than out of
+   * `grid.bin` -- true for every arrival past the grid's own window.
+   *
+   * The card needs this for one reason: a grid number proves this lot was
+   * moving at the reading, and a climatology number proves nothing of the
+   * kind. See `notUpdatingHours`, which is where the distinction is spent.
+   */
+  fromHistory: boolean;
   /** Whether this is the list's single top pick. */
   best: boolean;
   /** Whether this card is the one currently selected on the map. */
@@ -92,6 +101,7 @@ export function LotCard({
   arrivalTs,
   horizonFromReadingMin,
   support,
+  fromHistory,
   best,
   selected,
   onSelect,
@@ -99,8 +109,28 @@ export function LotCard({
   index,
 }: LotCardProps) {
   const s = t(lang);
-  const stalled = notUpdatingHours(row, baseDataTs);
+  const stalled = notUpdatingHours(row, baseDataTs, fromHistory);
   const unknownText = stalled === null ? s.noData : s.notUpdating;
+  /**
+   * What the card says about a feed that has stopped.
+   *
+   * With no probability the ring carries the words and the sub-line carries the
+   * duration -- the ring has room for one or the other, and the words are the
+   * claim. With a climatology probability the ring is showing a percentage, so
+   * the words have to ride in the sub-line too or the card renders a number for
+   * a car park that stopped reporting and never mentions it.
+   *
+   * It sits among the lot's own facts -- district, operator -- rather than
+   * beside the ring, because that is what it is: a fact about this car park's
+   * feed, not a hedge on the forecast. The figure above it is real, and the
+   * banner over the list already says where it came from.
+   */
+  const stalledNote =
+    stalled === null
+      ? null
+      : row.probability === null
+        ? fillTemplate(s.unchangedForTemplate, { n: stalled })
+        : `${s.notUpdating} · ${fillTemplate(s.unchangedForTemplate, { n: stalled })}`;
   const confidence = confidenceFor({
     minutesFromReading: horizonFromReadingMin,
     readingAgeMin: ageMin,
@@ -159,7 +189,12 @@ export function LotCard({
           </h3>
           <p className="lot-card__sub">
             {districtName(row.lot.a, lang)} · {lotTypeName(row.lot.t, lang)}
-            {stalled !== null && <> · {fillTemplate(s.unchangedForTemplate, { n: stalled })}</>}
+            {stalledNote !== null && (
+              <>
+                {" · "}
+                <span data-testid="lot-stalled">{stalledNote}</span>
+              </>
+            )}
           </p>
           {(best || confidence !== null) && (
             <div className="lot-card__tags" onClick={(e) => e.stopPropagation()}>

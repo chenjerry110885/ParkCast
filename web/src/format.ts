@@ -88,24 +88,43 @@ export function formatPrice(row: Ranked, s: Strings): string {
 const HOUR_S = 3600;
 
 /**
- * Whole hours a lot's feed has gone without an update, or `null` when the row
- * should show a probability, or plain "no data", instead.
+ * Whole hours a lot's feed has gone without an update, or `null` when the card
+ * should say nothing about it.
  *
- * Both conditions are load-bearing:
+ * Three conditions are load-bearing:
  *
- *   - **The grid must have no forecast either.** The two files are fetched
+ *   - **The lot must have said when it last changed.** No `u`, nothing to
+ *     claim.
+ *   - **A *grid* forecast for this lot cancels it.** The two files are fetched
  *     separately and `lots.json` may come from an earlier tick, so a stale `u`
  *     can sit beside a fresh grid in which the lot has started moving again.
- *     The grid is the fresher file; when it has a number, the number wins.
- *   - **Measured to the reading, not to now.** `u` and `baseDataTs` both
- *     describe the feed; how long ago the reading was is the staleness line's
- *     business. Counting to now would claim the lot stayed unchanged through
- *     time nobody observed.
+ *     The grid is the fresher file, built from the same reading, so a number in
+ *     it is direct evidence the lot moved; the number wins.
+ *   - **A *week* forecast does not.** `probabilityFromHistory` says the number
+ *     beside this row came out of `week.bin` -- what this car park usually has
+ *     free at this hour, accumulated over weeks. That is a legitimate answer
+ *     for a distant arrival and it is not evidence of anything at all about
+ *     whether this lot's feed is alive right now. Letting it cancel the signal
+ *     the way a grid number does is how a car park that stopped reporting
+ *     thirty hours ago came to render as a bare confident percentage, with no
+ *     grade and nothing said -- silently, for every arrival past the grid's
+ *     window, and for every arrival at all once the reading itself expired.
+ *     The two facts are independent and the driver is owed both.
+ *
+ * Measured to the reading, not to now: `u` and `baseDataTs` both describe the
+ * feed, and how long ago the reading was taken is the staleness line's
+ * business. Counting to now would claim the lot stayed unchanged through time
+ * nobody observed.
  *
  * Floored, so the number shown never exceeds what was observed.
  */
-export function notUpdatingHours(row: Ranked, baseDataTs: number): number | null {
+export function notUpdatingHours(
+  row: Ranked,
+  baseDataTs: number,
+  probabilityFromHistory: boolean,
+): number | null {
   const u = row.lot.u;
-  if (row.probability !== null || typeof u !== "number" || !Number.isFinite(u)) return null;
+  if (typeof u !== "number" || !Number.isFinite(u)) return null;
+  if (row.probability !== null && !probabilityFromHistory) return null;
   return Math.max(0, Math.floor((baseDataTs - u) / HOUR_S));
 }

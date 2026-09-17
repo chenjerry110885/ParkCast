@@ -37,6 +37,12 @@ export interface LotListProps {
    * point at yet.
    */
   supportById: ReadonlyMap<string, number>;
+  /**
+   * Whether every row's probability came out of `week.bin` rather than out of
+   * `grid.bin`. One flag for the whole list, not one per row, because the
+   * routing is per *arrival*: see `probabilityForLot` in `App.tsx`.
+   */
+  fromHistory: boolean;
   /** Id of the list's single top pick, or `null` when none applies. */
   bestId: string | null;
   /** Id of the card currently selected on the map, or `null`. */
@@ -54,6 +60,7 @@ function LotListInner({
   arrivalTs,
   horizonFromReadingMin,
   supportById,
+  fromHistory,
   bestId,
   selectedId,
   onSelect,
@@ -120,6 +127,7 @@ function LotListInner({
           arrivalTs={arrivalTs}
           horizonFromReadingMin={horizonFromReadingMin}
           support={supportById.get(row.id) ?? 0}
+          fromHistory={fromHistory}
           best={row.id === bestId}
           selected={row.id === selectedId}
           onSelect={onSelect}
