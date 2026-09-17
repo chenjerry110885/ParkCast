@@ -1,8 +1,30 @@
 # Stage A — arrival at any time, confidence from evidence
 
-**Status:** proposed, 2026-09-16
+**Status:** proposed 2026-09-16; **revised 2026-09-17** for the sharded world (see §0)
 **Follows:** [`2026-09-15-ui-redesign-design.md`](2026-09-15-ui-redesign-design.md)
 **Precedes:** the nationwide collector (its own spec), and Stage B, the trained model
+
+## 0. What changed under this spec, 2026-09-17
+
+This was written when there was one city, one `grid.bin` and one `lots.json`. Since then the
+nationwide collector shipped: six cities collect into one store, publishing shards per city
+(`grid-{city}.bin` / `lots-{city}.json`, with **Taipei keeping the unsuffixed names**), and
+`forecast.by_city` gives each city its own history, `latest_ts` and climatology. Three consequences
+for everything below:
+
+1. **`week.bin` is a shard like the others.** Taipei's is `week.bin`; another city's is
+   `week-{city}.bin`. It is built from that city's own `by_city` history, and its `rosterId` hashes
+   the **bare** ids its shard publishes, exactly as `grid-{city}.bin` does — the published id
+   convention is unchanged by this spec.
+2. **Stage A ships Taipei-only, and that is not a compromise.** The Worker and the app still serve
+   Taipei alone; the other five cities' shards are written but nothing reads them. Building
+   `week.bin` for every city while only one is served would be five sixths waste, so the builder is
+   written per city and the scheduler publishes it for the cities that are actually served —
+   today, Taipei. When the app learns to read the other shards, this needs no redesign.
+3. **Confidence gains a second real input.** The support byte was always the point, but with six
+   cities the thin-evidence case stops being hypothetical: five of them have hours of history, not
+   weeks, so "low" will be the honest answer for most of their lots for the first month. §6's
+   thresholds were chosen for Taipei's eleven days; they are the right shape for a young corpus too.
 
 ## 1. Goal
 
@@ -49,8 +71,10 @@ A per-lot, per-half-hour-of-week table of the climatology the server already com
 | Byte 2 | support: observations behind that bucket, capped at `255` |
 | Size | 1,090 lots → 715 KiB raw; **gate: ≤ 600 KB gzipped** |
 
-`rosterId` is the existing roster hash: a `week.bin` whose roster disagrees with `lots.json` is
-rejected rather than indexed against the wrong lots, exactly as `grid.bin` is today.
+`rosterId` is the existing roster hash over the shard's **bare** published ids: a `week.bin` whose
+roster disagrees with its `lots.json` is rejected rather than indexed against the wrong lots,
+exactly as `grid.bin` is today. Taipei's file keeps the unsuffixed name; another city's would be
+`week-{city}.bin`, matching `artifacts.grid_name`.
 
 Support is the bucket's own observation count, *before* shrinkage — the honest measure of how
 much this cell rests on. A 30-minute bucket at a five-minute cadence sees six observations per
@@ -71,7 +95,7 @@ today and costs one extra KV write a day against the Free tier's daily budget.
 
 ## 4. Where it comes from (Python)
 
-- `artifacts.encode_week(lot_ids, climatology, counts) -> bytes` — mirrors `encode_grid`:
+- `artifacts.encode_week(lot_ids, climatology, counts) -> bytes` — mirrors `encode_grid`, and takes the city's own climatology from `forecast.by_city`:
   pure, takes what it needs, returns the blob.
 - The probability per cell is `Climatology.predict(lot_id, ts_of_bucket, horizon_min=0)` — the
   same shrunk tier chain the live forecast uses, so the two can never drift apart.
@@ -96,7 +120,7 @@ weight = 0.5 ** (minutesFromReading / 30)        // config.BLEND_HALF_LIFE_MIN
 p      = weight * (observedFree >= 1 ? 1 : 0) + (1 - weight) * climatologyP
 ```
 
-**Inside the grid's window (≤ 120 min), `grid.bin` stays the source of the number.** It is what
+**Inside the grid's window (≤ 120 min), the city's `grid` shard stays the source of the number.** It is what
 the backtests in `docs/state-of-play.md` actually measured. `week.bin` supplies the number only
 beyond it. Because both sides compute the same blend from the same inputs — `f` is already in
 `lots.json` — the two must agree at the seam; §10 makes that a test, not a hope.
