@@ -1,0 +1,8 @@
+{
+  "generator": "scripts/build-seam-fixture.py",
+  "source": "parkcast.forecast.Blend, via parkcast.grid.build_grid and parkcast.week.build_week_cells",
+  "lot_index": 2,
+  "lot_id": "SEAM0003",
+  "f": 3,
+  "base_data_ts": 1789557600
+}

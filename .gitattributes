@@ -1,0 +1,11 @@
+# The seam fixtures are encoder output, compared byte-for-byte by
+# `tests/test_seam_fixture.py` and parsed byte-for-byte by
+# `web/tests/seam.test.ts`. This repo is developed on Windows with
+# `core.autocrlf=true`, where git rewrites line endings in any file it
+# *guesses* is text. Both blobs happen to carry a NUL byte early enough for
+# that guess to come out right today, but that is a property of the data
+# currently in them, not of the format: a regenerated fixture that happened to
+# hold no NUL in its first 8000 bytes would be silently CRLF-mangled on
+# checkout, and the byte-identity test would fail on a machine whose author
+# changed nothing.
+web/tests/fixtures/*.bin binary
