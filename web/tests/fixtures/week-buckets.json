@@ -1,0 +1,411 @@
+{
+  "generator": "scripts/build-seam-fixture.py",
+  "source": "parkcast.forecast.week_bucket",
+  "rows": [
+    {
+      "ts": 1789574400,
+      "bucket": 0,
+      "label": "Thu 00:00 Taipei -- bucket 0, not Monday"
+    },
+    {
+      "ts": 1789315200,
+      "bucket": 192,
+      "label": "Mon 00:00 Taipei"
+    },
+    {
+      "ts": 1789316940,
+      "bucket": 192,
+      "label": "Mon 00:29 Taipei"
+    },
+    {
+      "ts": 1789317000,
+      "bucket": 193,
+      "label": "Mon 00:30 Taipei"
+    },
+    {
+      "ts": 1789313400,
+      "bucket": 191,
+      "label": "Sun 23:30 Taipei"
+    },
+    {
+      "ts": 1789315200,
+      "bucket": 192,
+      "label": "Mon 00:00 Taipei (2026-09-14)"
+    },
+    {
+      "ts": 1789316940,
+      "bucket": 192,
+      "label": "Mon 00:29 Taipei (2026-09-14)"
+    },
+    {
+      "ts": 1789317000,
+      "bucket": 193,
+      "label": "Mon 00:30 Taipei (2026-09-14)"
+    },
+    {
+      "ts": 1789337700,
+      "bucket": 204,
+      "label": "Mon 06:15 Taipei (2026-09-14)"
+    },
+    {
+      "ts": 1789358340,
+      "bucket": 215,
+      "label": "Mon 11:59 Taipei (2026-09-14)"
+    },
+    {
+      "ts": 1789358400,
+      "bucket": 216,
+      "label": "Mon 12:00 Taipei (2026-09-14)"
+    },
+    {
+      "ts": 1789382700,
+      "bucket": 229,
+      "label": "Mon 18:45 Taipei (2026-09-14)"
+    },
+    {
+      "ts": 1789399740,
+      "bucket": 238,
+      "label": "Mon 23:29 Taipei (2026-09-14)"
+    },
+    {
+      "ts": 1789399800,
+      "bucket": 239,
+      "label": "Mon 23:30 Taipei (2026-09-14)"
+    },
+    {
+      "ts": 1789401540,
+      "bucket": 239,
+      "label": "Mon 23:59 Taipei (2026-09-14)"
+    },
+    {
+      "ts": 1789401600,
+      "bucket": 240,
+      "label": "Tue 00:00 Taipei (2026-09-15)"
+    },
+    {
+      "ts": 1789403340,
+      "bucket": 240,
+      "label": "Tue 00:29 Taipei (2026-09-15)"
+    },
+    {
+      "ts": 1789403400,
+      "bucket": 241,
+      "label": "Tue 00:30 Taipei (2026-09-15)"
+    },
+    {
+      "ts": 1789424100,
+      "bucket": 252,
+      "label": "Tue 06:15 Taipei (2026-09-15)"
+    },
+    {
+      "ts": 1789444740,
+      "bucket": 263,
+      "label": "Tue 11:59 Taipei (2026-09-15)"
+    },
+    {
+      "ts": 1789444800,
+      "bucket": 264,
+      "label": "Tue 12:00 Taipei (2026-09-15)"
+    },
+    {
+      "ts": 1789469100,
+      "bucket": 277,
+      "label": "Tue 18:45 Taipei (2026-09-15)"
+    },
+    {
+      "ts": 1789486140,
+      "bucket": 286,
+      "label": "Tue 23:29 Taipei (2026-09-15)"
+    },
+    {
+      "ts": 1789486200,
+      "bucket": 287,
+      "label": "Tue 23:30 Taipei (2026-09-15)"
+    },
+    {
+      "ts": 1789487940,
+      "bucket": 287,
+      "label": "Tue 23:59 Taipei (2026-09-15)"
+    },
+    {
+      "ts": 1789488000,
+      "bucket": 288,
+      "label": "Wed 00:00 Taipei (2026-09-16)"
+    },
+    {
+      "ts": 1789489740,
+      "bucket": 288,
+      "label": "Wed 00:29 Taipei (2026-09-16)"
+    },
+    {
+      "ts": 1789489800,
+      "bucket": 289,
+      "label": "Wed 00:30 Taipei (2026-09-16)"
+    },
+    {
+      "ts": 1789510500,
+      "bucket": 300,
+      "label": "Wed 06:15 Taipei (2026-09-16)"
+    },
+    {
+      "ts": 1789531140,
+      "bucket": 311,
+      "label": "Wed 11:59 Taipei (2026-09-16)"
+    },
+    {
+      "ts": 1789531200,
+      "bucket": 312,
+      "label": "Wed 12:00 Taipei (2026-09-16)"
+    },
+    {
+      "ts": 1789555500,
+      "bucket": 325,
+      "label": "Wed 18:45 Taipei (2026-09-16)"
+    },
+    {
+      "ts": 1789572540,
+      "bucket": 334,
+      "label": "Wed 23:29 Taipei (2026-09-16)"
+    },
+    {
+      "ts": 1789572600,
+      "bucket": 335,
+      "label": "Wed 23:30 Taipei (2026-09-16)"
+    },
+    {
+      "ts": 1789574340,
+      "bucket": 335,
+      "label": "Wed 23:59 Taipei (2026-09-16)"
+    },
+    {
+      "ts": 1789574400,
+      "bucket": 0,
+      "label": "Thu 00:00 Taipei (2026-09-17)"
+    },
+    {
+      "ts": 1789576140,
+      "bucket": 0,
+      "label": "Thu 00:29 Taipei (2026-09-17)"
+    },
+    {
+      "ts": 1789576200,
+      "bucket": 1,
+      "label": "Thu 00:30 Taipei (2026-09-17)"
+    },
+    {
+      "ts": 1789596900,
+      "bucket": 12,
+      "label": "Thu 06:15 Taipei (2026-09-17)"
+    },
+    {
+      "ts": 1789617540,
+      "bucket": 23,
+      "label": "Thu 11:59 Taipei (2026-09-17)"
+    },
+    {
+      "ts": 1789617600,
+      "bucket": 24,
+      "label": "Thu 12:00 Taipei (2026-09-17)"
+    },
+    {
+      "ts": 1789641900,
+      "bucket": 37,
+      "label": "Thu 18:45 Taipei (2026-09-17)"
+    },
+    {
+      "ts": 1789658940,
+      "bucket": 46,
+      "label": "Thu 23:29 Taipei (2026-09-17)"
+    },
+    {
+      "ts": 1789659000,
+      "bucket": 47,
+      "label": "Thu 23:30 Taipei (2026-09-17)"
+    },
+    {
+      "ts": 1789660740,
+      "bucket": 47,
+      "label": "Thu 23:59 Taipei (2026-09-17)"
+    },
+    {
+      "ts": 1789660800,
+      "bucket": 48,
+      "label": "Fri 00:00 Taipei (2026-09-18)"
+    },
+    {
+      "ts": 1789662540,
+      "bucket": 48,
+      "label": "Fri 00:29 Taipei (2026-09-18)"
+    },
+    {
+      "ts": 1789662600,
+      "bucket": 49,
+      "label": "Fri 00:30 Taipei (2026-09-18)"
+    },
+    {
+      "ts": 1789683300,
+      "bucket": 60,
+      "label": "Fri 06:15 Taipei (2026-09-18)"
+    },
+    {
+      "ts": 1789703940,
+      "bucket": 71,
+      "label": "Fri 11:59 Taipei (2026-09-18)"
+    },
+    {
+      "ts": 1789704000,
+      "bucket": 72,
+      "label": "Fri 12:00 Taipei (2026-09-18)"
+    },
+    {
+      "ts": 1789728300,
+      "bucket": 85,
+      "label": "Fri 18:45 Taipei (2026-09-18)"
+    },
+    {
+      "ts": 1789745340,
+      "bucket": 94,
+      "label": "Fri 23:29 Taipei (2026-09-18)"
+    },
+    {
+      "ts": 1789745400,
+      "bucket": 95,
+      "label": "Fri 23:30 Taipei (2026-09-18)"
+    },
+    {
+      "ts": 1789747140,
+      "bucket": 95,
+      "label": "Fri 23:59 Taipei (2026-09-18)"
+    },
+    {
+      "ts": 1789747200,
+      "bucket": 96,
+      "label": "Sat 00:00 Taipei (2026-09-19)"
+    },
+    {
+      "ts": 1789748940,
+      "bucket": 96,
+      "label": "Sat 00:29 Taipei (2026-09-19)"
+    },
+    {
+      "ts": 1789749000,
+      "bucket": 97,
+      "label": "Sat 00:30 Taipei (2026-09-19)"
+    },
+    {
+      "ts": 1789769700,
+      "bucket": 108,
+      "label": "Sat 06:15 Taipei (2026-09-19)"
+    },
+    {
+      "ts": 1789790340,
+      "bucket": 119,
+      "label": "Sat 11:59 Taipei (2026-09-19)"
+    },
+    {
+      "ts": 1789790400,
+      "bucket": 120,
+      "label": "Sat 12:00 Taipei (2026-09-19)"
+    },
+    {
+      "ts": 1789814700,
+      "bucket": 133,
+      "label": "Sat 18:45 Taipei (2026-09-19)"
+    },
+    {
+      "ts": 1789831740,
+      "bucket": 142,
+      "label": "Sat 23:29 Taipei (2026-09-19)"
+    },
+    {
+      "ts": 1789831800,
+      "bucket": 143,
+      "label": "Sat 23:30 Taipei (2026-09-19)"
+    },
+    {
+      "ts": 1789833540,
+      "bucket": 143,
+      "label": "Sat 23:59 Taipei (2026-09-19)"
+    },
+    {
+      "ts": 1789833600,
+      "bucket": 144,
+      "label": "Sun 00:00 Taipei (2026-09-20)"
+    },
+    {
+      "ts": 1789835340,
+      "bucket": 144,
+      "label": "Sun 00:29 Taipei (2026-09-20)"
+    },
+    {
+      "ts": 1789835400,
+      "bucket": 145,
+      "label": "Sun 00:30 Taipei (2026-09-20)"
+    },
+    {
+      "ts": 1789856100,
+      "bucket": 156,
+      "label": "Sun 06:15 Taipei (2026-09-20)"
+    },
+    {
+      "ts": 1789876740,
+      "bucket": 167,
+      "label": "Sun 11:59 Taipei (2026-09-20)"
+    },
+    {
+      "ts": 1789876800,
+      "bucket": 168,
+      "label": "Sun 12:00 Taipei (2026-09-20)"
+    },
+    {
+      "ts": 1789901100,
+      "bucket": 181,
+      "label": "Sun 18:45 Taipei (2026-09-20)"
+    },
+    {
+      "ts": 1789918140,
+      "bucket": 190,
+      "label": "Sun 23:29 Taipei (2026-09-20)"
+    },
+    {
+      "ts": 1789918200,
+      "bucket": 191,
+      "label": "Sun 23:30 Taipei (2026-09-20)"
+    },
+    {
+      "ts": 1789919940,
+      "bucket": 191,
+      "label": "Sun 23:59 Taipei (2026-09-20)"
+    },
+    {
+      "ts": 1789920000,
+      "bucket": 192,
+      "label": "Mon 00:00 Taipei (2026-09-21), the week after -- Sunday->Monday wrap"
+    },
+    {
+      "ts": -28800,
+      "bucket": 0,
+      "label": "epoch shifted to exactly Thu 00:00 Taipei, 1970-01-01 (bucket-0 anchor)"
+    },
+    {
+      "ts": -28801,
+      "bucket": 335,
+      "label": "one second earlier: Wed 23:59:59 Taipei, 1969-12-31 -- must floor to bucket 335"
+    },
+    {
+      "ts": -374400,
+      "bucket": 144,
+      "label": "four days before the anchor: Sun 00:00 Taipei, 1969-12-28"
+    },
+    {
+      "ts": -288000,
+      "bucket": 192,
+      "label": "three days before the anchor: Mon 00:00 Taipei, 1969-12-29"
+    },
+    {
+      "ts": -1,
+      "bucket": 15,
+      "label": "one second before the Unix epoch (UTC) -- still floors correctly across the +8h shift"
+    }
+  ]
+}

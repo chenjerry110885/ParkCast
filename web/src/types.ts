@@ -104,3 +104,21 @@ export interface Grid {
   /** Row-major, `nLots * nHorizons` bytes. 0-100, or `UNKNOWN`. */
   cells: Uint8Array;
 }
+
+/**
+ * A parsed `week.bin`: one lot x half-hour-of-week climatology table.
+ *
+ * Unlike {@link Grid}, the bucket geometry (336 buckets of 30 min each) is
+ * not carried here -- `parseWeek` validates the header declares exactly that
+ * shape and throws otherwise, because `weekBucket` and `probabilityAt` both
+ * hard-code it rather than reading it back out of this struct on every call.
+ */
+export interface WeekTable {
+  nLots: number;
+  /** CRC32 of the ordered lot ids, same identity `Grid.rosterId` carries. */
+  rosterId: number;
+  /** Unix seconds the table was built, not when any one reading landed. */
+  builtTs: number;
+  /** Row-major, `nLots * 336 * 2` bytes: `(percent | UNKNOWN, support)` pairs. */
+  cells: Uint8Array;
+}
