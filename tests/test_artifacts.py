@@ -419,6 +419,14 @@ def test_encode_week_refuses_a_row_of_the_wrong_length():
         artifacts.encode_week(["A"], {"A": [(None, 0)] * 335}, built_ts=1)
 
 
+def test_encode_week_names_the_missing_lot():
+    """A lot_ids/cells id-convention mismatch (e.g. a botched bare/namespaced
+    bridge) must not surface as a bare `KeyError: 'B'` -- the message has to
+    say which id was missing so the mismatch is diagnosable on sight."""
+    with pytest.raises(KeyError, match="B"):
+        artifacts.encode_week(["A", "B"], {"A": [(None, 0)] * 336}, built_ts=1)
+
+
 def test_week_name_follows_the_shard_convention():
     assert artifacts.week_name("taipei") == "week.bin"
     assert artifacts.week_name("tainan") == "week-tainan.bin"

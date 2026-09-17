@@ -1565,9 +1565,13 @@ def test_publish_artifacts_withholds_a_lot_that_is_not_updating(tmp_path):
 class _RecordingUploader:
     def __init__(self):
         self.offers = []
+        self.week_offers = []
 
     def offer(self, grid, lots, *, base_data_ts, roster_id):
         self.offers.append((grid, lots, base_data_ts, roster_id))
+
+    def offer_week(self, week, *, city, roster_id):
+        self.week_offers.append((week, city, roster_id))
 
 
 def test_publish_artifacts_hands_the_published_bytes_to_the_uploader(tmp_path):
@@ -1610,6 +1614,138 @@ def test_publish_artifacts_stamps_each_lots_free_count_at_the_reading(tmp_path):
 
     doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
     assert doc["lots"][0]["f"] == 12
+
+
+# --- the week table: published daily, Taipei only (Task 3) -----------------
+
+
+def _taipei_noon(day: date) -> int:
+    """A Unix timestamp inside `day`'s Taipei calendar date, for pinning
+    `scheduler.time.time` so `generated_at` (and so the week table's
+    `built_ts`) falls on the day a test means to simulate."""
+    return int(datetime(day.year, day.month, day.day, 12, tzinfo=config.TAIPEI_TZ).timestamp())
+
+
+def test_the_week_file_is_written_once_a_day_not_once_a_tick(tmp_path, monkeypatch):
+    """The five-minute path must stay the size it is. Climatology moves over
+    weeks; rewriting a ~700 KB table every tick would spend the whole budget
+    re-stating what it said five minutes ago."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+
+    real_publish_week = artifacts.publish_week
+    writes = []
+
+    def spy_publish_week(out_dir, city, *, week_blob):
+        # Ruling R6: the once-a-day gate reads the published week.bin's own
+        # header back off disk, so a stub that only records the call (and
+        # never actually writes) would leave the disk empty forever and a
+        # *correct* implementation would publish on every one of the 12
+        # ticks below. This stub has to behave like the real thing.
+        writes.append(city)
+        real_publish_week(out_dir, city, week_blob=week_blob)
+
+    monkeypatch.setattr(artifacts, "publish_week", spy_publish_week)
+
+    day = date(2026, 9, 17)
+    monkeypatch.setattr(scheduler.time, "time", lambda: _taipei_noon(day))
+    for _ in range(12):                       # an hour of ticks, one day
+        scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, today=day)
+    assert writes == ["taipei"], "one write on the first tick, none after"
+
+    tomorrow = date(2026, 9, 18)
+    monkeypatch.setattr(scheduler.time, "time", lambda: _taipei_noon(tomorrow))
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, today=tomorrow)
+    conn.close()
+    assert writes == ["taipei", "taipei"], "and one more when the day rolls over"
+
+
+def test_a_week_publish_failure_never_stops_the_tick(tmp_path, monkeypatch, caplog):
+    """Publishing is downstream of collection. A week table that cannot be
+    written must not cost a reading that cannot be re-fetched."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+
+    def boom(out_dir, city, *, week_blob):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(artifacts, "publish_week", boom)
+
+    with caplog.at_level(logging.ERROR, logger="parkcast.scheduler"):
+        scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir)  # must not raise
+    conn.close()
+
+    assert (out_dir / "grid.bin").exists(), "the five-minute pair still published"
+    assert (out_dir / "lots.json").exists()
+    assert (out_dir / "week.bin").exists() is False
+    assert "publishing the week table failed" in caplog.text
+
+
+def test_week_table_rosters_agree_with_the_shards_it_was_bridged_from(tmp_path):
+    """`encode_week` wants BARE ids; `build_week_cells` returns cells keyed by
+    the NAMESPACED ids `history` holds. `publish_city` is the one place the
+    two spellings meet -- if that bridge used the wrong spelling on either
+    side, week.bin's roster_id would disagree with lots.json's, since both
+    are `artifacts.roster_id` over what should be the same published ids."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    _seed(conn, date(2026, 9, 4), lot="B")
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(conn, [_make_lot("A"), _make_lot("B")], out_dir)
+    conn.close()
+
+    lots_doc = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
+    week_header = artifacts.decode_week_header((out_dir / "week.bin").read_bytes())
+    assert week_header["roster_id"] == lots_doc["roster_id"]
+    assert week_header["n_lots"] == lots_doc["n_lots"] == 2
+    assert week_header["n_buckets"] == config.WEEK_BUCKETS
+    assert week_header["bucket_min"] == config.CLIMATOLOGY_BUCKET_MIN
+
+
+def test_week_table_is_published_for_taipei_only(tmp_path, pinned_clock):
+    """Stage A serves Taipei only. The builder takes any city -- nothing here
+    would need to change for a second one to widen -- but nothing reads a
+    week-kaohsiung.bin nobody is going to serve, so nothing writes it."""
+    out_dir, _, _ = _publish_multi_city(tmp_path)
+
+    assert (out_dir / "week.bin").exists()
+    assert not (out_dir / "week-kaohsiung.bin").exists()
+
+
+def test_publish_artifacts_offers_the_week_table_to_the_uploader(tmp_path):
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    up = _RecordingUploader()
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, uploader=up)
+    conn.close()
+
+    assert len(up.week_offers) == 1
+    week_blob, city, roster = up.week_offers[0]
+    assert week_blob == (out_dir / "week.bin").read_bytes()
+    assert city == artifacts.UNSUFFIXED_CITY
+    assert roster == artifacts.decode_week_header(week_blob)["roster_id"]
+
+
+def test_publish_artifacts_offers_the_week_table_only_once_a_day(tmp_path, monkeypatch):
+    """The uploader must not see a second offer on a tick that skipped the
+    rebuild -- an offer it can't distinguish from a genuine daily refresh."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    up = _RecordingUploader()
+
+    day = date(2026, 9, 17)
+    monkeypatch.setattr(scheduler.time, "time", lambda: _taipei_noon(day))
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, uploader=up, today=day)
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, uploader=up, today=day)
+    conn.close()
+
+    assert len(up.week_offers) == 1
 
 
 # --- end-to-end: real adapters and real metadata through publish_artifacts --
@@ -1860,9 +1996,12 @@ def test_taipeis_grid_is_not_silently_climatology_only(tmp_path, pinned_clock):
 def test_each_city_gets_its_own_shard_and_taipei_keeps_the_original_names(tmp_path, pinned_clock):
     out_dir, _, _ = _publish_multi_city(tmp_path)
 
+    # week.bin, not week-kaohsiung.bin: Stage A publishes and uploads the
+    # week table for Taipei only (`artifacts.UNSUFFIXED_CITY`), the same
+    # restriction `publish_artifacts` already applies to the uploader.
     assert {p.name for p in out_dir.glob("*") if p.is_file()} == {
         "grid.bin", "lots.json", "grid-kaohsiung.bin", "lots-kaohsiung.json",
-        artifacts.CITIES_NAME,
+        "week.bin", artifacts.CITIES_NAME,
     }
     taipei = json.loads((out_dir / "lots.json").read_text(encoding="utf-8"))
     kaohsiung = json.loads((out_dir / "lots-kaohsiung.json").read_text(encoding="utf-8"))

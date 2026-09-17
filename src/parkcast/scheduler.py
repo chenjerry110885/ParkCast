@@ -7,6 +7,7 @@ the next day in Taipei, and both the day-rollover refresh and the daily
 compaction must use that local date.
 """
 import logging
+import struct
 import time
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
@@ -19,6 +20,7 @@ from parkcast.forecast import Blend, by_city, empty_history, load_history
 from parkcast.grid import build_grid
 from parkcast.report import build_report, format_report
 from parkcast.sources import SOURCES
+from parkcast.week import build_week_cells
 
 log = logging.getLogger("parkcast.scheduler")
 
@@ -74,6 +76,73 @@ def _first_day_to_archive(conn, today: date) -> date:
     return today if oldest is None else min(taipei_date(oldest), today)
 
 
+def _week_already_built_today(out_dir: Path, city: str, today: date) -> bool:
+    """Whether `city`'s published week.bin was already built today, in Taipei.
+
+    Reads the file's own header off disk -- not an in-memory flag -- and
+    compares its `built_ts` to `today`. `publish_artifacts` is a plain
+    function with nowhere to keep a flag between calls, and the collector
+    restarts routinely (the operator pauses it while gaming), so a flag would
+    rebuild and re-upload the whole ~700 KB table on every resume, spending
+    the Free tier's daily KV budget re-stating what it already said before
+    the restart. This is the same idiom `publish_city` already applies to its
+    own prior grid via `artifacts.read_header` for `MIN_PUBLISH_LOT_FRACTION`.
+
+    Missing, truncated or non-week bytes all read as "not built today" --
+    the same "nothing trustworthy" contract `artifacts.read_header` uses for
+    the grid -- so the very first run, with no week.bin on disk at all,
+    publishes immediately rather than waiting for a day boundary that has
+    already passed.
+    """
+    try:
+        blob = (Path(out_dir) / artifacts.week_name(city)).read_bytes()
+        header = artifacts.decode_week_header(blob[:artifacts.WEEK_HEADER_SIZE])
+    except (OSError, struct.error):
+        return False
+    if header["magic"] != artifacts.WEEK_MAGIC:
+        return False
+    return taipei_date(header["built_ts"]) == today
+
+
+def _publish_week(
+    out_dir: Path, city: str, *, history, lot_ids, published_ids,
+    built_ts: int, today: date, uploader,
+) -> None:
+    """Rebuild, publish and offer `city`'s week table -- at most once a
+    Taipei day (`_week_already_built_today`).
+
+    `lot_ids` (namespaced, what `history` and `build_week_cells` are keyed
+    by) and `published_ids` (bare, what `encode_week` and `roster_id` want)
+    are the exact pair `publish_city` already built for the grid -- the one
+    place the two id spellings meet, per Task 3's brief; this function does
+    not derive its own.
+
+    Every failure here is swallowed by the caller: publishing the week table
+    is downstream of the grid/lots pair this tick already published to disk,
+    and a corpus-wide climatology rebuild failing must never be allowed to
+    cost -- or even mark stale -- a reading that will never come back.
+    """
+    if _week_already_built_today(out_dir, city, today):
+        return
+    cells = build_week_cells(history, lot_ids)
+    # `build_week_cells` returns rows keyed by whatever `lot_ids` holds -- here
+    # the namespaced store id, because that is what `history` is keyed by.
+    # `encode_week` looks its rows up by exactly the ids it lays rows out in
+    # (see its docstring), and those must be the BARE published ids -- the
+    # same ones `published_ids` already is. So the dict itself is re-keyed
+    # here, at the single point where the two spellings meet: this is the id
+    # bridge, not just picking which list to pass as `lot_ids`. Skipping this
+    # (handing `cells` through unchanged) is exactly the botched conversion
+    # F1.1 added a diagnostic for -- it would raise `KeyError` naming the
+    # first bare id `encode_week` cannot find under its namespaced spelling.
+    bare_cells = {ids.bare(lot_id): row for lot_id, row in cells.items()}
+    blob = artifacts.encode_week(published_ids, bare_cells, built_ts=built_ts)
+    artifacts.publish_week(out_dir, city, week_blob=blob)
+    log.info("published %s: week table for %s lots", city, len(published_ids))
+    if uploader is not None:
+        uploader.offer_week(blob, city=city, roster_id=artifacts.roster_id(published_ids))
+
+
 def publish_city(
     conn,
     city: str,
@@ -82,6 +151,7 @@ def publish_city(
     *,
     history,
     generated_at: int,
+    today: date,
     uploader=None,
 ) -> dict | None:
     """Rebuild and republish one city's shard. Returns its cities.json entry.
@@ -108,7 +178,13 @@ def publish_city(
     silently did to Taipei.
 
     `generated_at` is passed in rather than read here, so every shard in a tick
-    carries the same stamp and cities.json agrees with all of them.
+    carries the same stamp and cities.json agrees with all of them. For Taipei
+    it doubles as the week table's `built_ts` -- see `_publish_week`.
+
+    `today` is the Taipei calendar date for this tick, passed in rather than
+    computed here for the same reason as `generated_at`: every city judges
+    "already built today" against the same day, and a test can drive it
+    without touching the wall clock. Used only by `_publish_week`.
 
     `uploader`, when given, receives the exact published bytes and never blocks
     (see `upload.Uploader`).
@@ -222,10 +298,33 @@ def publish_city(
         # downstream of collection.
         uploader.offer(grid_blob, lots_blob, base_data_ts=history.latest_ts,
                        roster_id=artifacts.roster_id(published_ids))
+
+    if city == artifacts.UNSUFFIXED_CITY:
+        # Stage A serves Taipei only -- the same reasoning `publish_artifacts`
+        # documents for why `uploader` is passed only for Taipei below: one
+        # deployed site, one city read from it. `_publish_week` itself takes
+        # any city, so nothing here needs to change when that widens; only
+        # this gate does.
+        try:
+            _publish_week(
+                out_dir, city, history=history, lot_ids=lot_ids,
+                published_ids=published_ids, built_ts=generated_at,
+                today=today, uploader=uploader,
+            )
+        except Exception:
+            # The pair above is already safely on disk. A climatology rebuild
+            # failing here must cost nothing else -- not this tick's grid and
+            # lots, and not the cities.json entry returned below, which
+            # describes exactly the shard this call just wrote.
+            log.exception("%s: publishing the week table failed", city)
+
     return artifacts.city_entry(city, ordered, base_data_ts=history.latest_ts)
 
 
-def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=None) -> None:
+def publish_artifacts(
+    conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=None,
+    *, today: date | None = None,
+) -> None:
     """Republish every city's shard from current history, then the index.
 
     One `load_history` for the tick, split per city by `forecast.by_city`, then
@@ -239,7 +338,15 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=
     on, and its entry in cities.json is left as it was, matching the shard still
     sitting on disk. An entry is only ever replaced by a successful publish, so
     the index can never claim a city that has no shard, nor drop one that has.
+
+    `today` is the Taipei calendar date this tick is judged against for the
+    week table's once-a-day cadence (`_week_already_built_today`). It
+    defaults to the real Taipei date of now, exactly like `run_forever`'s own
+    day-rollover check (`taipei_date`) -- a caller only ever overrides it to
+    drive that gate deterministically in a test.
     """
+    if today is None:
+        today = taipei_date(int(time.time()))
     history = load_history(conn, cold_dir=config.PARQUET_DIR)
     histories = by_city(history)
 
@@ -270,6 +377,7 @@ def publish_artifacts(conn, lots, out_dir: Path = config.ARTIFACT_DIR, uploader=
                 conn, city, lots_by_city[city], out_dir,
                 history=histories.get(city, empty_history()),
                 generated_at=generated_at,
+                today=today,
                 # One pair, one endpoint: `upload.UPLOAD_PATH` is a single
                 # `/artifacts/latest`, and the deployed site serves Taipei.
                 # Offering six pairs to it would have five overwrite each other

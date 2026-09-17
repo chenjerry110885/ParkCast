@@ -165,6 +165,16 @@ def encode_week(
     n_lots = len(lot_ids)
     body = bytearray(n_lots * config.WEEK_BUCKETS * 2)
     for i, lot_id in enumerate(lot_ids):
+        if lot_id not in cells:
+            # A bare `KeyError: 'TPE0001'` here is indistinguishable from a
+            # dozen other causes; naming the id turns a puzzle into a
+            # diagnosis -- most often a caller handing this bare `lot_ids`
+            # but `cells` still keyed by the namespaced store id, or the
+            # reverse. See the id-bridge note in this function's docstring.
+            raise KeyError(
+                f"{lot_id!r} is in lot_ids but missing from cells -- check "
+                "that both were built from the same (bare vs namespaced) ids"
+            )
         row = cells[lot_id]
         if len(row) != config.WEEK_BUCKETS:
             raise ValueError(

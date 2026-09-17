@@ -238,6 +238,49 @@ def test_send_pair_ignores_proxy_environment(server, monkeypatch):
     assert status == 204
 
 
+# --- the week table: its own request, never send_pair's ----------------------
+
+def test_send_week_puts_to_its_own_path_with_headers(server):
+    """Its own request: a different path than the pair's, its own body, its
+    own X-Roster-Id -- but the same opener, user agent and secret handling."""
+    status, reject, _ = upload.send_week(server + "/artifacts/latest", SECRET, b"WEEKBYTES",
+                                         city="taipei", roster_id=42,
+                                         opener=upload.build_opener(), timeout=5)
+    assert (status, reject) == (204, None)
+    path, headers, body = _Handler.seen[0]
+    assert path == "/artifacts/week.bin", "taipei keeps the unsuffixed name, like grid.bin"
+    assert body == b"WEEKBYTES"
+    assert headers["X-Roster-Id"] == "42"
+    assert headers["Authorization"] == f"Bearer {SECRET}"
+    assert headers["User-Agent"] == config.UPLOAD_USER_AGENT
+
+
+def test_send_week_uses_the_citys_own_filename(server):
+    upload.send_week(server + "/artifacts/latest", SECRET, b"W", city="tainan", roster_id=1,
+                     opener=upload.build_opener(), timeout=5)
+    path, _, _ = _Handler.seen[0]
+    assert path == "/artifacts/week-tainan.bin"
+
+
+def test_send_week_reports_rejections(server):
+    _Handler.status = 409
+    _Handler.extra_headers = {"X-Reject": "roster-shrink"}
+    status, reject, _ = upload.send_week(server + "/artifacts/latest", SECRET, b"W",
+                                         city="taipei", roster_id=1,
+                                         opener=upload.build_opener(), timeout=5)
+    assert (status, reject) == (409, "roster-shrink")
+
+
+def test_send_week_refuses_redirects_and_never_forwards_the_secret(server):
+    _Handler.status = 307
+    _Handler.extra_headers = {"Location": server + "/elsewhere"}
+    status, _, _ = upload.send_week(server + "/artifacts/latest", SECRET, b"W",
+                                    city="taipei", roster_id=1,
+                                    opener=upload.build_opener(), timeout=5)
+    assert status == 307
+    assert [p for p, _, _ in _Handler.seen] == ["/artifacts/week.bin"]
+
+
 # --- the thread --------------------------------------------------------------
 
 def _uploader(send, **kwargs):
@@ -329,6 +372,76 @@ def test_a_409_that_refuses_the_reading_itself_is_a_warning(caplog, reject, toke
     assert message.startswith(f"upload rejected: {token} status=409 duration=")
     assert message.endswith(" bytes=4")
     assert "<script>" not in caplog.text
+
+
+def _uploader_week(send_week, **kwargs):
+    return upload.Uploader(URL, SECRET, send_week=send_week, week_guard=upload.UploadGuard(),
+                           **kwargs)
+
+
+def test_offer_week_calls_send_week_with_the_published_bytes():
+    calls = []
+
+    def fake_send_week(url, secret, week, *, city, roster_id, opener, timeout):
+        calls.append((url, secret, week, city, roster_id))
+        return 204, None, None
+
+    up = _uploader_week(fake_send_week)
+    up.offer_week(b"WEEKBYTES", city="taipei", roster_id=99)
+    assert up.process_pending_week()
+    assert calls == [(URL, SECRET, b"WEEKBYTES", "taipei", 99)]
+
+
+def test_offer_week_never_blocks_and_only_the_latest_waits():
+    release = threading.Event()
+    sent = []
+
+    def slow_send_week(url, secret, week, *, city, roster_id, opener, timeout):
+        sent.append(week)
+        release.wait(5)
+        return 204, None, None
+
+    up = _uploader_week(slow_send_week).start()
+    started = time.monotonic()
+    up.offer_week(b"one", city="taipei", roster_id=1)
+    time.sleep(0.2)
+    up.offer_week(b"two", city="taipei", roster_id=1)
+    up.offer_week(b"three", city="taipei", roster_id=1)
+    assert time.monotonic() - started < 1.0
+    release.set()
+    deadline = time.monotonic() + 5
+    while len(sent) < 2 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert sent == [b"one", b"three"]
+
+
+def test_a_week_upload_failure_does_not_touch_the_pairs_guard_or_job(caplog):
+    """`send_week` must not ride `send_pair`'s job: its own request and its
+    own back-off, so a failing week upload cannot pause or skip the pair's
+    next attempt, and vice versa."""
+    pair_calls = []
+    week_calls = []
+
+    def fake_send(url, secret, grid, lots, *, opener, timeout):
+        pair_calls.append((grid, lots))
+        return 204, None, None
+
+    def failing_send_week(url, secret, week, *, city, roster_id, opener, timeout):
+        week_calls.append(week)
+        raise RuntimeError("boom")
+
+    up = upload.Uploader(URL, SECRET, send=fake_send, send_week=failing_send_week,
+                         guard=upload.UploadGuard(), week_guard=upload.UploadGuard())
+
+    up.offer_week(b"W", city="taipei", roster_id=1)
+    with caplog.at_level(logging.WARNING, logger="parkcast.upload"):
+        assert up.process_pending_week()
+    assert "week upload failed" in caplog.text
+    assert week_calls == [b"W"]
+
+    up.offer(b"G", b"L", base_data_ts=1, roster_id=7)
+    assert up.process_pending()
+    assert pair_calls == [(b"G", b"L")], "the pair must still attempt normally"
 
 
 def test_from_environment_is_off_and_says_so_once_without_the_value(tmp_path, caplog, host):

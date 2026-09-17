@@ -1,8 +1,15 @@
-"""Upload each published forecast pair to the deployed site.
+"""Upload each published forecast pair, and Taipei's week table, to the
+deployed site.
 
 Downstream of publishing, which is downstream of collection: nothing here may
 block the collection loop, raise into it, or log the secret. See
-docs/superpowers/specs/2026-09-14-deployment-design.md §5.
+docs/superpowers/specs/2026-09-14-deployment-design.md §5 and
+docs/superpowers/specs/2026-09-16-stage-a-any-time-arrival-design.md §4.
+
+The week table is a third, independent artifact on its own daily cadence, not
+a third blob riding `send_pair`'s five-minute request: `send_week` is its own
+PUT, to its own path, with its own `UploadGuard` inside `Uploader` -- see
+`send_week` and `Uploader._attempt_week`.
 """
 import hashlib
 import logging
@@ -18,9 +25,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
-from parkcast import config
+from parkcast import artifacts, config
 
 log = logging.getLogger("parkcast.upload")
 
@@ -145,6 +152,52 @@ def send_pair(url: str, secret: str, grid: bytes, lots: bytes, *,
             err.close()
 
 
+def _week_target(url: str, city: str) -> str:
+    """The week table's own endpoint, beside the pair's on the same host.
+
+    `url` is the pinned pair endpoint (`.../artifacts/latest`); the week table
+    is a third, independent artifact (see `artifacts.py`'s module docstring),
+    so it gets its own path rather than riding `/artifacts/latest` -- built
+    from the same per-city filename convention `grid_name`/`lots_name` already
+    use (`artifacts.week_name`), so another city needs no new routing here.
+    """
+    parts = urlsplit(url)
+    path = f"/artifacts/{artifacts.week_name(city)}"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def send_week(url: str, secret: str, week: bytes, *, city: str, roster_id: int,
+              opener: urllib.request.OpenerDirector, timeout: float) -> SendResult:
+    """PUT one city's week table. Its own request -- never `send_pair`'s.
+
+    The pair rides one endpoint because it is one upload of two concatenated
+    blobs; the week table is a separate artifact on a separate, much slower
+    cadence (see `artifacts.publish_week`), so it needs its own PUT rather
+    than a third blob spliced onto `send_pair`'s body. `X-Roster-Id` lets the
+    Worker refuse a roster it does not recognise from the header alone, the
+    same reason `send_pair` sends `X-Grid-Length` -- without first parsing
+    ~700 KB of body to find out.
+
+    Same response shape, same redirect refusal and the same never-forward-the-
+    secret behaviour as `send_pair`, because both are policy that must not
+    drift between the two artifacts, not detail this function owns.
+    """
+    request = urllib.request.Request(_week_target(url, city), data=week, method="PUT")
+    request.add_header("Content-Type", "application/octet-stream")
+    request.add_header("X-Roster-Id", str(roster_id))
+    request.add_header("User-Agent", config.UPLOAD_USER_AGENT)
+    request.add_unredirected_header("Authorization", f"Bearer {secret}")
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return response.status, response.headers.get("X-Reject"), response.headers.get("Date")
+    except urllib.error.HTTPError as err:
+        try:
+            headers = err.headers
+            return err.code, headers.get("X-Reject") if headers else None, headers.get("Date") if headers else None
+        finally:
+            err.close()
+
+
 @dataclass(frozen=True, slots=True)
 class _Job:
     grid: bytes
@@ -152,25 +205,45 @@ class _Job:
     key: tuple[int, int, str]
 
 
+@dataclass(frozen=True, slots=True)
+class _WeekJob:
+    week: bytes
+    city: str
+    roster_id: int
+    key: tuple[str, int, str]
+
+
 class Uploader:
-    """One daemon thread, one waiting job at most, one attempt at a time."""
+    """One daemon thread. One waiting pair job and one waiting week job at
+    most, each attempted independently -- see `offer` and `offer_week`."""
 
     def __init__(self, url: str, secret: str, *, send: Callable[..., SendResult] = send_pair,
-                 guard: UploadGuard | None = None, opener=None,
+                 send_week: Callable[..., SendResult] = send_week,
+                 guard: UploadGuard | None = None, week_guard: UploadGuard | None = None,
+                 opener=None,
                  deadline_sec: float = config.UPLOAD_DEADLINE_SEC,
                  timeout_sec: float = config.UPLOAD_TIMEOUT_SEC,
                  clock: Callable[[], float] = time.time):
         self._url = url
         self._secret = secret
         self._send = send
+        self._send_week = send_week
         self._guard = guard or UploadGuard(clock=clock)
+        # A week upload is downstream of the corpus's daily cadence, not the
+        # pair's five-minute one: its own back-off state, so a run of failed
+        # pair attempts cannot pause the week table, and a bad week response
+        # (say, a stray 401) cannot pause the pair -- they share nothing but
+        # the opener, the user agent and the skew check below.
+        self._week_guard = week_guard or UploadGuard(clock=clock)
         self._opener = opener or build_opener()
         self._deadline = deadline_sec
         self._timeout = timeout_sec
         self._clock = clock
         self._cond = threading.Condition()
         self._pending: _Job | None = None
+        self._pending_week: _WeekJob | None = None
         self._helper: threading.Thread | None = None
+        self._helper_week: threading.Thread | None = None
         self._skew_logged = False
 
     def start(self) -> "Uploader":
@@ -183,6 +256,13 @@ class Uploader:
             self._pending = _Job(grid, lots, key)
             self._cond.notify()
 
+    def offer_week(self, week: bytes, *, city: str, roster_id: int) -> None:
+        """Queue one city's week table. Never blocks, exactly like `offer`."""
+        key = (city, roster_id, hashlib.sha256(week).hexdigest())
+        with self._cond:
+            self._pending_week = _WeekJob(week, city, roster_id, key)
+            self._cond.notify()
+
     def process_pending(self) -> bool:
         with self._cond:
             job, self._pending = self._pending, None
@@ -191,14 +271,30 @@ class Uploader:
         self._attempt(job)
         return True
 
+    def process_pending_week(self) -> bool:
+        with self._cond:
+            job, self._pending_week = self._pending_week, None
+        if job is None:
+            return False
+        self._attempt_week(job)
+        return True
+
     def _loop(self) -> None:
         while True:
             with self._cond:
-                while self._pending is None:
+                while self._pending is None and self._pending_week is None:
                     self._cond.wait()
+            # Independent jobs, independent failures: one raising (should
+            # neither ever do, but see the `except Exception` nets inside
+            # each `_attempt*`) must not stop the other from being tried this
+            # pass through the loop.
             try:
                 self.process_pending()
             except Exception as exc:  # never let the thread die
+                log.warning("upload thread error: %s", type(exc).__name__)
+            try:
+                self.process_pending_week()
+            except Exception as exc:
                 log.warning("upload thread error: %s", type(exc).__name__)
 
     def _attempt(self, job: _Job) -> None:
@@ -256,6 +352,71 @@ class Uploader:
                        box["seconds"], total_bytes)
         else:
             log.warning("upload failed: status=%s duration=%.1fs bytes=%s",
+                       status, box["seconds"], total_bytes)
+
+    def _attempt_week(self, job: _WeekJob) -> None:
+        """`_attempt`'s week counterpart: its own request (`send_week`, never
+        `send_pair`), its own guard (`_week_guard`, never `_guard`), its own
+        in-flight thread (`_helper_week`, never `_helper`) -- so a week upload
+        can never be skipped as "previous attempt still running" because a
+        pair attempt is in flight, or vice versa. Reuses `_opener` and
+        `_check_skew` because those are shared policy, not per-job state.
+        """
+        if self._helper_week is not None and self._helper_week.is_alive():
+            log.warning("week upload skipped: previous attempt still running")
+            return
+        ok, reason = self._week_guard.should_attempt(job.key)
+        if not ok:
+            if reason != "duplicate":
+                log.info("week upload skipped: %s", reason)
+            return
+        total_bytes = len(job.week)
+        box: dict = {}
+
+        def run() -> None:
+            started = time.monotonic()
+            try:
+                box["result"] = self._send_week(self._url, self._secret, job.week,
+                                                city=job.city, roster_id=job.roster_id,
+                                                opener=self._opener, timeout=self._timeout)
+            except Exception as exc:
+                box["error"] = type(exc).__name__
+            box["seconds"] = time.monotonic() - started
+
+        self._helper_week = threading.Thread(
+            target=run, name="parkcast-upload-week-send", daemon=True
+        )
+        self._helper_week.start()
+        self._helper_week.join(self._deadline)
+        if self._helper_week.is_alive():
+            log.warning("week upload abandoned after %ss (bytes=%s)", self._deadline, total_bytes)
+            self._week_guard.record(job.key, None)
+            return
+        if "error" in box:
+            log.warning("week upload failed: %s (duration=%.1fs bytes=%s)",
+                        box["error"], box["seconds"], total_bytes)
+            self._week_guard.record(job.key, None)
+            return
+        status, reject, date_header = box["result"]
+        self._week_guard.record(job.key, status)
+        self._check_skew(date_header)
+        if status == 204:
+            log.info("week uploaded: status=204 bytes=%s duration=%.1fs", total_bytes, box["seconds"])
+        elif status == 409 and reject in ("stale", "too-soon"):
+            log.info("week upload not needed: status=409 reject=%s duration=%.1fs bytes=%s",
+                     reject, box["seconds"], total_bytes)
+        elif status == 409:
+            token = reject if reject in KNOWN_REJECTS else "unknown"
+            log.warning("week upload rejected: %s status=409 duration=%.1fs bytes=%s",
+                        token, box["seconds"], total_bytes)
+        elif status == 401:
+            log.warning("week upload unauthorized: status=401 duration=%.1fs bytes=%s; "
+                       "retrying in an hour", box["seconds"], total_bytes)
+        elif status == 429:
+            log.warning("week upload refused: status=429 duration=%.1fs bytes=%s; pausing",
+                       box["seconds"], total_bytes)
+        else:
+            log.warning("week upload failed: status=%s duration=%.1fs bytes=%s",
                        status, box["seconds"], total_bytes)
 
     def _check_skew(self, date_header: str | None) -> None:
