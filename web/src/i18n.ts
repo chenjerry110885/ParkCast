@@ -179,12 +179,26 @@ export interface Strings {
   confidenceMedium: string;
   /** Confidence level: mostly the usual pattern for this time of week. */
   confidenceLow: string;
-  /** The pill's popover text for `confidenceHigh`. */
-  confidenceWhyHigh: string;
-  /** The pill's popover text for `confidenceMedium`. */
-  confidenceWhyMedium: string;
-  /** The pill's popover text for `confidenceLow`. */
-  confidenceWhyLow: string;
+  /**
+   * The pill's popover text when the grade rests on accumulated history --
+   * `ConfidenceReason`'s `"weeks"` case. Carries `{n}`, the number of weeks
+   * of this half-hour-of-week the climatology rests on (`Math.floor(support
+   * / WEEKLY_OBSERVATIONS)`).
+   */
+  confidenceWeeksTemplate: string;
+  /**
+   * The pill's popover text when the grade rests on a fresh live reading --
+   * `ConfidenceReason`'s `"reading"` case. Carries `{n}`, the reading's own
+   * age in minutes.
+   */
+  confidenceReadingTemplate: string;
+  /**
+   * The pill's popover text for `ConfidenceReason`'s `"thin"` case: neither a
+   * fresh reading nor enough accumulated history. Says so in those terms --
+   * not "far away", but "not watched at this hour often enough yet" -- since
+   * that is what actually held the grade down.
+   */
+  confidenceThin: string;
   /** Appended to the freshness badge once its reading has actually expired. */
   expired: string;
   /** Accessible label prefix for the freshness badge, e.g. "Data age: …". */
@@ -264,9 +278,9 @@ const en: Strings = {
   confidenceHigh: "High",
   confidenceMedium: "Medium",
   confidenceLow: "Low",
-  confidenceWhyHigh: "Based mostly on the live reading.",
-  confidenceWhyMedium: "A mix of the live reading and the usual pattern for this time.",
-  confidenceWhyLow: "Mostly the usual pattern for this time of week.",
+  confidenceWeeksTemplate: "Based on {n} weeks of history for this time of week.",
+  confidenceReadingTemplate: "Based on a live reading from {n} min ago.",
+  confidenceThin: "Not watched at this time of week often enough yet.",
   expired: "expired",
   freshnessLabel: "Data age",
   walkTile: "Walk",
@@ -331,9 +345,9 @@ const zh: Strings = {
   confidenceHigh: "高",
   confidenceMedium: "中",
   confidenceLow: "低",
-  confidenceWhyHigh: "主要依據最新讀數。",
-  confidenceWhyMedium: "綜合最新讀數與此時段的平常狀況。",
-  confidenceWhyLow: "主要依據此時段每週的平常狀況。",
+  confidenceWeeksTemplate: "依據此時段過去 {n} 週的資料。",
+  confidenceReadingTemplate: "依據 {n} 分鐘前的即時讀數。",
+  confidenceThin: "此時段的觀測資料還不夠多。",
   expired: "已過期",
   freshnessLabel: "資料時間",
   walkTile: "步行",

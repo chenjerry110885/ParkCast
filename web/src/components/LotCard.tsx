@@ -88,7 +88,15 @@ export function LotCard({
   const s = t(lang);
   const stalled = notUpdatingHours(row, baseDataTs);
   const unknownText = stalled === null ? s.noData : s.notUpdating;
-  const level = confidenceFor(horizonFromReadingMin, row.lot.u === undefined, row.probability);
+  const confidence = confidenceFor({
+    minutesFromReading: horizonFromReadingMin,
+    readingAgeMin: ageMin,
+    // Task 10 wires the week table through to the card; until then there is
+    // no history behind this hour to report, and 0 says exactly that.
+    support: 0,
+    updating: row.lot.u === undefined,
+    probability: row.probability,
+  });
   const [priceValue, priceLabel] = splitPrice(formatPrice(row, s));
   const f = row.lot.f;
   const spaces =
@@ -142,7 +150,7 @@ export function LotCard({
             {districtName(row.lot.a, lang)} · {lotTypeName(row.lot.t, lang)}
             {stalled !== null && <> · {fillTemplate(s.unchangedForTemplate, { n: stalled })}</>}
           </p>
-          {(best || level !== null) && (
+          {(best || confidence !== null) && (
             <div className="lot-card__tags" onClick={(e) => e.stopPropagation()}>
               {best && (
                 <span className="pill pill--best anim-shine">
@@ -150,7 +158,7 @@ export function LotCard({
                   {s.bestPick}
                 </span>
               )}
-              {level !== null && <ConfidencePill level={level} lang={lang} />}
+              {confidence !== null && <ConfidencePill level={confidence.level} reason={confidence.reason} lang={lang} />}
             </div>
           )}
         </div>

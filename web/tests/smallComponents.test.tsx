@@ -5,7 +5,7 @@ import { FreshnessBadge } from "../src/components/FreshnessBadge";
 import { Notice } from "../src/components/Notice";
 import { ProbabilityRing } from "../src/components/ProbabilityRing";
 import { Skeleton } from "../src/components/Skeleton";
-import { t } from "../src/i18n";
+import { fillTemplate, t } from "../src/i18n";
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -39,13 +39,25 @@ describe("ProbabilityRing", () => {
 });
 
 describe("ConfidencePill", () => {
-  it("names the level and explains itself on tap", () => {
-    render(<ConfidencePill level="medium" lang="en" />);
+  it("names the level and explains itself on tap, in the words of its reason", () => {
+    render(<ConfidencePill level="medium" reason={{ kind: "weeks", weeks: 3 }} lang="en" />);
     const pill = screen.getByRole("button", { name: /confidence.*medium/i });
     expect(pill).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(pill);
     expect(pill).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("note")).toHaveTextContent(t("en").confidenceWhyMedium);
+    expect(screen.getByRole("note")).toHaveTextContent(fillTemplate(t("en").confidenceWeeksTemplate, { n: 3 }));
+  });
+
+  it("explains a reading-led grade differently from a weeks-led one", () => {
+    render(<ConfidencePill level="high" reason={{ kind: "reading", ageMin: 4 }} lang="en" />);
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByRole("note")).toHaveTextContent(fillTemplate(t("en").confidenceReadingTemplate, { n: 4 }));
+  });
+
+  it("explains a thin grade as not-enough-history, not as distance", () => {
+    render(<ConfidencePill level="low" reason={{ kind: "thin" }} lang="en" />);
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByRole("note")).toHaveTextContent(t("en").confidenceThin);
   });
 });
 
