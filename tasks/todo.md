@@ -280,10 +280,13 @@ equals sign.
 
 - [ ] **Step 1: Write the failing test.** For the fixture lot, the client's `blend(f, probabilityAt(week, i, t).p, minutesFromReading)` at `+120 min` must equal that lot's **last column** in `grid.bin` within **1 percentage point**.
 
-  **The tolerance is arithmetic, not slack.** Measured worst case is **0.9375 pp**: the grid's own
-  `round()` (≤ 0.5) plus the week cell's `round()` scaled by `1 − weight` (≤ 0.4375, since
-  `weight = 0.5 ** (120/30) = 0.0625`). Headroom is 0.06 pp. Any extra rounding you introduce in
-  the client's path will break this test legitimately.
+  **The tolerance is arithmetic, not slack.** Worst case is **0.96875 pp**: the grid's own `round()`
+  (≤ 0.5 pp) plus the week cell's `round()` scaled by `1 − weight` — and `1 − weight = 0.9375`,
+  since `weight = 0.5 ** (120/30) = 0.0625`, so that term is `0.5 × 0.9375 = 0.46875 pp`.
+  **Headroom under the 1 pp gate is 0.03125 pp**, about a thirtieth of it. Any extra rounding
+  introduced anywhere in the client's path has more than enough room to break this test
+  legitimately. (An earlier draft of this plan said 0.9375 pp and 0.0625 pp of headroom — that used
+  0.4375 for the week term and was wrong. The gate itself has never moved.)
 
   Pick a fixture lot with **real climatology**. When `Climatology` returns `None` but
   `Persistence` does not, `Blend` returns pure persistence and the grid stores 0 or 100, while the
