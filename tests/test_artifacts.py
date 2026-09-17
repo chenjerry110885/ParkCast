@@ -422,8 +422,13 @@ def test_encode_week_refuses_a_row_of_the_wrong_length():
 def test_encode_week_names_the_missing_lot():
     """A lot_ids/cells id-convention mismatch (e.g. a botched bare/namespaced
     bridge) must not surface as a bare `KeyError: 'B'` -- the message has to
-    say which id was missing so the mismatch is diagnosable on sight."""
-    with pytest.raises(KeyError, match="B"):
+    say which id was missing so the mismatch is diagnosable on sight.
+
+    `match="B"` alone would also match the bare `KeyError('B')` this test
+    exists to replace (`re.search` over `str(excinfo.value)`, and `"'B'"`
+    contains `B`), so the assertion is on text only the diagnostic produces.
+    """
+    with pytest.raises(KeyError, match="missing from cells"):
         artifacts.encode_week(["A", "B"], {"A": [(None, 0)] * 336}, built_ts=1)
 
 

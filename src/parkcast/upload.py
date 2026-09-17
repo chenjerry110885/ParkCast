@@ -368,7 +368,10 @@ class Uploader:
         ok, reason = self._week_guard.should_attempt(job.key)
         if not ok:
             if reason != "duplicate":
-                log.info("week upload skipped: %s", reason)
+                # WARNING, not INFO: the pair lane speaks every five minutes,
+                # so a skipped attempt there costs five minutes. This lane
+                # speaks once a day, so a skip here can cost a day.
+                log.warning("week upload skipped: %s", reason)
             return
         total_bytes = len(job.week)
         box: dict = {}
@@ -403,8 +406,10 @@ class Uploader:
         if status == 204:
             log.info("week uploaded: status=204 bytes=%s duration=%.1fs", total_bytes, box["seconds"])
         elif status == 409 and reject in ("stale", "too-soon"):
-            log.info("week upload not needed: status=409 reject=%s duration=%.1fs bytes=%s",
-                     reject, box["seconds"], total_bytes)
+            # WARNING for the same reason as the skip above: on a once-a-day
+            # lane this is the signal that today's blob still has not landed.
+            log.warning("week upload not needed: status=409 reject=%s duration=%.1fs bytes=%s",
+                        reject, box["seconds"], total_bytes)
         elif status == 409:
             token = reject if reject in KNOWN_REJECTS else "unknown"
             log.warning("week upload rejected: %s status=409 duration=%.1fs bytes=%s",

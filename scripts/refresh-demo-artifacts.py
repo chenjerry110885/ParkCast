@@ -12,6 +12,12 @@ scores it against the corpus already on this machine, and writes `grid.bin` and
 invented: if the corpus here is a week behind, the climatology is a week behind
 and the forecast is worse -- it is just not *stale*, which is a different fault.
 
+`publish_artifacts` also writes Taipei's `week.bin` here, on its own once-a-day
+rule (see `scheduler._week_already_built_today`): the first run against an
+empty `--out` writes it too, and later runs leave it alone until the Taipei
+calendar date changes. Same honesty property -- it is real climatology from
+whatever corpus is on this machine, not fabricated for the demo.
+
 **This is not collection, and must never become it.**
 
   - It writes to `web/.dev-artifacts/` only. `data/` is opened read-only, and

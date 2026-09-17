@@ -108,8 +108,26 @@ def _publish_week(
     out_dir: Path, city: str, *, history, lot_ids, published_ids,
     built_ts: int, today: date, uploader,
 ) -> None:
-    """Rebuild, publish and offer `city`'s week table -- at most once a
-    Taipei day (`_week_already_built_today`).
+    """Rebuild `city`'s week table at most once a Taipei day
+    (`_week_already_built_today`, ruling R6), then offer TODAY's published
+    bytes to `uploader` on every call -- not only the one that rebuilds it.
+
+    The two gates are deliberately separate. Building is the daily one R6
+    rules on, decided from the file's own header on disk, and untouched here.
+    Uploading is the uploader's own business, on the cadence it already has:
+    `Uploader` keeps whichever week blob is current pending and retries it,
+    through its own `UploadGuard`, on the same tick-calibrated back-off the
+    pair lane already uses -- until this day's blob is accepted (after which
+    `UploadGuard` recognises the unchanged bytes as a duplicate and stops
+    sending anything at all, so this offering costs nothing once it has
+    landed) or superseded by tomorrow's, whose different bytes are a new key.
+
+    An earlier version of this function offered only on the tick that
+    rebuilt, conflating the two: a day whose *upload* failed was marked
+    "built" and silently never retried until the next day's rebuild -- the
+    disk gate was answering "did I build it?" while deciding "did it land?".
+    That is exactly the failure mode `UploadGuard`'s tick-by-tick back-off
+    exists to recover from, moved one layer out and made invisible to it.
 
     `lot_ids` (namespaced, what `history` and `build_week_cells` are keyed
     by) and `published_ids` (bare, what `encode_week` and `roster_id` want)
@@ -119,26 +137,29 @@ def _publish_week(
 
     Every failure here is swallowed by the caller: publishing the week table
     is downstream of the grid/lots pair this tick already published to disk,
-    and a corpus-wide climatology rebuild failing must never be allowed to
-    cost -- or even mark stale -- a reading that will never come back.
+    and a corpus-wide climatology rebuild (or a redundant re-offer) failing
+    must never be allowed to cost -- or even mark stale -- a reading that
+    will never come back.
     """
     if _week_already_built_today(out_dir, city, today):
-        return
-    cells = build_week_cells(history, lot_ids)
-    # `build_week_cells` returns rows keyed by whatever `lot_ids` holds -- here
-    # the namespaced store id, because that is what `history` is keyed by.
-    # `encode_week` looks its rows up by exactly the ids it lays rows out in
-    # (see its docstring), and those must be the BARE published ids -- the
-    # same ones `published_ids` already is. So the dict itself is re-keyed
-    # here, at the single point where the two spellings meet: this is the id
-    # bridge, not just picking which list to pass as `lot_ids`. Skipping this
-    # (handing `cells` through unchanged) is exactly the botched conversion
-    # F1.1 added a diagnostic for -- it would raise `KeyError` naming the
-    # first bare id `encode_week` cannot find under its namespaced spelling.
-    bare_cells = {ids.bare(lot_id): row for lot_id, row in cells.items()}
-    blob = artifacts.encode_week(published_ids, bare_cells, built_ts=built_ts)
-    artifacts.publish_week(out_dir, city, week_blob=blob)
-    log.info("published %s: week table for %s lots", city, len(published_ids))
+        blob = (Path(out_dir) / artifacts.week_name(city)).read_bytes()
+    else:
+        cells = build_week_cells(history, lot_ids)
+        # `build_week_cells` returns rows keyed by whatever `lot_ids` holds --
+        # here the namespaced store id, because that is what `history` is
+        # keyed by. `encode_week` looks its rows up by exactly the ids it lays
+        # rows out in (see its docstring), and those must be the BARE
+        # published ids -- the same ones `published_ids` already is. So the
+        # dict itself is re-keyed here, at the single point where the two
+        # spellings meet: this is the id bridge, not just picking which list
+        # to pass as `lot_ids`. Skipping this (handing `cells` through
+        # unchanged) is exactly the botched conversion F1.1 added a
+        # diagnostic for -- it would raise `KeyError` naming the first bare
+        # id `encode_week` cannot find under its namespaced spelling.
+        bare_cells = {ids.bare(lot_id): row for lot_id, row in cells.items()}
+        blob = artifacts.encode_week(published_ids, bare_cells, built_ts=built_ts)
+        artifacts.publish_week(out_dir, city, week_blob=blob)
+        log.info("published %s: week table for %s lots", city, len(published_ids))
     if uploader is not None:
         uploader.offer_week(blob, city=city, roster_id=artifacts.roster_id(published_ids))
 
@@ -341,12 +362,20 @@ def publish_artifacts(
 
     `today` is the Taipei calendar date this tick is judged against for the
     week table's once-a-day cadence (`_week_already_built_today`). It
-    defaults to the real Taipei date of now, exactly like `run_forever`'s own
-    day-rollover check (`taipei_date`) -- a caller only ever overrides it to
-    drive that gate deterministically in a test.
+    defaults to `generated_at`'s own Taipei date rather than a second,
+    separate `time.time()` call: two clock reads a few statements apart can
+    disagree right at a Taipei midnight, and `today` naming yesterday while
+    `generated_at` (and so the week table's `built_ts`) already names today
+    would rebuild -- and re-upload -- the whole table for nothing. One tick,
+    one clock read.
     """
+    # One stamp for every shard and for the index, read once. Six shards each
+    # calling `time.time()` would disagree by a second or two, and a client
+    # comparing cities would see a difference that means nothing. `today`
+    # defaults from this same read for the same reason -- see the docstring.
+    generated_at = int(time.time())
     if today is None:
-        today = taipei_date(int(time.time()))
+        today = taipei_date(generated_at)
     history = load_history(conn, cold_dir=config.PARQUET_DIR)
     histories = by_city(history)
 
@@ -361,11 +390,6 @@ def publish_artifacts(
     lots_by_city: dict[str, list] = {}
     for lot in lots:
         lots_by_city.setdefault(ids.city_of_stored(lot.id), []).append(lot)
-
-    # One stamp for every shard and for the index, read once. Six shards each
-    # calling `time.time()` would disagree by a second or two, and a client
-    # comparing cities would see a difference that means nothing.
-    generated_at = int(time.time())
 
     # Start from what is already indexed, so a city that refuses this tick --
     # or one missing from `lots` entirely, e.g. its metadata fetch failed --

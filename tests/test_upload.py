@@ -444,6 +444,76 @@ def test_a_week_upload_failure_does_not_touch_the_pairs_guard_or_job(caplog):
     assert pair_calls == [(b"G", b"L")], "the pair must still attempt normally"
 
 
+def test_a_week_upload_in_flight_does_not_block_a_pair_attempt():
+    """`_helper_week` must be tracked separately from `_helper`: a slow week
+    send in flight must not make the pair's own "previous attempt still
+    running" check trip. A failing send (the test above) proves the two
+    guards are separate but not this -- `failing_send_week` raises
+    immediately, so its helper thread is already dead by the time the pair
+    is attempted and `is_alive()` never gets a chance to trip either way."""
+    week_release = threading.Event()
+    week_started = threading.Event()
+    pair_calls = []
+
+    def hanging_send_week(url, secret, week, *, city, roster_id, opener, timeout):
+        week_started.set()
+        week_release.wait(5)
+        return 204, None, None
+
+    def fake_send(url, secret, grid, lots, *, opener, timeout):
+        pair_calls.append((grid, lots))
+        return 204, None, None
+
+    up = upload.Uploader(URL, SECRET, send=fake_send, send_week=hanging_send_week,
+                         guard=upload.UploadGuard(), week_guard=upload.UploadGuard())
+    up.offer_week(b"W", city="taipei", roster_id=1)
+    week_thread = threading.Thread(target=up.process_pending_week, daemon=True)
+    week_thread.start()
+    try:
+        assert week_started.wait(5), "the week send must actually be in flight"
+
+        up.offer(b"G", b"L", base_data_ts=1, roster_id=7)
+        up.process_pending()
+        # A shared `_helper` would make `_attempt` see the week's in-flight
+        # thread as "previous attempt still running" and skip `fake_send`
+        # entirely, leaving this empty.
+        assert pair_calls == [(b"G", b"L")]
+    finally:
+        week_release.set()
+        week_thread.join(5)
+
+
+def test_offer_week_retries_the_same_blob_until_accepted():
+    """Major-1 fix: the week lane must retry a failed upload on the guard's
+    own tick-calibrated back-off (offering the day's unchanged blob again
+    each tick, exactly as `scheduler._publish_week` now does) rather than
+    waiting for tomorrow's rebuild -- and once accepted, re-offering the
+    identical bytes must cost no further network call at all."""
+    attempts = []
+
+    def flaky_send_week(url, secret, week, *, city, roster_id, opener, timeout):
+        attempts.append(week)
+        return (500, None, None) if len(attempts) < 2 else (204, None, None)
+
+    up = upload.Uploader(URL, SECRET, send_week=flaky_send_week, week_guard=upload.UploadGuard())
+
+    up.offer_week(b"TODAY", city="taipei", roster_id=1)   # tick 1: fails
+    assert up.process_pending_week()
+    assert attempts == [b"TODAY"]
+
+    up.offer_week(b"TODAY", city="taipei", roster_id=1)   # tick 2: backing off
+    assert up.process_pending_week()
+    assert attempts == [b"TODAY"], "one tick of back-off after the first failure"
+
+    up.offer_week(b"TODAY", city="taipei", roster_id=1)   # tick 3: retried, lands
+    assert up.process_pending_week()
+    assert attempts == [b"TODAY", b"TODAY"]
+
+    up.offer_week(b"TODAY", city="taipei", roster_id=1)   # tick 4: already landed
+    assert up.process_pending_week()
+    assert attempts == [b"TODAY", b"TODAY"], "an accepted day's blob is a no-op duplicate"
+
+
 def test_from_environment_is_off_and_says_so_once_without_the_value(tmp_path, caplog, host):
     with caplog.at_level(logging.INFO, logger="parkcast.upload"):
         assert upload.from_environment({}, secret_path=tmp_path / "none") is None

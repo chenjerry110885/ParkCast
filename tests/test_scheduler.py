@@ -10,7 +10,7 @@ from parkcast import artifacts, config, ids, scheduler, store
 from parkcast.collector import TickResult
 from parkcast.compact import day_bounds
 from parkcast.feed import TS_FEED, FeedSnapshot, Observation
-from parkcast.forecast import Climatology, Persistence, by_city, load_history
+from parkcast.forecast import Climatology, Persistence, by_city, load_history, week_bucket
 from parkcast.grid import UNKNOWN
 from parkcast.metadata import Lot, capacity_map, parse_metadata
 from parkcast.quality import Q
@@ -1731,9 +1731,15 @@ def test_publish_artifacts_offers_the_week_table_to_the_uploader(tmp_path):
     assert roster == artifacts.decode_week_header(week_blob)["roster_id"]
 
 
-def test_publish_artifacts_offers_the_week_table_only_once_a_day(tmp_path, monkeypatch):
-    """The uploader must not see a second offer on a tick that skipped the
-    rebuild -- an offer it can't distinguish from a genuine daily refresh."""
+def test_publish_artifacts_offers_the_weeks_current_blob_on_every_tick(tmp_path, monkeypatch):
+    """Building is gated to once a day (R6); uploading is NOT -- it is the
+    uploader's own business, retried on its own cadence until accepted (Major
+    1's fix). So the same day's unchanged bytes must be offered on every
+    tick, not only the one that rebuilt -- otherwise a day whose upload
+    failed is marked "built" on disk and never offered again until tomorrow,
+    which is the exact bug this task's fix round closed. A day rollover must
+    still swap in a genuinely different blob (a new `built_ts`, so a new key
+    for `Uploader`'s own guard) rather than repeat yesterday's."""
     conn = store.connect(tmp_path / "t.sqlite")
     _seed(conn, date(2026, 9, 4), lot="A")
     out_dir = tmp_path / "artifacts"
@@ -1743,9 +1749,106 @@ def test_publish_artifacts_offers_the_week_table_only_once_a_day(tmp_path, monke
     monkeypatch.setattr(scheduler.time, "time", lambda: _taipei_noon(day))
     scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, uploader=up, today=day)
     scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, uploader=up, today=day)
+
+    tomorrow = date(2026, 9, 18)
+    monkeypatch.setattr(scheduler.time, "time", lambda: _taipei_noon(tomorrow))
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, uploader=up, today=tomorrow)
     conn.close()
 
+    assert len(up.week_offers) == 3, "offered on every tick, not only on a rebuild"
+    first, second, third = (blob for blob, _, _ in up.week_offers)
+    assert first == second, "the same day's blob is unchanged across ticks"
+    assert third != first, "a day rollover offers a genuinely new blob"
+
+
+def test_a_restart_with_a_valid_todays_week_bin_does_not_rebuild_it(tmp_path):
+    """The restart case R6 exists for: a fresh process (nothing in memory),
+    but a valid week.bin already on disk from earlier today -- the operator
+    paused the collector and just resumed it. A module-level flag checked
+    instead of the file starts every fresh process believing nothing has
+    been built yet and would rebuild (and re-upload) the whole table anyway;
+    only reading the file's own header catches this."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+
+    day = date(2026, 9, 17)
+    pre_existing = artifacts.encode_week(
+        ["A"], {"A": [(0.5, 3)] * config.WEEK_BUCKETS},
+        built_ts=_taipei_noon(day),
+    )
+    (out_dir / "week.bin").write_bytes(pre_existing)
+    before_mtime = (out_dir / "week.bin").stat().st_mtime_ns
+    up = _RecordingUploader()
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, uploader=up, today=day)
+    conn.close()
+
+    assert (out_dir / "week.bin").read_bytes() == pre_existing, "must not be rebuilt"
+    assert (out_dir / "week.bin").stat().st_mtime_ns == before_mtime
+    # The build gate held; the (unchanged) upload offer is still made every
+    # tick per the Major 1 fix above, with exactly today's existing bytes --
+    # not a freshly rebuilt blob.
     assert len(up.week_offers) == 1
+    assert up.week_offers[0][0] == pre_existing
+
+
+@pytest.mark.parametrize("bad_bytes", [
+    b"PCW1\x01",                  # truncated: shorter than the header itself
+    b"XXXX" + b"\x00" * 100,      # wrong magic, otherwise a plausible length
+], ids=["truncated", "wrong-magic"])
+def test_a_corrupt_week_bin_is_replaced_not_left_alone(tmp_path, bad_bytes):
+    """Neither case may raise out of the gate: that would be swallowed by
+    publish_city's own try/except, and since nothing else would ever
+    overwrite a corrupt file, the week table would never be republished
+    again -- a permanent stall disguised as a healthy collector. Both must
+    read as "not built today" and be republished this tick."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+    (out_dir / "week.bin").write_bytes(bad_bytes)
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir)  # must not raise
+    conn.close()
+
+    header = artifacts.decode_week_header((out_dir / "week.bin").read_bytes())
+    assert header["magic"] == artifacts.WEEK_MAGIC
+    assert header["n_lots"] == 1
+
+
+def test_week_table_body_reflects_each_lots_own_climatology(tmp_path):
+    """Every other end-to-end check above reads header fields only
+    (roster_id, n_lots, n_buckets, bucket_min). This pins the body itself:
+    A's row must actually be A's climatology and B's row must actually be
+    B's -- not, say, every row zeroed or the two rows swapped."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    seed_ts, _ = day_bounds(date(2026, 9, 4))
+    _seed(conn, date(2026, 9, 4), lot="A", free=0)     # A's one reading: full
+    _seed(conn, date(2026, 9, 4), lot="B", free=10)    # B's one reading: free
+    out_dir = tmp_path / "artifacts"
+
+    scheduler.publish_artifacts(conn, [_make_lot("A"), _make_lot("B")], out_dir)
+    conn.close()
+
+    # A bucket neither lot was ever observed in falls straight through to the
+    # plain (unshrunk-by-bucket) lot rate, isolating each lot's own signal
+    # from the one bucket that actually holds an observation.
+    other_bucket = (week_bucket(seed_ts) + 1) % config.WEEK_BUCKETS
+    body = (out_dir / "week.bin").read_bytes()[artifacts.WEEK_HEADER_SIZE:]
+
+    def cell(row: int, bucket: int) -> tuple[int, int]:
+        off = (row * config.WEEK_BUCKETS + bucket) * 2
+        return body[off], body[off + 1]
+
+    prob_a, support_a = cell(0, other_bucket)   # row 0: "A" sorts first
+    prob_b, support_b = cell(1, other_bucket)   # row 1: "B"
+    assert support_a == support_b == 0, "neither lot was ever observed in this bucket"
+    assert prob_a < 50 < prob_b, (
+        "A's only reading was full (0) and B's was free (1); their climatology "
+        "must differ in the honest direction, not just differ by coincidence"
+    )
 
 
 # --- end-to-end: real adapters and real metadata through publish_artifacts --
