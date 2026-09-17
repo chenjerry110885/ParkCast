@@ -140,6 +140,25 @@ export interface Strings {
    */
   forecastTooOld: string;
   /**
+   * Shown whenever the probabilities on screen were read out of `week.bin`
+   * rather than out of `grid.bin` -- every arrival past the grid's own
+   * two-hour window, whatever the reading's age.
+   *
+   * The distinction this string exists to draw is the *source* of the number,
+   * not the freshness of the reading: "73%, from a reading taken four minutes
+   * ago" and "73%, from what this car park usually has free at 21:20 on a
+   * Monday" are two different claims, and only one of them survives the
+   * collector being paused for an afternoon. Without it the freshness badge --
+   * which reports the reading and nothing else -- is the only dateline on the
+   * page, and a driver asking about tomorrow evening would read it as if it
+   * applied to the number beside it.
+   *
+   * Deliberately says nothing about how old the reading is: `forecastTooOld`
+   * and the badge cover that, and this sentence is true whether the collector
+   * ran a minute ago or stopped last night.
+   */
+  basedOnHistory: string;
+  /**
    * Shown when the destination is outside the area the roster covers.
    *
    * `rankLots` has no distance cutoff -- it will happily rank Taipei car parks
@@ -315,6 +334,8 @@ const en: Strings = {
   nearbyCarParks: "Car parks nearby",
   forecastTooOld:
     "This forecast is too old to answer for your arrival time, so no chance of a space is shown. Names, walking distances and prices are still correct.",
+  basedOnHistory:
+    "This arrival is further ahead than a live reading reaches, so the chances shown come from each car park's own record for this time of week rather than from the latest reading.",
   outsideCoverage:
     "ParkCast covers Taipei, and no car park it knows is within {km} km of here, so there is nothing worth ranking. The map still works — pick somewhere in the city.",
   mapLabel: "Map of car parks",
@@ -397,6 +418,7 @@ const zh: Strings = {
   rankedForArrival: "依抵達時間排序",
   nearbyCarParks: "附近的停車場",
   forecastTooOld: "預報資料已過舊，無法推估您抵達時的狀況，因此不顯示有位機率。名稱、步行距離與價格仍然正確。",
+  basedOnHistory: "這個抵達時間已超出即時讀數能涵蓋的範圍，畫面上的有位機率是依各停車場在每週這個時段的長期紀錄推估，並非來自最新讀數。",
   outsideCoverage:
     "停車先知涵蓋的範圍是臺北市，此處 {km} 公里內沒有本站收錄的停車場，因此沒有可排序的結果。地圖仍可使用，請改選市區內的地點。",
   mapLabel: "停車場地圖",

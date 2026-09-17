@@ -31,6 +31,7 @@ import {
   composeArrival,
   dayOptions,
   defaultArrival,
+  floorToStep,
   formatClock,
   horizonFromReading,
 } from "../src/arrival";
@@ -338,6 +339,52 @@ function encodeWeek(
     bytes[WEEK_HEADER_SIZE + b * 2 + 1] = cell.support;
   }
   return buf;
+}
+
+/**
+ * The far-arrival fixture, shared by the two describes that read `week.bin`:
+ * the one where the reading is fresh and the arrival is simply out of the
+ * grid's reach, and the one where the reading has also expired. Both ask the
+ * same question of the same table, and a second copy of these numbers would be
+ * a second place for the marked bucket and the filler to drift apart.
+ */
+
+/** The climatology in the arrival's own half-hour bucket. */
+const FAR_PERCENT = 73;
+/** ...and in all 335 others, so a lookup on the wrong bucket is caught by value. */
+const OTHER_PERCENT = 20;
+/** Five weeks of this half-hour: enough for `confidenceFor`'s support-led "high". */
+const FAR_SUPPORT = 5 * WEEKLY_OBSERVATIONS;
+
+/** What the grid's clamp says for every arrival past two hours. Never a right answer out here. */
+const CLAMPED = `${columnMark(N_HORIZONS - 1)}%`;
+
+/**
+ * The marked lot with an observed count, so `blend`'s persistence term has a
+ * reading to decay from -- `MARKED` itself publishes no `f`, which would make
+ * every number out here pure climatology and hide a missing blend.
+ */
+const OBSERVED_LOT: Lot = { ...MARKED, f: 5 };
+
+/** Tomorrow 21:20 Taipei: the case the user complained about, and 1,832 min from the reading. */
+function tomorrowEvening(): number {
+  return composeArrival(dayOptions(nowSec())[1]!.daySec, 21, 20);
+}
+
+/** A `week.bin` whose marked bucket is the one `ts` falls in. */
+function weekFor(ts: number, support = FAR_SUPPORT): ArrayBuffer {
+  // `weekBucket` is the client's own indexer, which makes this a wiring test
+  // and not a second statement of the bucket arithmetic: that the client's
+  // buckets agree with Python's is `seam.test.ts`'s job, against bytes the
+  // Python encoder wrote. What this pins is that `App` looks the lot up at
+  // the *arrival's* time of week rather than the reading's, which is visible
+  // here because the two land in different buckets (234 and 173).
+  return encodeWeek(weekBucket(ts), { percent: FAR_PERCENT, support }, { percent: OTHER_PERCENT, support: 0 });
+}
+
+/** The one rendered lot's probability cell, for the single-lot column-marked fixture. */
+function chance(): string {
+  return screen.getByTestId("lot-probability").textContent ?? "";
 }
 
 /** The row whose lot name is `name`. Names are Chinese in both languages. */
@@ -792,44 +839,6 @@ describe("staleness correction", () => {
  * Any test here that starts passing 96% is the regression.
  */
 describe("an arrival beyond the grid's own window", () => {
-  /** The climatology in the arrival's own half-hour bucket. */
-  const FAR_PERCENT = 73;
-  /** ...and in all 335 others, so a lookup on the wrong bucket is caught by value. */
-  const OTHER_PERCENT = 20;
-  /** Five weeks of this half-hour: enough for `confidenceFor`'s support-led "high". */
-  const FAR_SUPPORT = 5 * WEEKLY_OBSERVATIONS;
-
-  /** What the grid's clamp says for every arrival past two hours. Never a right answer out here. */
-  const CLAMPED = `${columnMark(N_HORIZONS - 1)}%`;
-
-  /**
-   * The marked lot with an observed count, so `blend`'s persistence term has a
-   * reading to decay from -- `MARKED` itself publishes no `f`, which would make
-   * every number out here pure climatology and hide a missing blend.
-   */
-  const OBSERVED_LOT: Lot = { ...MARKED, f: 5 };
-
-  /** Tomorrow 21:20 Taipei: the case the user complained about, and 1,832 min from the reading. */
-  function tomorrowEvening(): number {
-    return composeArrival(dayOptions(nowSec())[1]!.daySec, 21, 20);
-  }
-
-  /** A `week.bin` whose marked bucket is the one `ts` falls in. */
-  function weekFor(ts: number, support = FAR_SUPPORT): ArrayBuffer {
-    // `weekBucket` is the client's own indexer, which makes this a wiring test
-    // and not a second statement of the bucket arithmetic: that the client's
-    // buckets agree with Python's is `seam.test.ts`'s job, against bytes the
-    // Python encoder wrote. What this pins is that `App` looks the lot up at
-    // the *arrival's* time of week rather than the reading's, which is visible
-    // here because the two land in different buckets (234 and 173).
-    return encodeWeek(weekBucket(ts), { percent: FAR_PERCENT, support }, { percent: OTHER_PERCENT, support: 0 });
-  }
-
-  /** The one rendered lot's probability cell. */
-  function chance(): string {
-    return screen.getByTestId("lot-probability").textContent ?? "";
-  }
-
   it("answers tomorrow evening from the week table, not from the grid's last column", async () => {
     // THE regression test. Without the week path this row reads 96% -- the
     // +120-minute column -- labelled as tomorrow's forecast.
@@ -846,6 +855,44 @@ describe("an arrival beyond the grid's own window", () => {
     // emphatically not the grid's clamp, nor another bucket's climatology.
     expect(chance()).not.toContain(CLAMPED);
     expect(chance()).not.toContain(`${OTHER_PERCENT}%`);
+  });
+
+  it("says the number came out of the week table, so it cannot pass for a live reading", async () => {
+    // The freshness badge reports the *reading* and nothing else, which on a
+    // page answered from `week.bin` is a dateline for the wrong thing: "4 min
+    // ago" beside a forecast for tomorrow evening reads as a claim about that
+    // forecast. This line is the only place the page says which artifact
+    // answered, and it tracks the artifact rather than the reading's age --
+    // the source of the number is what it is describing.
+    const far = tomorrowEvening();
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: weekFor(far) });
+    await renderLocated();
+
+    // Inside the window the grid answers, and there is nothing to disclaim.
+    expect(screen.queryByTestId("from-history")).toBeNull();
+
+    selectArrival(far);
+    await waitFor(() => expect(chance()).toBe(`${FAR_PERCENT}%`));
+    expect(screen.getByTestId("from-history").textContent).toBe(t("en").basedOnHistory);
+
+    // ...and it goes away again the moment the grid takes the question back.
+    selectArrival(ceilToStep(nowSec() + 30 * 60));
+    expect(chance()).toBe(`${columnMark(columnFor(ceilToStep(nowSec() + 30 * 60)))}%`);
+    expect(screen.queryByTestId("from-history")).toBeNull();
+  });
+
+  it("claims nothing about a number that is not there", async () => {
+    // With no week table every cell out here reads "no data", and a line
+    // saying where "these chances" came from would be describing an empty
+    // list. The attribution is gated on the table being in hand, not on the
+    // arrival being far.
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: null });
+    await renderLocated();
+
+    selectArrival(tomorrowEvening());
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+    expect(chance()).toContain(t("en").noData);
+    expect(screen.queryByTestId("from-history")).toBeNull();
   });
 
   it("blends the live reading into the climatology just past the grid's edge", async () => {
@@ -1034,12 +1081,6 @@ describe("an arrival beyond the grid's own window", () => {
  * place index, and for the same reason.
  */
 describe("fetching the week table lazily", () => {
-  const OBSERVED_LOT: Lot = { ...MARKED, f: 5 };
-
-  function tomorrowEvening(): number {
-    return composeArrival(dayOptions(nowSec())[1]!.daySec, 21, 20);
-  }
-
   function weekBytes(ts: number): ArrayBuffer {
     return encodeWeek(weekBucket(ts), { percent: 73, support: 30 }, { percent: 20, support: 0 });
   }
@@ -1430,6 +1471,185 @@ describe("an artifact older than the grid it came from", () => {
     expect(chance).toContain(`${columnMark(columnFor(offered.at(-1)!))}%`);
     // ...and not the grid's last column, which is what a clamp would have said.
     expect(chance).not.toContain(`${columnMark(N_HORIZONS - 1)}%`);
+  });
+});
+
+/**
+ * The expiry stopped at the edge of what it is actually a statement about.
+ *
+ * `forecastExpired` says the *reading* has aged past the grid's own span, so
+ * nothing the grid holds still answers for a time the user can pick. That is
+ * true of "in 20 minutes", and it is the whole point of the describe above.
+ * It is not true of "tomorrow at 21:20", which no reading was ever going to
+ * answer: past the grid's window the number is climatology with a persistence
+ * term whose weight at 1,832 minutes from the reading is 4e-19. Weeks of
+ * accumulated history do not go stale because a collector was paused for an
+ * afternoon -- and this one is paused deliberately, for hours at a time.
+ *
+ * Worse, the expiry was also the *fetch* gate, so past a reading age of 113
+ * minutes `week.bin` was not requested at all: zero network calls, and the
+ * seven-day picker answered "no data" for every one of the seven days it
+ * offers, in exactly the state where it is most useful.
+ *
+ * The line is drawn at the grid's span measured **from the clock**, not from
+ * the reading. Measured from the reading it would be nowhere -- with a
+ * 383-minute-old artifact every arrival, "in 20 minutes" included, sits past
+ * the grid's window and would be answered from history, which is precisely
+ * the near-term claim the expiry exists to refuse.
+ */
+describe("a stale reading and an arrival past the grid's window", () => {
+  /** The 383 minutes actually observed while verifying the arrival control. */
+  const OBSERVED_AGE_MIN = 383;
+  /** The grid's whole span, which is also the line between the two behaviours here. */
+  const SPAN_SEC = STEP_MIN * N_HORIZONS * 60;
+
+  /** Age the artifact, then build the far arrival and the table that answers it. */
+  function stubStale(week: (far: number) => ArrayBuffer | null = weekFor): number {
+    ageArtifact(OBSERVED_AGE_MIN);
+    const far = tomorrowEvening();
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: week(far) });
+    return far;
+  }
+
+  it("answers tomorrow evening from the week table, expired reading and all", async () => {
+    // THE regression test for this task. Before it, this row read "no data"
+    // for every arrival on all seven days the picker offers.
+    const far = stubStale();
+    await renderLocated();
+
+    selectArrival(far);
+    expect(screen.getByTestId("arrival-time").textContent).toBe("21:20");
+    await waitFor(() => expect(chance()).toBe(`${FAR_PERCENT}%`));
+
+    // The climatology, not the clamp, not another bucket, and not silence.
+    expect(chance()).not.toContain(CLAMPED);
+    expect(chance()).not.toContain(`${OTHER_PERCENT}%`);
+    expect(chance()).not.toContain(t("en").noData);
+  });
+
+  it("fetches the week table while the reading is stale, which the expiry used to prevent", async () => {
+    // The reviewer's finding, as a network fact: `needsWeek` carried
+    // `!forecastExpired`, so past an age of 113 minutes this count stayed 0
+    // however far ahead the driver looked. Confirmed by probe before the fix.
+    const far = stubStale();
+    await renderLocated();
+
+    // Still lazy: nothing on load, and nothing for the near arrival the
+    // picker opens on -- that one is withheld, so the table would be
+    // downloaded only to be thrown away.
+    expect(weekFetchCount()).toBe(0);
+
+    selectArrival(far);
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+  });
+
+  it("still withholds a near arrival, and still says why", async () => {
+    // Requirement unchanged by this task, and the reason the change is safe:
+    // the picker opens 19 minutes out, a time only a live reading could ever
+    // have answered, and there is no live reading. Climatology is not an
+    // answer to "will there be a space when I get there in a quarter of an
+    // hour" -- it is an answer to "what is this car park usually like".
+    stubStale();
+    await renderLocated();
+
+    expect(chance()).toContain(t("en").noData);
+    expect(chance()).not.toMatch(/\d+%/);
+    expect(screen.getByTestId("forecast-expired").textContent).toBe(t("en").forecastTooOld);
+    expect(screen.getByText(t("en").nearbyCarParks)).toBeInTheDocument();
+    expect(screen.queryByText(t("en").rankedForArrival)).toBeNull();
+    expect(screen.queryByTestId("from-history")).toBeNull();
+    expect(weekFetchCount()).toBe(0);
+  });
+
+  it("draws the line at the grid's span from the clock, not from the reading", async () => {
+    ageArtifact(OBSERVED_AGE_MIN);
+    // The last five-minute mark still inside the grid's span, and the first
+    // one past it. Five minutes apart, so this pins the boundary to the
+    // granularity the picker actually offers.
+    const inside = floorToStep(nowSec() + SPAN_SEC);
+    const outside = ceilToStep(nowSec() + SPAN_SEC);
+    // A fixture that did not straddle the line would prove nothing.
+    expect(inside - nowSec()).toBeLessThanOrEqual(SPAN_SEC);
+    expect(outside - nowSec()).toBeGreaterThan(SPAN_SEC);
+    stubColumnMarkedArtifacts({ lot: OBSERVED_LOT, week: weekFor(outside) });
+    await renderLocated();
+
+    // Measured from the *reading* these are both 500-odd minutes out, and both
+    // would be answered. Measured from the clock -- which is what decides
+    // whether a live reading could ever have covered them -- only the second
+    // is.
+    selectArrival(outside);
+    await waitFor(() => expect(chance()).toBe(`${FAR_PERCENT}%`));
+
+    // Five minutes earlier, and inside the span. The table is in hand by now
+    // and the two arrivals share a half-hour bucket, so the silence below is
+    // the app refusing to answer a near-term question out of history -- not a
+    // missing artifact, and not an empty cell. Answering it would render this
+    // same 73%, which is what makes the assertion sharp.
+    selectArrival(inside);
+    expect(chance()).toContain(t("en").noData);
+    expect(chance()).not.toMatch(/\d+%/);
+    expect(screen.getByTestId("forecast-expired").textContent).toBe(t("en").forecastTooOld);
+    expect(screen.queryByTestId("from-history")).toBeNull();
+  });
+
+  it("says the number came from history, not from the reading it no longer has", async () => {
+    // The two situations the driver has to be able to tell apart: a number
+    // behind a reading taken minutes ago, and a number behind nothing but
+    // what this car park usually does at this hour. One line of copy is what
+    // separates them.
+    const far = stubStale();
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(chance()).toBe(`${FAR_PERCENT}%`));
+
+    expect(screen.getByTestId("from-history").textContent).toBe(t("en").basedOnHistory);
+    // The badge still reports the reading, and the reading is still expired --
+    // that is the truth about the reading, and it is not a claim about the
+    // number beside it.
+    expect(screen.getByTestId("staleness").textContent).toContain(t("en").expired);
+    // ...while the sentence that withholds *every* probability is gone,
+    // because this one is not withheld.
+    expect(screen.queryByTestId("forecast-expired")).toBeNull();
+    // And the order is real again: it was computed from these probabilities.
+    expect(screen.getByText(t("en").rankedForArrival)).toBeInTheDocument();
+  });
+
+  it("says it in Chinese too", async () => {
+    const far = stubStale();
+    await renderLocated();
+    selectArrival(far);
+    await waitFor(() => expect(chance()).toBe(`${FAR_PERCENT}%`));
+
+    fireEvent.click(screen.getByRole("button", { name: "切換為中文" }));
+    await screen.findByRole("button", { name: t("zh").useMyLocation });
+
+    expect(screen.getByTestId("from-history").textContent).toBe(t("zh").basedOnHistory);
+    expect(screen.queryByTestId("forecast-expired")).toBeNull();
+  });
+
+  it("says 'no data' for a bucket nobody has watched out there, never 0%", async () => {
+    // The rule the whole week path is built around, restated in the state this
+    // task opened up: an expired reading must not turn `WEEK_UNKNOWN` into a
+    // confident "0%". `p ?? 0` renders 0% here and the attribution line below
+    // would then be vouching for it.
+    const far = stubStale((ts) =>
+      encodeWeek(weekBucket(ts), { percent: 255, support: 0 }, { percent: OTHER_PERCENT, support: 0 }),
+    );
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+
+    expect(chance()).toContain(t("en").noData);
+    expect(chance()).not.toMatch(/\d+%/);
+    expect(chance()).not.toContain(CLAMPED);
+    // Nothing was answered, so nothing is attributed...
+    expect(screen.queryByTestId("from-history")).toBeNull();
+    // ...and the page falls back to the sentence that is still true out here:
+    // the reading has expired and nothing we hold covers this time either.
+    expect(screen.getByTestId("forecast-expired").textContent).toBe(t("en").forecastTooOld);
   });
 });
 

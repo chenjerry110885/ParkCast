@@ -26,11 +26,19 @@
  *     added back by a second conversion someone could forget. That correction is
  *     the whole reason a nowcast is a model rather than a lookup. See `ageMin`
  *     below, which is the same gap shown to the user.
- *   - **The staleness *limit*.** The correction above has an end. Once even the
- *     nearest arrival time clamps to the last column, every later one does too
- *     and the forecast is no longer about the time the user asked for;
- *     `forecastExpired` says so and withholds the probability rather than
- *     dressing a clamp up as an answer. The rest of the page keeps working.
+ *   - **The staleness *limit*, and what it is a limit on.** The correction
+ *     above has an end. Once even the nearest arrival time clamps to the last
+ *     column, every later one does too and the forecast is no longer about the
+ *     time the user asked for; `forecastExpired` says so and `withheld` drops
+ *     the probability rather than dressing a clamp up as an answer. The rest of
+ *     the page keeps working. But the limit belongs to the *reading*, so it
+ *     binds only the arrivals a reading was ever going to answer: tomorrow
+ *     evening is weeks of climatology carrying a persistence weight of 4e-19,
+ *     as good during a paused collector as outside one, and withholding that
+ *     too switched the seven-day picker off for exactly the hours this
+ *     collector is deliberately paused -- `week.bin` was not even fetched.
+ *     Past the grid's span measured from the clock the number is shown and
+ *     labelled instead. See `withheld` and `fromHistory`.
  *   - **The *horizon* limit, and the second artifact that lifts it.** The same
  *     clamp is reached from the other direction by a driver asking about
  *     tomorrow evening, and the picker offers seven days of those: past +120
@@ -587,6 +595,10 @@ export default function App() {
    * the map on the grey it already has for an unknown one. Names, distances and
    * prices never came from the grid and are untouched -- it is the forecast that
    * expired, not the page.
+   *
+   * This is a fact about the *reading*, and it is used as one: the freshness
+   * badge reports it whatever arrival is chosen. Which probabilities it drops
+   * is `withheld`'s question, not this one's.
    */
   const forecastExpired =
     grid !== null &&
@@ -596,15 +608,58 @@ export default function App() {
   /**
    * The chosen arrival is past everything `grid.bin` covers, so the number can
    * only come from `week.bin`.
-   *
-   * Also the trigger for fetching it, which is why `forecastExpired` is part of
-   * the test: when the grid is that stale the probability is dropped at source
-   * below whatever the horizon is, so the table would be downloaded to be
-   * thrown away. This predicate is "the week table would actually be read",
-   * and the fetch follows the read rather than the clock.
    */
-  const needsWeek =
-    grid !== null && !forecastExpired && horizonFromReadingMin > gridSpanMin(grid);
+  const beyondGrid = grid !== null && horizonFromReadingMin > gridSpanMin(grid);
+
+  /**
+   * The arrival is further ahead than the grid's own span *measured from the
+   * clock*, so no reading -- however fresh -- was ever going to cover it.
+   *
+   * Measured from now rather than from `baseDataTs`, which is the one place in
+   * this file that deliberately does not apply the staleness correction, and
+   * the reason is the correction itself: `horizonFromReadingMin` folds the
+   * reading's age in, so with a 383-minute-old artifact *every* arrival --
+   * "in 20 minutes" included -- sits past the grid's window. Using it here
+   * would hand the near term to climatology the moment the collector paused,
+   * which is exactly the claim `forecastExpired` exists to refuse. From the
+   * clock, "further ahead than a reading reaches" means the same thing at
+   * every reading age, and with a fresh reading the two measures agree to
+   * within its own few minutes.
+   */
+  const distantArrival = grid !== null && arrivalTs - nowSec > gridSpanMin(grid) * 60;
+
+  /**
+   * Nothing this app holds can answer the arrival the user chose, so no
+   * probability is shown for it.
+   *
+   * This is `forecastExpired` narrowed to the arrivals it is actually a
+   * statement about. The reading has aged off the end of the grid, so for a
+   * time in the next couple of hours -- the times only a reading can answer --
+   * there is no forecast left and the clamp must not be dressed up as one.
+   * For tomorrow evening there never was a reading in the answer: at 1,832
+   * minutes out `blend`'s persistence weight is 4e-19, the number is weeks of
+   * accumulated climatology, and climatology does not go stale because the
+   * collector was paused for an afternoon. Withholding it too switched the
+   * seven-day picker off entirely in the state where it is most useful, and
+   * the operator of this app pauses the collector deliberately, for hours.
+   *
+   * What is withheld is unchanged; what is no longer withheld is labelled --
+   * see `fromHistory` below, which is the other half of the bargain: a number
+   * that appears here must say it came from history rather than from a
+   * reading, or the freshness badge beside it becomes a dateline for a claim
+   * it was never making.
+   */
+  const withheld = forecastExpired && !distantArrival;
+
+  /**
+   * Fetch the week table exactly when it will be read.
+   *
+   * `beyondGrid` alone would download 715 KB during a stale period for every
+   * near arrival whose probability `withheld` then drops -- the table pulled
+   * only to be thrown away, on a phone, on a metered connection. The fetch
+   * follows the read, as it always has; it is only the *read* that widened.
+   */
+  const needsWeek = beyondGrid && !withheld;
 
   /**
    * `week.bin`, on the first arrival chosen outside the grid's window and never
@@ -708,11 +763,39 @@ export default function App() {
     if (artifacts === null) return [];
     const { grid: g, lots } = artifacts;
     return lots.lots.map((lot) =>
-      // No forecast survives an artifact this stale, and the dot goes grey --
-      // the same "no data" the map already draws for an unknown cell.
-      toMapLot(lot, forecastExpired ? null : probabilityForLot(g, week, lot, horizonFromReadingMin, arrivalTs)),
+      // Nothing we hold answers this arrival, and the dot goes grey -- the same
+      // "no data" the map already draws for an unknown cell.
+      toMapLot(lot, withheld ? null : probabilityForLot(g, week, lot, horizonFromReadingMin, arrivalTs)),
     );
-  }, [artifacts, week, horizonFromReadingMin, arrivalTs, forecastExpired]);
+    // `withheld` rather than `nowSec`: a boolean that flips at most once as the
+    // clock walks, so this does not re-project 1,075 lots on every tick.
+  }, [artifacts, week, horizonFromReadingMin, arrivalTs, withheld]);
+
+  /**
+   * Every probability on screen was read out of `week.bin` rather than out of
+   * `grid.bin`, and the page says so.
+   *
+   * Gated on a probability having actually come back, not merely on the
+   * arrival being far or the table being in hand: a line explaining where
+   * "these chances" came from, over a screen where every cell reads "no data",
+   * would be vouching for numbers that are not there. That is the same rule
+   * the confidence pill follows one layer down -- no grade over an absent
+   * number -- and it is why the check is `some`, off the projection the map is
+   * already given, rather than `week !== null`: a table can be loaded, the
+   * right roster, and still hold nothing for a bucket nobody has watched.
+   *
+   * Deliberately **not** gated on `forecastExpired`. What this states is the
+   * *source* of the figure, which does not change when the collector resumes;
+   * a label that appeared only during a stale period would flicker off while
+   * the number under it stayed exactly the same climatology, and its absence
+   * would then read as "this one is backed by a live reading". The routing in
+   * `probabilityForLot` is per-arrival, not per-lot, so when this is true it
+   * is true of every row.
+   */
+  const fromHistory = useMemo(
+    () => needsWeek && mapLots.some((lot) => lot.probability !== null),
+    [needsWeek, mapLots],
+  );
 
   /**
    * Every lot, ranked. Not sliced: `listRows` decides what the list shows.
@@ -730,9 +813,9 @@ export default function App() {
       lots: rows,
       // `rows[i]`, resolved through `Lot.i` inside: `rankLots` reports the array
       // position it scored, and the grid row is the lot's own business.
-      probability: (i, h) => (forecastExpired ? null : probabilityForLot(g, week, rows[i], h, arrivalTs)),
+      probability: (i, h) => (withheld ? null : probabilityForLot(g, week, rows[i], h, arrivalTs)),
     });
-  }, [artifacts, week, destination, horizonFromReadingMin, arrivalTs, forecastExpired]);
+  }, [artifacts, week, destination, horizonFromReadingMin, arrivalTs, withheld]);
 
   /**
    * What the list draws: the head of the ranking, grown if the cap would
@@ -777,10 +860,10 @@ export default function App() {
    * The first row with a forecast, never simply the first row: `listRows` can
    * append a no-forecast lot the cap would have dropped, and a "best pick" star
    * over "no data" would be the ranking claiming something it does not know.
-   * With the forecast expired there is no pick to make at all, and the heading
+   * With the arrival withheld there is no pick to make at all, and the heading
    * above the list says the same thing one layer up.
    */
-  const bestId = forecastExpired ? null : (listed.find((r) => r.probability !== null)?.id ?? null);
+  const bestId = withheld ? null : (listed.find((r) => r.probability !== null)?.id ?? null);
 
   /**
    * A lot was chosen, in the list or on the map. One path for both, so the
@@ -939,9 +1022,22 @@ export default function App() {
           {s.locationUnavailable}
         </Notice>
       )}
-      {forecastExpired && (
+      {/* Until climatology answers, the reading is the only source there was
+          and it has expired -- which stays the true explanation for an empty
+          cell whether the arrival is near (nothing could answer it) or far
+          with the table still in flight, refused or 503. The two are mutually
+          exclusive by construction, so the page never carries both. */}
+      {forecastExpired && !fromHistory && (
         <Notice tone="warn" testId="forecast-expired" role="status">
           {s.forecastTooOld}
+        </Notice>
+      )}
+      {/* The freshness badge dates the *reading*; nothing else on the page
+          dates the number. Out here they are not the same thing, and this is
+          the line that says which one the percentages belong to. */}
+      {fromHistory && (
+        <Notice tone="info" testId="from-history" role="status">
+          {s.basedOnHistory}
         </Notice>
       )}
       {/* No heading above this one: "Ranked for your arrival" over an
@@ -956,8 +1052,14 @@ export default function App() {
         <>
           {/* The heading follows what the order actually means: with no forecast
               behind it, the list is sorted by walk and price, and claiming it is
-              "ranked for your arrival" would be the same lie one layer up. */}
-          <h2 className="list-head">{forecastExpired ? s.nearbyCarParks : s.rankedForArrival}</h2>
+              "ranked for your arrival" would be the same lie one layer up. A
+              week-sourced probability *is* a forecast for the chosen arrival,
+              and the ranking really was computed from it, so the same test
+              governs both -- the heading and the sentence above it can never
+              disagree about whether anything was ranked. */}
+          <h2 className="list-head">
+            {forecastExpired && !fromHistory ? s.nearbyCarParks : s.rankedForArrival}
+          </h2>
           <LotList
             rows={listed}
             lang={lang}
