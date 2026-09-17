@@ -15,6 +15,20 @@ dist/
 .wrangler/
 docker/secrets/
 *.pem
+# Two named exceptions to `*.pem`, both PUBLIC and both required for TLS
+# verification to work at all. The blanket rule above still covers every other
+# .pem in this repo, which is the point of naming these two rather than
+# loosening it. Each file's own header block says what it is.
+#   - the CA intermediate www.parkinginfo.ntpc.gov.tw does not send. A public
+#     certificate, no key; without it New Taipei cannot build a chain and fails
+#     every tick (docs/sources.md, "Known limits").
+#   - a throwaway self-signed localhost cert AND KEY used by exactly one test,
+#     which checks that Kaohsiung's and Hsinchu's relaxed context still refuses
+#     an untrusted certificate. The key is deliberately public and worthless:
+#     it is in no trust store, signs nothing but a loopback socket inside the
+#     test suite, and is the same arrangement CPython's own ssl tests use.
+!src/parkcast/sources/twca-ssl-ca-2023.pem
+!tests/fixtures/selfsigned-localhost-keycert.pem
 worker/node_modules/
 web/.dev-artifacts/
 # Brainstorm mockups and SDD ledgers (superpowers plugin scratch)

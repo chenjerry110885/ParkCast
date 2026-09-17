@@ -2,7 +2,12 @@
 name = "parkcast"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = ["requests>=2.32", "pyarrow>=17", "pyproj>=3.6"]
+# `certifi` is not a new dependency -- `requests` has always pulled it in, and
+# it is what `requests` uses as its CA bundle. It is named here because
+# `sources.http` now imports it directly (to load the same roots into the two
+# per-source SSLContexts), and an undeclared direct import would break the day
+# `requests` stopped depending on it.
+dependencies = ["requests>=2.32", "certifi", "pyarrow>=17", "pyproj>=3.6"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
@@ -13,6 +18,14 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The missing New Taipei intermediate travels with the package. `COPY src ./src`
+# puts it in the build context, but the image installs with `pip install .`, so
+# the collector imports `parkcast` out of site-packages, not out of `/app/src` --
+# without this the .pem is in the image and still unreachable at runtime, and
+# New Taipei fails exactly as it did before. Verified inside the built image.
+[tool.setuptools.package-data]
+"parkcast.sources" = ["*.pem"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

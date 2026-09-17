@@ -23,6 +23,20 @@ from parkcast.sources import SourceTick, geo, http
 CITY = "newtaipei"
 URL = "https://www.parkinginfo.ntpc.gov.tw/parkinginfo/public/getSpot.ashx"
 
+# Measured in-container 2026-09-17 (python 3.13.15, OpenSSL 3.5.7, certifi
+# 2026.07.22): this host sends exactly ONE certificate -- its leaf -- and no
+# intermediate, so a default-context fetch fails with "unable to get local
+# issuer certificate". Unlike Kaohsiung and Hsinchu, clearing
+# `ssl.VERIFY_X509_STRICT` does NOT help here (measured): the issuer is
+# genuinely absent, not merely malformed. Shipping the missing intermediate
+# fixes it, and STRICT VERIFICATION STAYS ON -- `x509_strict` is left at its
+# default True, and this chain verifies under OpenSSL's own `-x509_strict`.
+# The file adds no new trust anchor: its own issuer, `TWCA CYBER Root CA`, is
+# already a certifi root, and it is loaded in addition to certifi's bundle,
+# not instead of it. Full provenance and the chain proof are in the file's own
+# header block.
+TLS = http.TlsPolicy(extra_ca_file=http.TWCA_SSL_CA)
+
 _DISTRICT_RE = re.compile(r"市([^市區]*區)")
 
 
@@ -147,4 +161,4 @@ class Source:
     city = CITY
 
     def fetch(self, *, now: int) -> SourceTick:
-        return parse(http.post_json(URL), now=now)
+        return parse(http.post_json(URL, tls=TLS), now=now)
