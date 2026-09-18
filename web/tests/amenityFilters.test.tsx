@@ -118,7 +118,47 @@ const DOC: LotsDoc = {
   lots: LOTS,
 };
 
+/**
+ * The same 25 car parks, as published by a collector that had never heard of
+ * either field.
+ *
+ * Not a hypothetical: it is every roster built before `edc980b`, it is what
+ * `parkcast.tpe-dev.workers.dev/artifacts/lots.json` served on 2026-09-18
+ * (1,089 lots, zero `m`, zero `e`), and it is therefore the *only* roster the
+ * web app will see for as long as it takes to rebuild and restart the
+ * collector. The absent branch is not an edge case during that window; it is
+ * the whole of the behaviour.
+ */
+const BARE_LOTS: Lot[] = LOTS.map(({ m: _m, e: _e, ...rest }) => rest);
+const BARE_DOC: LotsDoc = { ...DOC, lots: BARE_LOTS };
+
+/** ...and a roster that answered one of the two questions with a published zero. */
+const HALF_LOTS: Lot[] = BARE_LOTS.map((lot) => ({ ...lot, e: 0 }));
+const HALF_DOC: LotsDoc = { ...DOC, lots: HALF_LOTS };
+
+/**
+ * ...and a roster that hides exactly one car park for each of the two reasons.
+ *
+ * Every row in the head has scooter bays except two: one that reported none,
+ * and one that never mentioned them. English needs a different sentence for
+ * `n === 1` on both lines, and this is the only fixture that reaches it -- the
+ * main one hides 16 and 3.
+ */
+const NONE_AT = 5;
+const UNREPORTED_AT = 9;
+const SINGLE_LOTS: Lot[] = LOTS.map((lot) => {
+  const next: Lot = { ...lot, m: 40 };
+  if (lot.i === NONE_AT) next.m = 0;
+  if (lot.i === UNREPORTED_AT) delete next.m;
+  return next;
+});
+const SINGLE_DOC: LotsDoc = { ...DOC, lots: SINGLE_LOTS };
+
+/** The roster the stubbed fetch is serving, so a test can change it mid-session. */
+let served: LotsDoc = DOC;
+
 beforeEach(() => {
+  served = DOC;
   vi.spyOn(Date, "now").mockReturnValue(NOW_MS);
   vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: false, addEventListener() {}, removeEventListener() {} })));
   vi.stubGlobal(
@@ -128,7 +168,7 @@ beforeEach(() => {
         return Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(encodeGrid()) });
       }
       if (url.endsWith("lots.json")) {
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(DOC) });
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(served) });
       }
       if (url.endsWith("week.bin")) return Promise.resolve({ ok: false, status: 503 });
       return Promise.reject(new Error(`unexpected url ${url}`));
@@ -276,6 +316,34 @@ describe("the amenity filters", () => {
     expect(screen.queryByTestId("filter-hidden")).toBeNull();
   });
 
+  it("says 'car park' when it hid one, on both lines", async () => {
+    // "1 car parks are hidden" is what this said before, and the unknown line
+    // is where it showed most: one car park in twenty with nothing to say
+    // about scooters is an ordinary roster. The pair of templates follows
+    // `confidenceWeekTemplate`/`confidenceWeeksTemplate`; this is the branch
+    // between them, exercised through the notice a driver actually reads.
+    served = SINGLE_DOC;
+    await renderRanked();
+    press("scooter");
+
+    const notice = screen.getByTestId("filter-hidden");
+    const none = within(notice).getByTestId("filter-hidden-none");
+    const unknown = within(notice).getByTestId("filter-hidden-unknown");
+    expect(none).toHaveTextContent(fillTemplate(t("en").filterHiddenNoneOneTemplate, { n: 1 }));
+    expect(unknown).toHaveTextContent(fillTemplate(t("en").filterHiddenUnknownOneTemplate, { n: 1 }));
+    // The plural is not merely absent from the rendered text -- it is the
+    // wrong sentence, and either line printing it is the bug.
+    expect(notice.textContent).not.toContain("car parks");
+    expect(notice.textContent).not.toContain("are hidden");
+    // ...and the two reasons are still two, each accounting for its own car
+    // park. The list is still full: the filter narrows the ranking, so the two
+    // it dropped from the head are replaced from below the cap -- which is
+    // exactly why the sentences have to say which twenty they are counting.
+    expect(rowIds()).toHaveLength(LIST_LIMIT);
+    expect(rowIds()).not.toContain(LOTS[NONE_AT]!.id);
+    expect(rowIds()).not.toContain(LOTS[UNREPORTED_AT]!.id);
+  });
+
   it("leaves the ranking's other facts alone", async () => {
     // A filtered list is still the same ranking, told about the same car
     // parks: the probability, the walk and the price on a surviving row must
@@ -307,6 +375,87 @@ describe("the amenity filters", () => {
     expect(within(screen.getByTestId("lot-list")).getAllByText(t("en").bestPick)).toHaveLength(1);
     expect(within(rows[0]!).getByText(t("en").bestPick)).toBeInTheDocument();
     expect(rows[0]!.getAttribute("data-lot-id")).toBe(SHOWN_IDS[0]);
+  });
+});
+
+/**
+ * The roster the site is actually serving until the collector is rebuilt.
+ *
+ * A filter is a question put to a roster, and these tests are about what the
+ * app does with a question the roster cannot answer. Pressing 機車 against a
+ * roster with no `m` on any row is honest in every word -- the notice says
+ * "does not mention it at all, which is not the same as having none" -- and
+ * produces an empty list over a city of dimmed dots, with a hidden count that
+ * stands for the entire roster. So the chip is not offered.
+ *
+ * The line the guard must not cross is the one the whole feature rests on: a
+ * car park that *reported* zero has answered, and its chip stays. The third
+ * test puts both states on one roster and asserts them against each other, the
+ * same shape `lotCard.test.tsx` uses on one card.
+ */
+describe("a roster that has never heard of either field", () => {
+  it("offers neither chip, because neither question has an answer anywhere in it", async () => {
+    served = BARE_DOC;
+    await renderRanked();
+
+    expect(screen.queryByTestId("filter-scooter")).toBeNull();
+    expect(screen.queryByTestId("filter-charging")).toBeNull();
+    // ...and no empty group left behind: a labelled row of no controls is a
+    // heading over nothing.
+    expect(screen.queryByTestId("amenity-filters")).toBeNull();
+    expect(screen.queryByRole("group", { name: t("en").filtersLabel })).toBeNull();
+  });
+
+  it("leaves the list and the map exactly as they were, with nothing hidden and nothing to explain", async () => {
+    served = BARE_DOC;
+    await renderRanked();
+
+    // The failure this guard exists to prevent, stated as its absence: no
+    // empty list, no notice, and every car park still in it.
+    expect(rowIds()).toHaveLength(LIST_LIMIT);
+    expect(screen.queryByTestId("filter-hidden")).toBeNull();
+    expect(screen.queryByText(t("en").filterNoMatch)).toBeNull();
+  });
+
+  it("still offers the chip for a field every car park reported as zero", async () => {
+    // One roster, both states: `m` absent everywhere, `e` a published zero
+    // everywhere. A guard that asked "does any lot *have* some" instead of
+    // "has any lot answered" would take both chips away, and a guard that
+    // asked neither would offer both. Only the distinction gives this answer.
+    served = HALF_DOC;
+    await renderRanked();
+
+    expect(screen.queryByTestId("filter-scooter")).toBeNull();
+    expect(screen.getByTestId("filter-charging")).toBeInTheDocument();
+
+    // ...and the chip that survived still works, and still says a reported
+    // zero is a reason, not a silence.
+    press("charging");
+    expect(rowIds()).toHaveLength(0);
+    const notice = screen.getByTestId("filter-hidden");
+    expect(within(notice).getByTestId("filter-hidden-none")).toHaveTextContent(String(LIST_LIMIT));
+    expect(within(notice).queryByTestId("filter-hidden-unknown")).toBeNull();
+  });
+
+  it("unpresses a chip whose field the next roster stops answering", async () => {
+    // The deploy window runs the other way -- chips appear as the rebuilt
+    // collector publishes -- but a roster can lose a field too, and a filter
+    // still narrowing the list with no chip left to unpress would be a short
+    // list the driver has no way to lengthen. The filter is derived from what
+    // the roster can answer, so it cannot outlive the chip.
+    await renderRanked();
+    press("scooter");
+    expect(rowIds()).toEqual(SHOWN_IDS);
+
+    served = BARE_DOC;
+    vi.spyOn(Date, "now").mockReturnValue(NOW_MS + 120_000);
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+
+    expect(screen.queryByTestId("filter-scooter")).toBeNull();
+    expect(rowIds()).toHaveLength(LIST_LIMIT);
+    expect(screen.queryByTestId("filter-hidden")).toBeNull();
   });
 });
 

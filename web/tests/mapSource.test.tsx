@@ -25,11 +25,14 @@
  * to hand it the props and watch what it does to MapLibre. Those tests keep the
  * same fake map, so what they assert is still "what MapLibre was actually told".
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { FeatureCollection, Point } from "geojson";
 import type { MapLibreMap } from "maplibre-gl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { COVERAGE_RADIUS_M, LIST_LIMIT, MAP_CARD_PX } from "../src/App";
+import App, { COVERAGE_RADIUS_M, LIST_LIMIT } from "../src/App";
 import { HEADER_SIZE, resetWeekCache } from "../src/artifacts";
 import { WEEKLY_OBSERVATIONS } from "../src/confidence";
 import { haversineMeters, walkMinutes } from "../src/geo";
@@ -921,6 +924,73 @@ describe("a car park tapped on the map", () => {
     return (top + (window.innerHeight - bottom)) / 2 + (call.offset?.[1] ?? 0);
   }
 
+  /**
+   * The card's rendered box, which jsdom does not have one of.
+   *
+   * `offsetTop` and `offsetHeight` are `0` for everything in jsdom, so a test
+   * that wants to say anything about where the card is has to say how tall it
+   * is. Stating it here is the *point* rather than a concession: the app now
+   * asks the card instead of carrying a number, so what these tests pin is
+   * that the dot follows whatever answer it gets -- which is a claim a stale
+   * constant cannot satisfy, and the old assertion (`easedDotY()` against
+   * `MAP_CARD_PX`) could not make. The two heights below are real: measured in
+   * Chrome against the dev roster, card open, sheet at `peek`.
+   */
+  const CARD_TOP_PX = 72;
+  /** The card's other half of the geometry, asserted on text since jsdom lays nothing out. */
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "src", "styles", "components.css"),
+    "utf8",
+  );
+  /** 375x812, two columns of fact tiles. */
+  const SHORT_CARD_PX = 289;
+  /** 360x740 before this branch's CSS fix, where the tiles stacked into one column. */
+  const TALL_CARD_PX = 385;
+
+  const LAYOUT_BOX = ["offsetTop", "offsetHeight"] as const;
+  /** jsdom's own getters, put back after each test so nothing else sees the stub. */
+  const realLayoutBox = LAYOUT_BOX.map((name) => {
+    const real = Object.getOwnPropertyDescriptor(HTMLElement.prototype, name);
+    if (real === undefined) throw new Error(`jsdom no longer defines ${name}`);
+    return real;
+  });
+  let cardBox: { top: number; height: number } | null = null;
+
+  /** Render the map's card as a box `height` tall, `top` px down the page. */
+  function drawCardAs(height: number, top = CARD_TOP_PX): void {
+    cardBox = { top, height };
+    Object.defineProperty(HTMLElement.prototype, "offsetTop", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.dataset?.testid === "map-card" && cardBox !== null ? cardBox.top : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.dataset?.testid === "map-card" && cardBox !== null ? cardBox.height : 0;
+      },
+    });
+  }
+
+  afterEach(() => {
+    cardBox = null;
+    LAYOUT_BOX.forEach((name, i) => {
+      Object.defineProperty(HTMLElement.prototype, name, realLayoutBox[i]!);
+    });
+  });
+
+  /** The bottom edge of the card the app was just told to measure. */
+  function cardBottom(): number {
+    if (cardBox === null) throw new Error("no card box was stated");
+    return cardBox.top + cardBox.height;
+  }
+
+  /** The top edge of the sheet, which is the other wall of the gap the dot lands in. */
+  function sheetTop(): number {
+    return window.innerHeight - lastPadding().bottom;
+  }
+
   it("gives a tapped car park outside the list the list's own card", async () => {
     await renderWithDestination();
 
@@ -997,36 +1067,119 @@ describe("a car park tapped on the map", () => {
   /**
    * ...and the other half of "on the map": not on top of the dot it is about.
    *
-   * The card's slot is drawn by CSS, which jsdom does not run, so what is
-   * checkable here is the arithmetic that keeps the dot out of it. The card
-   * covers the top `MAP_CARD_PX` of the band the top bar and the sheet leave,
-   * and the centre request's `offset` is what moves the tapped lot below that
-   * -- so `easedDotY()`, computed by MapLibre's own rule, has to come out past
-   * the bottom of the slot. Without the offset the lot lands in the middle of
-   * the whole band, which on a phone is inside the card.
+   * The card's box is drawn by CSS, which jsdom does not run, so the box is
+   * stated (`drawCardAs`) and what is checked is where the dot goes given one.
+   * The claim is not "the dot clears 288 px" -- that was the old assertion and
+   * it was true against a constant that had stopped being true of the card.
+   * It is "the dot lands in the gap between the card's bottom edge and the
+   * sheet's top one", which is a statement about two boxes and cannot be
+   * satisfied by a number that has drifted away from either.
    */
-  it("eases the tapped dot clear of the card, not into the middle of it", async () => {
+  it("eases the tapped dot into the gap the card leaves, not into the middle of the card", async () => {
     await renderWithDestination();
     // Started from an open sheet, the way a driver who has been reading the
     // list leaves it: a row tap at `peek` steps it to `half`. That is also the
     // only state in which the step *down* below is observable -- and it is the
     // state that needs it, because `half` leaves less room between the top bar
-    // and the sheet than the card's own slot.
+    // and the sheet than the card itself takes.
     fireEvent.click(listedRows()[1]!);
     expect(screen.getByTestId("sheet")).toHaveAttribute("data-snap", "half");
 
+    drawCardAs(SHORT_CARD_PX);
     tapDot(CROWD[22]!);
 
-    // The slot runs from the top of the map band (`padding.top`, the top bar)
-    // down by the card's own height.
-    expect(easedDotY()).toBeGreaterThan(lastPadding().top + MAP_CARD_PX);
-    // ...and clear of the sheet at the other end, which is the half of it the
-    // sheet's own step down below is for.
-    expect(easedDotY()).toBeLessThan(window.innerHeight - lastPadding().bottom);
+    // Below the card, above the sheet, and in the middle of what is between
+    // them -- the whole of the geometry, in the units the driver sees.
+    expect(easedDotY()).toBeGreaterThan(cardBottom());
+    expect(easedDotY()).toBeLessThan(sheetTop());
+    expect(easedDotY()).toBe((cardBottom() + sheetTop()) / 2);
     // The sheet steps down to `peek` rather than up, because the answer is on
     // the map now and the card needs the band the sheet was sitting in. (Up is
     // what this did when the answer was in the sheet. Same reason, other way.)
     expect(screen.getByTestId("sheet")).toHaveAttribute("data-snap", "peek");
+  });
+
+  /**
+   * The reason the number is gone, stated as a test.
+   *
+   * `MAP_CARD_PX = 288` was measured against a four-tile card. `c0ff877` added
+   * two amenity tiles and the card grew -- to 289 px at 375 px, and to 385 px
+   * at 360 px where the tiles stacked -- while the constant did not, and at
+   * 360 px the dot came to rest *inside* the card describing it. Every test
+   * still passed, because the offset and the assertion were both reading the
+   * same stale number.
+   *
+   * So this taps the same dot against two different cards and requires the dot
+   * to move with the card: exactly half the extra height, because half of what
+   * the card covers is what the offset spends. A constant of any value gives
+   * the same answer twice and fails the last line; a constant that happened to
+   * be right for one of them still puts the dot inside the other.
+   */
+  it("moves the dot by however much the card grew, so another tile cannot land it back underneath", async () => {
+    await renderWithDestination();
+
+    drawCardAs(SHORT_CARD_PX);
+    tapDot(CROWD[22]!);
+    const shortDot = easedDotY();
+    expect(shortDot).toBeGreaterThan(cardBottom());
+
+    drawCardAs(TALL_CARD_PX);
+    tapDot(CROWD[22]!);
+    const tallDot = easedDotY();
+    expect(tallDot).toBeGreaterThan(cardBottom());
+    expect(tallDot).toBeLessThan(sheetTop());
+
+    expect(tallDot - shortDot).toBe((TALL_CARD_PX - SHORT_CARD_PX) / 2);
+  });
+
+  /**
+   * ...and the bound's one unknown reaches the CSS from the same place.
+   *
+   * `--map-card-max` is written out of quantities that are literally in
+   * `.map-card`'s own rule, plus one that is not: how tall the sheet is when
+   * it peeks. That number lives in `layout/sheet`'s `snapHeights`, and it is
+   * also what the map is told the sheet covers -- so asserting the custom
+   * property against `padding.bottom` (a carded tap steps the sheet to `peek`)
+   * says the two consumers read one source. A second copy of `max(240, 34vh)`
+   * in the stylesheet would pass every other test in this file.
+   */
+  it("hands the card's bound the peek height the map was given, not a second copy of it", async () => {
+    await renderWithDestination();
+    drawCardAs(SHORT_CARD_PX);
+    tapDot(CROWD[22]!);
+
+    expect(screen.getByTestId("sheet")).toHaveAttribute("data-snap", "peek");
+    expect(screen.getByTestId("map-card").style.getPropertyValue("--sheet-peek")).toBe(
+      `${lastPadding().bottom}px`,
+    );
+  });
+
+  /**
+   * The bound that makes the gap above exist at all.
+   *
+   * Measuring puts the dot below whatever the card is; it cannot invent map
+   * that is not there. At 320x568 the card wants 309 px of a 268 px band, so
+   * the card is capped instead -- and the cap is written in CSS, against the
+   * peek height `App` hands it, because that is where the card's own top
+   * offset is written too. On text, not layout: jsdom lays nothing out, and
+   * what is checkable is that the rule exists and is built from the sheet's
+   * real height rather than a second copy of it. (Measured live in Chrome:
+   * 320x568 caps the card at 184 px and leaves the dot 36 px of clear map on
+   * each side.)
+   */
+  it("bounds the card by the band it shares with its dot, in terms of the sheet's own height", () => {
+    const block = css.match(/\.map-card\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(block).toMatch(/max-height:\s*var\(--map-card-max\)/);
+    expect(block).toMatch(/--map-card-max:\s*calc\(/);
+    // The peek height comes from `layout/sheet`'s `snapHeights` by way of an
+    // inline custom property, never from a number retyped here.
+    expect(block).toMatch(/var\(--sheet-peek/);
+    expect(block).toMatch(/var\(--map-card-dot-gap\)/);
+    // ...and the card is what scrolls when the bound bites, so nothing is
+    // clipped away unreachably.
+    expect(css).toMatch(/\.map-card \.lot-card \{[^}]*overflow-y:\s*auto/);
+    // The narrow-width rule that stacked the tiles does not reach this card.
+    expect(css).toMatch(/\.map-card \.facts \{\s*grid-template-columns:\s*1fr 1fr;?\s*\}/);
   });
 
   /**

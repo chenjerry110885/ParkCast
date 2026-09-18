@@ -95,7 +95,7 @@
  *     the same `LotCard` the list uses, so the two can never drift into two
  *     versions of "the same detail" -- floating in the band of map the top
  *     bar and the sheet leave, with the tapped dot centred in what is left of
- *     that band (see `MAP_CARD_PX` and `padding`) so the card never covers the
+ *     that band (see `mapCardDepthPx` and `padding`) so the card never covers the
  *     dot it describes. It takes the "Best pick" crown only when the lot the
  *     ranking crowned is the lot that was tapped; see `bestId` for why that
  *     badge is withheld even from lots the ranking *did* rank. With no
@@ -117,8 +117,8 @@
  *     phone -- which is the same promise the rest of this file makes, and would
  *     have been the first thing an address search quietly broke.
  */
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { exclusionFor, tallyHidden, toggleAmenity, type Amenity } from "./amenities";
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { answerable, exclusionFor, tallyHidden, toggleAmenity, type Amenity } from "./amenities";
 import { MAX_LEAD_SEC, MIN_LEAD_SEC, ceilToStep, clampArrival, defaultArrival, horizonFromReading } from "./arrival";
 import { artifactsBase, horizonColumn, loadArtifacts, loadWeek, probabilityAt } from "./artifacts";
 import { AmenityFilters } from "./components/AmenityFilters";
@@ -272,32 +272,54 @@ const TOP_BAR_PX = 60;
 const PANEL_PX = 420;
 
 /**
- * The vertical slot the map card occupies, in pixels: the gap above it, the
- * card, and the gap between it and the map it floats over.
+ * How deep into the map's own band the card reaches, measured off the card
+ * that is on screen rather than declared beside it.
  *
- * Measured, not guessed: a card with a confidence pill and four fact tiles is
- * 231 px at 375 px wide (東門市場停車場, 2026-09-18, dev server), and the card
- * the map draws always has a confidence pill. 12 px of gap either side makes
- * 255, and 288 leaves room for the taller ones -- a wrapped name, a "not
- * updating" line. `.map-card` in `styles/components.css` owns the other half of
- * this geometry, which is where the card is actually drawn; this half is how
- * the map is told to keep the tapped dot out from under it.
+ * **This was a constant, and the constant is what broke.** `MAP_CARD_PX = 288`
+ * was measured once, against a card with a confidence pill and four fact
+ * tiles. `c0ff877` then dropped the arrival tile and added two amenity ones:
+ * the card became 289 px at 375 px wide, and 385 px at 360 px, where
+ * `components.css` stacks the fact tiles into a single column. The number
+ * beside the code and the box on the screen drifted apart in silence, and at
+ * 360 px the eased dot landed *inside* the card that describes it -- the one
+ * thing this geometry exists to prevent. Nothing could have caught it: jsdom
+ * lays nothing out, so the test compared the offset against the same constant
+ * the offset came from, and the two agreed with each other all the way down.
  *
- * Spent as **half** of itself, as the `offset` on the centre request: without
+ * So the card is asked instead. `offsetTop` and `offsetHeight` are layout
+ * values: they ignore the entrance transform that `getBoundingClientRect`
+ * would have included, and read in a layout effect one commit after the card
+ * mounts they are the box the driver is about to look at. A tile added
+ * tomorrow moves the dot tomorrow, with nothing to update and nothing to
+ * remember.
+ *
+ * `bandTop` is `padding.top` -- where the strip of map the chrome leaves
+ * begins -- so the answer is how much of that strip the card is sitting on.
+ *
+ * **Spent as half of itself**, as the `offset` on the centre request: without
  * one, `easeTo` puts the tapped lot in the middle of the band the top bar and
- * the sheet leave, which is inside the card. The card takes the top
- * `MAP_CARD_PX` of that band, so moving the lot down by half of it puts it in
- * the middle of what is left -- ~95 px clear of the card above and ~95 px clear
- * of the sheet below, on a 375x812 phone at `peek`.
+ * the sheet leave, which is inside the card. Displacing it by half of what the
+ * card covers puts it in the middle of what the card leaves -- ~88 px clear of
+ * each on a 375x812 phone at `peek`, ~64 px at 360x740.
  *
- * Not folded into `padding`, which would land the dot in exactly the same
- * place: padding decides where on the canvas the map's centre is *drawn*, so
- * adding 288 to it and taking it away again moves the whole picture 144 px, and
- * the second of those happens when the card is dismissed with no camera
- * movement to absorb it -- the map lurching as a card closes. The offset rides
+ * Which is also why this is not folded into `padding`. Padding decides where
+ * on the canvas the map's centre is *drawn*, so adding the card's depth to it
+ * and taking it away again moves the whole picture by half that depth twice,
+ * and the second of those happens when the card is dismissed with no camera
+ * movement to absorb it: the map lurching as a card closes. The offset rides
  * with the ease that is already happening instead.
+ *
+ * **The other half of the guarantee is in CSS.** Measuring puts the dot below
+ * whatever the card turned out to be, but it cannot invent room that is not
+ * there -- at 320x568 the card wants 309 px of a 268 px band, and no offset
+ * fixes that. `.map-card`'s own `max-height` in `styles/components.css` is
+ * what bounds it, so the gap this arithmetic centres the dot in is never empty
+ * however many tiles the card grows.
  */
-export const MAP_CARD_PX = 288;
+function mapCardDepthPx(card: HTMLElement | null, bandTop: number): number {
+  if (card === null) return 0;
+  return Math.max(0, card.offsetTop + card.offsetHeight - bandTop);
+}
 
 interface Artifacts {
   grid: Grid;
@@ -479,7 +501,7 @@ export default function App() {
    * filter silently restored from a previous session would shorten the list
    * for a reason nothing on screen explains.
    */
-  const [filters, setFilters] = useState<readonly Amenity[]>([]);
+  const [pressedFilters, setPressedFilters] = useState<readonly Amenity[]>([]);
   /**
    * The card the pointer is over, which the map answers with a faint ring on
    * that lot's dot (spec §5.6) -- the link between a row in the list and a point
@@ -494,6 +516,23 @@ export default function App() {
     offsetY: number;
     nonce: number;
   } | null>(null);
+  /**
+   * The same move, before the card it has to clear has been measured.
+   *
+   * A tap does two things at once: it draws a card and it moves the map out
+   * from under it. The second needs the first's height, and in the click
+   * handler the card does not exist yet -- which is the hole the old constant
+   * was filling. So a tap records *what* to centre here, and the layout effect
+   * below turns it into a real `centerRequest` once the card is on the page.
+   */
+  const [centerPending, setCenterPending] = useState<{
+    lat: number;
+    lon: number;
+    carded: boolean;
+    nonce: number;
+  } | null>(null);
+  /** The card the map draws, so its rendered box can be asked about. See `mapCardDepthPx`. */
+  const mapCardRef = useRef<HTMLElement | null>(null);
   const [snap, setSnap] = useState<Snap>("peek");
   /**
    * The viewport's height, because the sheet's is a fraction of it and the map
@@ -851,6 +890,47 @@ export default function App() {
   }, [abandon, clearFailure]);
 
   /**
+   * Which of the two filters the roster on hand can actually answer.
+   *
+   * **A control whose only possible outcome is an empty list is not a
+   * control.** `lots.json` carries `m` and `e` only from a collector built
+   * after `edc980b`, and the roster live today has 1,089 lots and neither key
+   * on any of them. Pressing 機車 against that roster is honest at every word
+   * -- the notice says "does not mention it at all, which is not the same as
+   * having none" -- and completely useless: no rows, every dot in the city
+   * dimmed, and a hidden count of twenty standing for 1,089. So the chip is
+   * not offered until some car park in the roster has answered the question it
+   * asks.
+   *
+   * This says something about the data on hand, never about a car park, so it
+   * breaks nothing the rest of this feature promises: a lot that reports zero
+   * scooter bays still keeps the chip on screen and is still hidden by it,
+   * because a reported zero is an answer. It is the same guard `listFilters`
+   * already applies one layer down -- refusing to act on a filter when there
+   * is no list for it to be a statement about -- and it covers the five cities
+   * still to come online as well as the window between the collector's rebuild
+   * and the web app's release.
+   */
+  const availableFilters = useMemo(
+    () => (artifacts === null ? EMPTY_FILTERS : answerable(artifacts.lots.lots)),
+    [artifacts],
+  );
+
+  /**
+   * The filters as the list may act on them: what the driver pressed, narrowed
+   * to what the roster can answer.
+   *
+   * Derived rather than pruned in place, because a roster can change under a
+   * pressed chip -- the app refetches `lots.json` and the collector's rebuild
+   * lands mid-session -- and a filter left active with no chip to unpress it
+   * would be a shorter list the driver has no way to lengthen again.
+   */
+  const filters = useMemo(
+    () => pressedFilters.filter((a) => availableFilters.includes(a)),
+    [pressedFilters, availableFilters],
+  );
+
+  /**
    * Every lot, ranked. Not sliced: `listRows` decides what the list shows.
    *
    * Recomputed when the arrival time moves: a new column out of a grid already
@@ -918,7 +998,7 @@ export default function App() {
 
   /** Turn one filter chip on or off. Stable, so `AmenityFilters` never re-renders for a hover. */
   const toggleFilter = useCallback((amenity: Amenity) => {
-    setFilters((active) => toggleAmenity(active, amenity));
+    setPressedFilters((active) => toggleAmenity(active, amenity));
   }, []);
 
   /**
@@ -1172,16 +1252,18 @@ export default function App() {
     const lot = artifacts?.lots.lots.find((l) => l.id === id);
     // Whether this selection is about to put a card over the top of the map
     // band, which is the only reason the lot is not centred in the middle of
-    // that band. See `MAP_CARD_PX`.
+    // that band. See `mapCardDepthPx`.
     const carded = fromMap && cardRowFor(id) !== null;
     setSelected({ id, fromMap });
     // The nonce, not the coordinates, is what makes the map move: tapping the
-    // same card twice is two requests, and the map must honour both.
+    // same card twice is two requests, and the map must honour both. How far
+    // below centre the lot has to land is not decided here -- the card whose
+    // height decides it has not been drawn yet.
     if (lot) {
-      setCenterRequest((c) => ({
+      setCenterPending((c) => ({
         lat: lot.y,
         lon: lot.x,
-        offsetY: carded ? MAP_CARD_PX / 2 : 0,
+        carded,
         nonce: (c?.nonce ?? 0) + 1,
       }));
     }
@@ -1204,6 +1286,27 @@ export default function App() {
     // Stable across a hover-only render, which is what lets `LotList`'s memo
     // hold: a fresh closure here would defeat it on every mouse move.
   }, [artifacts, desktop, snap, cardRowFor]);
+
+  /**
+   * The pending move, once the card it has to clear can be measured.
+   *
+   * A layout effect and not an ordinary one: it runs in the same commit that
+   * put the card in the document, before the browser has painted, so the ease
+   * begins on the frame the tap did rather than one after it. Two renders,
+   * still exactly one `easeTo` -- `MapView` keys the camera on the nonce
+   * alone, and the nonce is carried through unchanged from the tap.
+   *
+   * `desktop` is a dependency because it moves the band's top edge (the side
+   * panel pads the left, the top bar the top). A layout flip while a card is
+   * open re-runs this with the same nonce, which recomputes the offset for the
+   * next tap and moves nothing now.
+   */
+  useLayoutEffect(() => {
+    if (centerPending === null) return;
+    const { lat, lon, carded, nonce } = centerPending;
+    const depth = carded ? mapCardDepthPx(mapCardRef.current, desktop ? 0 : TOP_BAR_PX) : 0;
+    setCenterRequest({ lat, lon, offsetY: depth / 2, nonce });
+  }, [centerPending, desktop]);
 
   /**
    * The same selection, made by a tap on a dot.
@@ -1232,11 +1335,12 @@ export default function App() {
    * middle of the *unpadded* canvas, so without this a lot the driver just
    * tapped arrives underneath the sheet that is showing it.
    *
-   * The map card is deliberately *not* in here -- see `MAP_CARD_PX`, which is
-   * spent on the centre request's offset instead. This stays what it has always
-   * been: the chrome that is always there.
+   * The map card is deliberately *not* in here -- see `mapCardDepthPx`, half of
+   * whose answer is spent on the centre request's offset instead. This stays what
+   * it has always been: the chrome that is always there.
    */
-  const sheetHeight = snapHeights(viewportHeight, TOP_BAR_PX)[snap];
+  const snaps = snapHeights(viewportHeight, TOP_BAR_PX);
+  const sheetHeight = snaps[snap];
   const padding = desktop
     ? { left: PANEL_PX, top: 0, right: 0, bottom: 0 }
     : { left: 0, top: TOP_BAR_PX, right: 0, bottom: sheetHeight };
@@ -1345,7 +1449,20 @@ export default function App() {
               The hint above and this are mutually exclusive by construction:
               the hint needs no destination, and `mapCard` needs one. */}
           {artifacts !== null && mapCard !== null && (
-            <section className="map-card" data-testid="map-card" aria-label={s.selectedCarPark}>
+            <section
+              className="map-card"
+              data-testid="map-card"
+              aria-label={s.selectedCarPark}
+              ref={mapCardRef}
+              // Where the sheet rests while a card is open -- opening one
+              // steps the sheet down to `peek` -- so `.map-card`'s own
+              // `max-height` can be written against the band the card and its
+              // dot have to share. From `snapHeights`, which is the one place
+              // that knows how tall a peeking sheet is; a second copy of that
+              // arithmetic in CSS would be the drift this whole change is
+              // about, one layer over.
+              style={{ "--sheet-peek": `${snaps.peek}px` } as CSSProperties}
+            >
               <button
                 type="button"
                 className="map-card__dismiss"
@@ -1459,25 +1576,37 @@ export default function App() {
           <h2 className="list-head">
             {forecastExpired && !fromHistory ? s.nearbyCarParks : s.rankedForArrival}
           </h2>
-          <AmenityFilters active={filters} onToggle={toggleFilter} lang={lang} />
+          <AmenityFilters active={filters} available={availableFilters} onToggle={toggleFilter} lang={lang} />
           {/* "Filter narrows, never hides silently." A shorter list with no
               explanation reads as a city with nothing in it, so what the
               filter removed is reported here -- as two counts, because a car
               park that reported none and one that reported nothing are
               different facts and only the first is a reason to stop looking.
               Each line appears only when its own count is non-zero, so a
-              filter that hid nothing says nothing. */}
+              filter that hid nothing says nothing.
+
+              Both templates come in a singular and a plural, chosen on the
+              count the way `ConfidencePill` chooses between
+              `confidenceWeekTemplate` and `confidenceWeeksTemplate`; zh's two
+              are the same text, so the branch is a no-op there. "1 car parks
+              are hidden" is common on the unknown line especially. */}
           {(listed.length === 0 || hidden.none > 0 || hidden.unknown > 0) && filters.length > 0 && (
             <Notice tone="info" testId="filter-hidden" role="status">
               {listed.length === 0 && <>{s.filterNoMatch} </>}
               {hidden.none > 0 && (
                 <span data-testid="filter-hidden-none">
-                  {fillTemplate(s.filterHiddenNoneTemplate, { n: hidden.none })}{" "}
+                  {fillTemplate(
+                    hidden.none === 1 ? s.filterHiddenNoneOneTemplate : s.filterHiddenNoneTemplate,
+                    { n: hidden.none },
+                  )}{" "}
                 </span>
               )}
               {hidden.unknown > 0 && (
                 <span data-testid="filter-hidden-unknown">
-                  {fillTemplate(s.filterHiddenUnknownTemplate, { n: hidden.unknown })}
+                  {fillTemplate(
+                    hidden.unknown === 1 ? s.filterHiddenUnknownOneTemplate : s.filterHiddenUnknownTemplate,
+                    { n: hidden.unknown },
+                  )}
                 </span>
               )}
             </Notice>

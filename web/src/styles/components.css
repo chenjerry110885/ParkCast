@@ -314,17 +314,31 @@
  * leaves: under the top bar on a phone, under the floating controls on
  * desktop. Not anchored to the dot, and not at the bottom either:
  *
- *   - A 255 px card is most of the free band on a 375x812 phone (476 px with
+ *   - A 289 px card is most of the free band on a 375x812 phone (476 px with
  *     the sheet at `peek`), so "beside the dot" is not a thing that exists
  *     there -- wherever the card went, the dot would have to move. So the dot
- *     moves, deliberately: `App.tsx`'s `padding` tells MapLibre this slot is
- *     covered and `easeTo` centres the tapped lot in what is left, ~110 px
- *     below the card. That is what keeps a card off the dot it describes at
- *     *every* width, with no projection and nothing to recompute on a pan.
+ *     moves, deliberately, and by exactly as much as this card turns out to
+ *     be: `App.tsx`'s `mapCardDepthPx` measures the rendered box and spends
+ *     half of it as the centre request's `offset`, which lands the tapped lot
+ *     in the middle of the gap between this card's bottom edge and the sheet's
+ *     top one. Not in the map's `padding` -- padding moves the whole picture,
+ *     including when the card is dismissed with no camera movement to hide it.
  *   - The top, not the bottom, because a card resting on the sheet's top edge
  *     reads as the sheet's first row -- which is the confusion this change
  *     exists to end -- and because a slot pinned to the sheet moves whenever
  *     the sheet is dragged, while this one stays put and is simply covered.
+ *
+ * **`max-height` is the other half of that, and it is not decoration.** An
+ * offset measured off the card puts the dot below whatever the card is, but it
+ * cannot invent room that does not exist: at 320x568 this card wants 309 px of
+ * a 268 px band, and every choice of offset puts the dot under the sheet. So
+ * the card is bounded by the band it has to share, `--map-card-dot-gap` is the
+ * clear map left for the dot inside it, and a card with more in it than that
+ * allows scrolls rather than growing. Every term below is either literally in
+ * this rule (the top offset) or comes from the one place that knows it:
+ * `--sheet-peek` is set on the element by `App.tsx` from `layout/sheet`'s
+ * `snapHeights`, because a second copy of "how tall is a peeking sheet" here
+ * is exactly the drift that made `MAP_CARD_PX` wrong.
  *
  * `z-index: 3` puts it over the map and the hint and *under* the sheet (4) and
  * the top bar (5): if the sheet is dragged up over it, the sheet wins, which is
@@ -332,12 +346,24 @@
  */
 .map-card {
   position: absolute; z-index: 3;
+  --map-card-dot-gap: 72px;
+  --map-card-max: calc(
+    100dvh - var(--safe-top) - var(--topbar-height) - 12px - var(--sheet-peek, 240px) - var(--map-card-dot-gap)
+  );
   top: calc(var(--safe-top) + var(--topbar-height) + 12px);
   left: 12px; right: 12px; margin: 0 auto; max-width: 420px;
+  max-height: var(--map-card-max);
 }
 /* It is floating over a moving picture, not sitting in a list, so it carries
-   the shadow a floating surface carries. */
-.map-card .lot-card { box-shadow: var(--shadow-2); }
+   the shadow a floating surface carries.
+
+   The bound is repeated on the card itself because the card is what has to
+   scroll: `.lots` has no padding, so the two boxes are the same box, and
+   `overflow-y` on the card clips its descendants without clipping its own
+   shadow. `overflow-x` stays `hidden` from `.lot-card`, so nothing about the
+   ordinary case -- a card well short of the bound, no scrollbar, nothing
+   clipped -- changes. */
+.map-card .lot-card { box-shadow: var(--shadow-2); max-height: var(--map-card-max); overflow-y: auto; }
 /* The dismiss target: 44 px square (spec §2), but transparent rather than a
    button-shaped button on top of the card -- the same treatment
    `.search__clear` gets inside the search pill, for the same reason. */
@@ -355,15 +381,27 @@
 [data-layout="desktop"] .map-card {
   /* Under the floating locate and language buttons rather than beside them: at
      768 px the map is 348 px wide next to the panel, and a readable card and a
-     button row pinned right cannot share that line. Mirrors
-     `MAP_CARD_TOP_DESKTOP_PX`. */
+     button row pinned right cannot share that line. */
   top: calc(var(--safe-top) + 72px);
   left: calc(var(--panel-width) + 16px); right: auto; margin: 0;
   width: min(380px, calc(100vw - var(--panel-width) - 32px));
+  /* The same bound against a band with no sheet at the bottom of it: the panel
+     is beside the map here, not over it, so the whole window height below the
+     card's own top offset is the card's to share with its dot. */
+  --map-card-max: calc(100dvh - var(--safe-top) - 72px - var(--map-card-dot-gap));
 }
 
 @media (max-width: 360px) {
   .facts { grid-template-columns: 1fr; }
   .ring { width: 56px; height: 56px; }
   .ring__value { font-size: 15px; }
+  /* ...except on the map's card, which is the one card that has to leave room
+     on screen for something else: the dot it describes. Stacking its five
+     tiles into one column took the same card from 289 px to 385 px at 360x740,
+     against a band of 428, and from 309 px to 405 px at 320x568, against a
+     band of 268 -- and the dot, eased into what was left, came to rest inside
+     the card describing it. Two columns is 151 px each at 360 px and 131 px at
+     320 px, which the tiles' own `min-width: 0` and 11 px labels take without
+     overflowing in either language (measured in Chrome at both widths). */
+  .map-card .facts { grid-template-columns: 1fr 1fr; }
 }

@@ -146,11 +146,20 @@ export interface Strings {
    * "Filter narrows, never hides silently" -- a shorter list with no
    * explanation is indistinguishable from a city with nothing in it, so the
    * count is reported rather than left for the driver to infer.
+   *
+   * **It names its own scope**, because the count is not of the city and not
+   * of the rows on screen: it is of the rows this list would have shown with
+   * no filter on (`App`'s `hidden`). Unqualified, the sentence does not close
+   * -- "22 rows on screen, 13 hidden" is arithmetic a reader cannot complete,
+   * since the list refilled from below its own cap while they were reading it.
    */
   filterHiddenNoneTemplate: string;
+  /** The `n === 1` form of `filterHiddenNoneTemplate`. See `confidenceWeekTemplate`. */
+  filterHiddenNoneOneTemplate: string;
   /**
    * The other half of that count, and the reason there are two: how many were
-   * dropped because their feed says nothing about the field. Carries `{n}`.
+   * dropped because their feed says nothing about the field. Carries `{n}`,
+   * and names the same scope for the same reason.
    *
    * It says in as many words that this is not the same as having none,
    * because that is precisely the confusion a single combined number would
@@ -159,6 +168,13 @@ export interface Strings {
    * reason to give up and park elsewhere.
    */
   filterHiddenUnknownTemplate: string;
+  /**
+   * The `n === 1` form of `filterHiddenUnknownTemplate`. The commoner of the
+   * two singulars: one car park in twenty with nothing to say about scooters
+   * is an ordinary roster, and "1 car parks are hidden" is what it used to
+   * read.
+   */
+  filterHiddenUnknownOneTemplate: string;
   /** Shown in place of rows when a filter leaves the list with nothing in it. */
   filterNoMatch: string;
   /**
@@ -292,9 +308,26 @@ export interface Strings {
    * Label on the card's 機車 fact tile -- how many scooter bays this car park
    * has. The tile is drawn only when the feed reported the field at all, so
    * this label never stands over a manufactured number.
+   *
+   * **It says "total" because the tile beside it does not.** `m` is
+   * `totalmotor`, a capacity, and it sits on the same grid as
+   * `spacesNowLabel`, whose value reads "現在 92 / 370 位 · 51 分鐘前". Taipei
+   * publishes a real live scooter count too (`availablemotor` -> `free_motor`,
+   * `docs/sources.md`), so a rider has every reason to read a bare "178 /
+   * 機車位" as 178 bays free right now. That is the same failure as presenting
+   * the observed count `f` as a forecast: a number labelled as something it is
+   * not.
    */
   scooterTile: string;
-  /** Label on the card's 充電 fact tile -- how many EV charging points it has. */
+  /**
+   * Label on the card's 充電 fact tile -- how many EV charging points it has.
+   *
+   * Same ambiguity, same fix: `e` is `ChargingStation`, a count of the points
+   * installed, and "充電車位" beside a live availability tile reads as charging
+   * bays free right now. No city publishes a live charging count for this one
+   * to be confused with, which makes the misreading harder to correct rather
+   * than less likely.
+   */
   chargingTile: string;
   /**
    * The *value* on either amenity tile when the car park reported exactly
@@ -394,9 +427,14 @@ const en: Strings = {
   filtersLabel: "Filter the list",
   filterScooter: "Scooter",
   filterCharging: "Charging",
-  filterHiddenNoneTemplate: "{n} car parks are hidden: they report having none of what you filtered for.",
+  filterHiddenNoneTemplate:
+    "{n} car parks this list would otherwise show are hidden: they report having none of what you filtered for.",
+  filterHiddenNoneOneTemplate:
+    "{n} car park this list would otherwise show is hidden: it reports having none of what you filtered for.",
   filterHiddenUnknownTemplate:
-    "{n} car parks are hidden because their data does not mention it at all, which is not the same as having none.",
+    "{n} car parks this list would otherwise show are hidden because their data does not mention it at all, which is not the same as having none.",
+  filterHiddenUnknownOneTemplate:
+    "{n} car park this list would otherwise show is hidden because its data does not mention it at all, which is not the same as having none.",
   filterNoMatch: "No car park ranked for this arrival reports what you filtered for.",
   selectedCarPark: "The car park you selected",
   dismissCard: "Close this car park",
@@ -422,8 +460,8 @@ const en: Strings = {
   expired: "expired",
   freshnessLabel: "Data age",
   walkTile: "Walk",
-  scooterTile: "Scooter spaces",
-  chargingTile: "EV charging",
+  scooterTile: "Scooter spaces, total",
+  chargingTile: "Charging points, total",
   amenityNone: "None",
   spacesNowTemplate: "{f} / {c} free · {n} min ago",
   spacesNowNoCapacityTemplate: "{f} free · {n} min ago",
@@ -490,8 +528,12 @@ const zh: Strings = {
   filtersLabel: "篩選清單",
   filterScooter: "機車",
   filterCharging: "充電",
-  filterHiddenNoneTemplate: "已隱藏 {n} 個停車場，它們回報沒有您篩選的設施。",
-  filterHiddenUnknownTemplate: "有 {n} 個停車場的資料完全沒有提到這項設施，也一併隱藏；這與「回報沒有」並不一樣。",
+  filterHiddenNoneTemplate: "此清單原本會顯示的停車場中，有 {n} 個回報沒有您篩選的設施，因此隱藏。",
+  filterHiddenNoneOneTemplate: "此清單原本會顯示的停車場中，有 {n} 個回報沒有您篩選的設施，因此隱藏。",
+  filterHiddenUnknownTemplate:
+    "此清單原本會顯示的停車場中，有 {n} 個的資料完全沒有提到這項設施，也一併隱藏；這與「回報沒有」並不一樣。",
+  filterHiddenUnknownOneTemplate:
+    "此清單原本會顯示的停車場中，有 {n} 個的資料完全沒有提到這項設施，也一併隱藏；這與「回報沒有」並不一樣。",
   filterNoMatch: "排序結果中沒有停車場回報有您篩選的設施。",
   selectedCarPark: "您選取的停車場",
   dismissCard: "關閉停車場資訊",
@@ -515,8 +557,8 @@ const zh: Strings = {
   expired: "已過期",
   freshnessLabel: "資料時間",
   walkTile: "步行",
-  scooterTile: "機車位",
-  chargingTile: "充電車位",
+  scooterTile: "機車位總數",
+  chargingTile: "充電車位總數",
   amenityNone: "無",
   spacesNowTemplate: "現在 {f} / {c} 位 · {n} 分鐘前",
   spacesNowNoCapacityTemplate: "現在 {f} 位 · {n} 分鐘前",

@@ -57,6 +57,25 @@ export function reported(lot: Lot, amenity: Amenity): Reported {
   return typeof value === "number" ? { known: true, count: value } : UNKNOWN;
 }
 
+/**
+ * The amenities at least one of `lots` has actually answered about.
+ *
+ * A filter is a question put to a roster, and a question nothing in the roster
+ * can answer should not be asked. `lots.json` carries `m` and `e` only from a
+ * collector built after `edc980b`; against an older roster every lot reads as
+ * *unknown*, and a chip pressed there can only ever produce an empty list over
+ * a dimmed city with a hidden count that stands for the whole of it. True in
+ * every word, and useless.
+ *
+ * This is a statement about the data on hand, never about a car park, so it
+ * does not touch the distinction the rest of this module exists to keep: a
+ * reported `0` is an answer and keeps its chip on screen, exactly as a
+ * reported 40 does. Only "nobody anywhere said" takes the chip away.
+ */
+export function answerable(lots: readonly Lot[]): Amenity[] {
+  return AMENITIES.filter((amenity) => lots.some((lot) => reported(lot, amenity).known));
+}
+
 /** Whether `lot` actually has some of `amenity`. A reported zero does not. */
 export function hasAmenity(lot: Lot, amenity: Amenity): boolean {
   const r = reported(lot, amenity);
