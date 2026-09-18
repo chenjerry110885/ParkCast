@@ -6,7 +6,7 @@ afterEach(cleanup);
 
 describe("icons", () => {
   it("exports every icon the spec names, each an aria-hidden svg by default", () => {
-    const names = ["Search", "Locate", "Walk", "Price", "Spaces", "Clock", "Pin", "Station", "Landmark", "Street", "Area", "CarPark", "Info", "Chevron", "Globe", "Cross"] as const;
+    const names = ["Search", "Locate", "Walk", "Price", "Spaces", "Clock", "Pin", "Station", "Landmark", "Street", "Area", "CarPark", "Info", "Chevron", "Globe", "Cross", "Scooter", "Charging"] as const;
     for (const name of names) {
       const Icon = icons[name];
       const { container, unmount } = render(<Icon />);

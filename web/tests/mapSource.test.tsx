@@ -34,7 +34,7 @@ import { HEADER_SIZE, resetWeekCache } from "../src/artifacts";
 import { WEEKLY_OBSERVATIONS } from "../src/confidence";
 import { haversineMeters, walkMinutes } from "../src/geo";
 import { districtName, fillTemplate, t } from "../src/i18n";
-import MapView, { LOTS_SOURCE } from "../src/map/MapView";
+import MapView, { FILTERED_OUT_OPACITY, LOTS_SOURCE } from "../src/map/MapView";
 import { toMapLot, type LotProperties, type MapLot } from "../src/map/lotSource";
 import type { Lot, LotsDoc } from "../src/types";
 
@@ -760,6 +760,10 @@ describe("a car park tapped on the map", () => {
       c: 50,
       t: "民營停車場",
       p: { k: "exact", lo: LISTED_PRICE, hi: LISTED_PRICE },
+      // Both amenity keys present, so the tile-parity check below has
+      // something to compare on every listed card as well as on the map's.
+      m: 30,
+      e: 4,
     }));
     const outsiders: Lot[] = [
       {
@@ -773,6 +777,8 @@ describe("a car park tapped on the map", () => {
         t: "市府委外停車場",
         p: { k: "exact", lo: OUTSIDER_PRICE, hi: OUTSIDER_PRICE },
         f: OUTSIDER_FREE,
+        m: 12,
+        e: 6,
       },
       {
         i: 23,
@@ -941,7 +947,7 @@ describe("a car park tapped on the map", () => {
     expect(card.textContent).toContain(districtName("北投區", "en"));
     expect(card.textContent).not.toContain(districtName("信義區", "en"));
     // "The same detail as the list's card": every tile a listed card carries.
-    for (const tile of ["lot-walk", "lot-price", "lot-arrival"]) {
+    for (const tile of ["lot-walk", "lot-price", "lot-scooter", "lot-charging"]) {
       expect(within(listedRows()[0]!).getByTestId(tile)).toBeInTheDocument();
       expect(within(card).getByTestId(tile)).toBeInTheDocument();
     }
@@ -1400,5 +1406,100 @@ describe("a car park tapped on the map", () => {
     expect(popup?.content?.textContent).toContain(OUTSIDER_NAME);
     expect(popup?.content?.textContent).toContain(`${OUTSIDER_PERCENT}%`);
     expect(screen.getByText(t("en").startPromptMap)).toBeInTheDocument();
+  });
+  /** Press one of the list's amenity filter chips. */
+  function pressFilter(amenity: "scooter" | "charging"): void {
+    act(() => {
+      fireEvent.click(screen.getByTestId(`filter-${amenity}`));
+    });
+  }
+
+  /**
+   * The list's filter reaches the map, and it reaches it as a *dimming*.
+   *
+   * The map is the whole city and has never been derived from the ranking
+   * (`App.tsx`), so the filter must not delete dots: a car park missing from a
+   * map of car parks is this project's "silently absent lot" failure, and the
+   * owner's rule for this feature -- "filter narrows, never hides silently" --
+   * rules it out in so many words. But leaving 1,089 identical dots under a
+   * list of six is the other failure: the driver cannot see which ones the
+   * list is talking about. So every feature stays and carries a flag instead.
+   *
+   * The flag means "the list you are looking at left this out", nothing more.
+   * The two reasons a lot can be left out -- reported none, said nothing --
+   * are deliberately *not* distinguished on a 5-px dot; the card is where that
+   * distinction is told, and the test below taps through to it.
+   */
+  it("dims the dots its filter dropped instead of deleting them", async () => {
+    await renderWithDestination();
+    const before = drawnLots().features.length;
+    expect(drawnLots().features.every((f) => f.properties.filteredOut === false)).toBe(true);
+
+    pressFilter("scooter");
+
+    const after = drawnLots();
+    // Not one car park fewer.
+    expect(after.features).toHaveLength(before);
+    const flag = new Map(after.features.map((f) => [f.properties.id, f.properties.filteredOut]));
+    // Fixture lots with scooter bays stay bright...
+    expect(flag.get(CROWD[0]!.id)).toBe(false);
+    expect(flag.get(OUTSIDER_ID)).toBe(false);
+    // ...and the ones whose feed never mentions them are dimmed, exactly as
+    // the list dropped them.
+    expect(flag.get(SECOND_ID)).toBe(true);
+    expect(flag.get(FAR_ID)).toBe(true);
+    expect(listedRows().map((row) => row.getAttribute("data-lot-id"))).not.toContain(SECOND_ID);
+  });
+
+  it("paints the dimming, rather than filtering the layer down to the matches", async () => {
+    await renderWithDestination();
+    const lots = shared.map?.layerSpecs.get(LOTS_LAYER);
+    // No layer-level `filter`: removing the feature is the thing this must not do.
+    expect(lots?.filter).toBeUndefined();
+    const opacity = JSON.stringify(lots?.paint?.["circle-opacity"]);
+    expect(opacity).toContain("filteredOut");
+    expect(opacity).toContain(String(FILTERED_OUT_OPACITY));
+    // Well clear of the 0.5 an unknown *forecast* already gets, so the two
+    // dimmings cannot be read as the same statement.
+    expect(FILTERED_OUT_OPACITY).toBeLessThan(0.5);
+  });
+
+  it("stops dimming once there is no list for the dimming to be a statement about", async () => {
+    // The dim means "the list left this out". Move the destination somewhere
+    // the ranking has no answer for and there is no list -- and no filter row
+    // either, since both live with it. A dimming that outlived them would
+    // fade half the city with nothing on screen saying why or how to stop it,
+    // which is the silent hiding this feature's own rule forbids.
+    await renderWithDestination();
+    pressFilter("scooter");
+    expect(drawnLots().features.some((f) => f.properties.filteredOut)).toBe(true);
+
+    await act(async () => {
+      fire("click", null, { lngLat: { lat: 22.63, lng: 120.3 }, point: { x: 1, y: 1 } });
+    });
+    await screen.findByTestId("outside-coverage");
+
+    expect(screen.queryByTestId("filter-scooter")).toBeNull();
+    expect(drawnLots().features.every((f) => f.properties.filteredOut === false)).toBe(true);
+    // ...and not one dot went with it.
+    expect(drawnLots().features).toHaveLength(CROWD.length);
+  });
+
+  it("still answers a tap on a dimmed dot, with the card that explains why it is dim", async () => {
+    await renderWithDestination();
+    pressFilter("scooter");
+
+    tapDot(lotById(SECOND_ID));
+
+    // The tap is answered where the tap was, filter or no filter: the ranking
+    // behind the card is the unfiltered one, because the driver asked about
+    // this car park specifically.
+    const card = screen.getByTestId("map-card");
+    expect(within(card).getByTestId("lot-name")).toHaveTextContent(SECOND_NAME);
+    // And the card tells the truth about the field that dropped it: this lot's
+    // feed never mentioned scooters, so the card says nothing about them --
+    // it does not say "none", which would be a measurement nobody made.
+    expect(within(card).queryByTestId("lot-scooter")).toBeNull();
+    expect(card.textContent).not.toContain(t("en").amenityNone);
   });
 });

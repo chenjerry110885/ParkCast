@@ -58,6 +58,19 @@ const LOTS_LAYER = "lots-circles";
  */
 const LOTS_HALO_LAYER = "lots-halo";
 const LOTS_BEST_HALO_LAYER = "lots-best-halo";
+
+/**
+ * How much of a dot is left when the list's amenity filter has taken its car
+ * park out of the list. Exported so a test can pin it against the opacities
+ * either side of it rather than restating a number.
+ *
+ * Faint enough that the lots the driver *can* use are what the eye lands on,
+ * and well clear of the 0.5 an unknown-forecast dot already gets, so dimming
+ * for the filter cannot be mistaken for dimming for no data. Not zero, and not
+ * a `filter` that removes the feature: an invisible car park is an absent one,
+ * and this app does not do absent (`MapLot.filteredOut`).
+ */
+export const FILTERED_OUT_OPACITY = 0.2;
 /**
  * The third ring: the card the pointer is over, on desktop.
  *
@@ -231,10 +244,28 @@ export default function MapView({
         // than a blob, big enough to hit with a thumb once in a district.
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 2.5, 13, 5, 16, 9],
         "circle-color": ["get", "colour"],
-        "circle-opacity": ["case", ["get", "known"], 0.9, 0.5],
+        // Three cases, in this order, because the first one outranks the
+        // other two: a lot the list's amenity filter took out is drawn faint
+        // whatever its forecast says, since the question the driver is asking
+        // right now is "which of these can I use", and a bright dot for a car
+        // park the list refuses to recommend answers it wrongly. It is still
+        // *drawn* -- see `MapLot.filteredOut` for why removing it is not on
+        // the table -- and still tappable, and its card still tells the truth
+        // about the field. `["boolean", ..., false]` supplies the unfiltered
+        // default for a feature written before this property existed.
+        "circle-opacity": [
+          "case",
+          ["boolean", ["get", "filteredOut"], false], FILTERED_OUT_OPACITY,
+          ["get", "known"], 0.9,
+          0.5,
+        ],
         "circle-stroke-width": 1,
         "circle-stroke-color": "#ffffff",
-        "circle-stroke-opacity": 0.75,
+        "circle-stroke-opacity": [
+          "case",
+          ["boolean", ["get", "filteredOut"], false], FILTERED_OUT_OPACITY,
+          0.75,
+        ],
       },
     });
     // The halos, *under* the dots: a ring around the selection and a ring

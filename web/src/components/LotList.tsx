@@ -23,9 +23,7 @@ export interface LotListProps {
   baseDataTs: number;
   /** Minutes since `baseDataTs`, for each card's observed-count tile. */
   ageMin: number;
-  /** The clock time the list was ranked for. */
-  arrivalTs: number;
-  /** Minutes from the reading to `arrivalTs`, for each card's confidence pill. */
+  /** Minutes from the reading to the chosen arrival, for each card's confidence pill. */
   horizonFromReadingMin: number;
   /**
    * Observations behind each lot's half-hour-of-week cell (`week.ts`'s
@@ -57,7 +55,6 @@ function LotListInner({
   lang,
   baseDataTs,
   ageMin,
-  arrivalTs,
   horizonFromReadingMin,
   supportById,
   fromHistory,
@@ -124,7 +121,6 @@ function LotListInner({
           lang={lang}
           baseDataTs={baseDataTs}
           ageMin={ageMin}
-          arrivalTs={arrivalTs}
           horizonFromReadingMin={horizonFromReadingMin}
           support={supportById.get(row.id) ?? 0}
           fromHistory={fromHistory}

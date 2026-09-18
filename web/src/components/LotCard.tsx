@@ -1,6 +1,13 @@
 /**
  * One car park, as a driver reads it: chance of a space, name, walk, price,
- * an observed count when we have one, and the arrival time it was ranked for.
+ * an observed count when we have one, and what it says about 機車 and 充電.
+ *
+ * **The arrival time is deliberately not here.** It was a fact tile until the
+ * owner's colleague pointed out that it is the one number on the card the
+ * driver already chose: it is set in `ArrivalPicker` and read back above the
+ * list, and a card cannot tell you anything you did not already know by
+ * repeating it twenty times down the page. The tile slot it occupied now
+ * carries the amenity tiles below, which say something new per car park.
  *
  * The card carries forward the same three arguments `LotRow` used to make,
  * because none of them stopped being true when the row became a card:
@@ -30,12 +37,13 @@
  * tapping the confidence pill opens its popover without also selecting the
  * card out from under it.
  */
+import { reported, type Amenity } from "../amenities";
 import { confidenceFor } from "../confidence";
-import { formatClock } from "../arrival";
 import { formatDistance, formatPrice, notUpdatingHours } from "../format";
-import { Clock, Price, Spaces, Walk } from "../icons";
-import { districtName, fillTemplate, lotTypeName, t, type Lang } from "../i18n";
+import { Charging, Price, Scooter, Spaces, Walk } from "../icons";
+import { districtName, fillTemplate, lotTypeName, t, type Lang, type Strings } from "../i18n";
 import type { Ranked } from "../rank";
+import type { Lot } from "../types";
 import { ConfidencePill } from "./ConfidencePill";
 import { ProbabilityRing } from "./ProbabilityRing";
 
@@ -46,9 +54,7 @@ export interface LotCardProps {
   baseDataTs: number;
   /** Minutes since `baseDataTs`, for the observed-count tile's age. */
   ageMin: number;
-  /** The clock time this card was ranked for. */
-  arrivalTs: number;
-  /** Minutes from the reading to `arrivalTs`, for the confidence pill. */
+  /** Minutes from the reading to the chosen arrival, for the confidence pill. */
   horizonFromReadingMin: number;
   /**
    * Observations behind this lot's half-hour-of-week cell in `week.bin`
@@ -93,12 +99,46 @@ function splitPrice(text: string): [string, string] {
   return [text.slice(0, at), text.slice(at + 1)];
 }
 
+/**
+ * One amenity fact tile -- 機車 or 充電 -- or `null` when the feed said nothing.
+ *
+ * Three states in, three renderings out, and the third one is the reason this
+ * function exists rather than a `?? 0` at the call site:
+ *
+ *   - **a count** -- the number, exactly as it was published;
+ *   - **a reported `0`** -- the tile still appears, and says `amenityNone` in
+ *     words. The car park was asked and answered, and "no scooter bays" is
+ *     something a scooter rider needs to be told;
+ *   - **absent** -- `null`, so *no tile is drawn at all*. The card has no
+ *     fixed number of tiles (the observed count already comes and goes with
+ *     `f`), so there is no slot begging to be filled with a zero, and an
+ *     omitted tile is the only rendering that claims nothing.
+ *
+ * Returning the element rather than a string keeps the "no tile" case a thing
+ * the caller cannot accidentally render: there is no empty string to fall
+ * through into a `<b>`.
+ */
+function AmenityTile({ lot, amenity, s }: { lot: Lot; amenity: Amenity; s: Strings }) {
+  const value = reported(lot, amenity);
+  if (!value.known) return null;
+  const scooter = amenity === "scooter";
+  const Glyph = scooter ? Scooter : Charging;
+  return (
+    <div className="fact" data-testid={scooter ? "lot-scooter" : "lot-charging"}>
+      <Glyph className="fact__icon" />
+      <span>
+        <b className="fact__value">{value.count === 0 ? s.amenityNone : value.count}</b>
+        <span className="fact__label">{scooter ? s.scooterTile : s.chargingTile}</span>
+      </span>
+    </div>
+  );
+}
+
 export function LotCard({
   row,
   lang,
   baseDataTs,
   ageMin,
-  arrivalTs,
   horizonFromReadingMin,
   support,
   fromHistory,
@@ -237,13 +277,12 @@ export function LotCard({
             </span>
           </div>
         )}
-        <div className="fact" data-testid="lot-arrival">
-          <Clock className="fact__icon fact__icon--info" />
-          <span>
-            <b className="fact__value">{formatClock(arrivalTs)}</b>
-            <span className="fact__label">{s.arrivalTile}</span>
-          </span>
-        </div>
+        {/* Only for the lots that actually reported them: a car park whose
+            feed says nothing about scooters draws no scooter tile, rather
+            than a tile reading "0" for a number nobody published. See
+            `AmenityTile`. */}
+        <AmenityTile lot={row.lot} amenity="scooter" s={s} />
+        <AmenityTile lot={row.lot} amenity="charging" s={s} />
       </div>
     </li>
   );

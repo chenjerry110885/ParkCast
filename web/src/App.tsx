@@ -118,8 +118,10 @@
  *     have been the first thing an address search quietly broke.
  */
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { exclusionFor, tallyHidden, toggleAmenity, type Amenity } from "./amenities";
 import { MAX_LEAD_SEC, MIN_LEAD_SEC, ceilToStep, clampArrival, defaultArrival, horizonFromReading } from "./arrival";
 import { artifactsBase, horizonColumn, loadArtifacts, loadWeek, probabilityAt } from "./artifacts";
+import { AmenityFilters } from "./components/AmenityFilters";
 import { ArrivalPicker } from "./components/ArrivalPicker";
 import { FreshnessBadge } from "./components/FreshnessBadge";
 import { LangToggle } from "./components/LangToggle";
@@ -217,6 +219,13 @@ export const LIST_LIMIT = 20;
  * towards New Taipei, whose drivers park in Taipei every day.
  */
 export const COVERAGE_RADIUS_M = 10_000;
+
+/**
+ * "No filters", as one frozen array rather than a fresh `[]` per render: it is
+ * a `useMemo` dependency below, and a new empty array every render would
+ * re-project the whole roster on every tick.
+ */
+const EMPTY_FILTERS: readonly Amenity[] = [];
 
 /** How often the staleness badge re-reads the clock. */
 const CLOCK_TICK_MS = 30_000;
@@ -461,6 +470,16 @@ export default function App() {
    */
   const [selected, setSelected] = useState<{ id: string; fromMap: boolean } | null>(null);
   const selectedLotId = selected?.id ?? null;
+  /**
+   * Which of 機車 / 充電 the driver is filtering the list on. Empty is the
+   * unfiltered screen, and the one this app opens in.
+   *
+   * State rather than a URL parameter or storage on purpose: it is a question
+   * about this trip ("I am on a scooter today"), not a preference, and a
+   * filter silently restored from a previous session would shorten the list
+   * for a reason nothing on screen explains.
+   */
+  const [filters, setFilters] = useState<readonly Amenity[]>([]);
   /**
    * The card the pointer is over, which the map answers with a faint ring on
    * that lot's dot (spec §5.6) -- the link between a row in the list and a point
@@ -832,56 +851,6 @@ export default function App() {
   }, [abandon, clearFailure]);
 
   /**
-   * Every lot the map draws, projected straight from the artifacts.
-   *
-   * Deliberately not derived from `ranked`: the ranking needs a destination and
-   * this does not, so hanging the map off it drew an empty city until the user
-   * happened to tap -- see the seventh point in the module comment. The list
-   * ordering and the destination pin are all `ranked` is for.
-   *
-   * Recomputed when the arrival time moves: a new column out of a grid already
-   * in memory, no request, no refetch, and a `setData` on one GeoJSON source at
-   * the other end.
-   */
-  const mapLots = useMemo(() => {
-    if (artifacts === null) return [];
-    const { grid: g, lots } = artifacts;
-    return lots.lots.map((lot) =>
-      // Nothing we hold answers this arrival, and the dot goes grey -- the same
-      // "no data" the map already draws for an unknown cell.
-      toMapLot(lot, withheld ? null : probabilityForLot(g, week, lot, horizonFromReadingMin, arrivalTs)),
-    );
-    // `withheld` rather than `nowSec`: a boolean that flips at most once as the
-    // clock walks, so this does not re-project 1,075 lots on every tick.
-  }, [artifacts, week, horizonFromReadingMin, arrivalTs, withheld]);
-
-  /**
-   * Every probability on screen was read out of `week.bin` rather than out of
-   * `grid.bin`, and the page says so.
-   *
-   * Gated on a probability having actually come back, not merely on the
-   * arrival being far or the table being in hand: a line explaining where
-   * "these chances" came from, over a screen where every cell reads "no data",
-   * would be vouching for numbers that are not there. That is the same rule
-   * the confidence pill follows one layer down -- no grade over an absent
-   * number -- and it is why the check is `some`, off the projection the map is
-   * already given, rather than `week !== null`: a table can be loaded, the
-   * right roster, and still hold nothing for a bucket nobody has watched.
-   *
-   * Deliberately **not** gated on `forecastExpired`. What this states is the
-   * *source* of the figure, which does not change when the collector resumes;
-   * a label that appeared only during a stale period would flicker off while
-   * the number under it stayed exactly the same climatology, and its absence
-   * would then read as "this one is backed by a live reading". The routing in
-   * `probabilityForLot` is per-arrival, not per-lot, so when this is true it
-   * is true of every row.
-   */
-  const fromHistory = useMemo(
-    () => needsWeek && mapLots.some((lot) => lot.probability !== null),
-    [needsWeek, mapLots],
-  );
-
-  /**
    * Every lot, ranked. Not sliced: `listRows` decides what the list shows.
    *
    * Recomputed when the arrival time moves: a new column out of a grid already
@@ -902,10 +871,55 @@ export default function App() {
   }, [artifacts, week, destination, horizonFromReadingMin, arrivalTs, withheld]);
 
   /**
+   * The ranking, narrowed to the lots that have what the driver asked for.
+   *
+   * **Applied to the whole ranking and not to the list's own head**, which is
+   * the difference between a filter and a blindfold: 395 of Taipei's 1,773
+   * car parks have scooter bays, so filtering the twenty rows the list already
+   * shows would usually leave two or three and stop there, while the ranking
+   * has plenty more a little further down. Narrowing first and slicing after
+   * lets the list refill from the same ordering.
+   *
+   * It narrows and never reorders: `Array#filter` preserves order, so row 40's
+   * promotion to row 3 is the ranker's own verdict on the lots that remain,
+   * not a second opinion about them.
+   */
+  const matching = useMemo(
+    () => (filters.length === 0 ? ranked : ranked.filter((row) => exclusionFor(row.lot, filters) === null)),
+    [ranked, filters],
+  );
+
+  /**
    * What the list draws: the head of the ranking, grown if the cap would
    * otherwise drop a nearby lot the ranker kept on purpose. See `listRows`.
    */
-  const listed = useMemo(() => listRows(ranked, LIST_LIMIT), [ranked]);
+  const listed = useMemo(() => listRows(matching, LIST_LIMIT), [matching]);
+
+  /**
+   * How many car parks the filter took out of the list, split by why.
+   *
+   * **The scope is the rows the list would have shown with no filter on** --
+   * `listRows(ranked, LIST_LIMIT)`, normally twenty. Not the whole roster: a
+   * tally of "1,050 hidden" is arithmetic about a city, and what a driver
+   * needs explained is the list in front of them that just got shorter. Not
+   * the filtered list either, which by construction has nothing hidden in it.
+   *
+   * **And it is two numbers, never one.** That is the whole reason this
+   * exists. "No car park near here takes scooters" and "the data doesn't say"
+   * are different answers, and a single hidden count would fuse them into the
+   * pessimistic one -- which is the same lie as rendering an absent `m` as
+   * `0`, just arrived at by subtraction. `exclusionFor` keeps them apart and
+   * the notice below prints both.
+   */
+  const hidden = useMemo(
+    () => tallyHidden(listRows(ranked, LIST_LIMIT).map((row) => row.lot), filters),
+    [ranked, filters],
+  );
+
+  /** Turn one filter chip on or off. Stable, so `AmenityFilters` never re-renders for a hover. */
+  const toggleFilter = useCallback((amenity: Amenity) => {
+    setFilters((active) => toggleAmenity(active, amenity));
+  }, []);
 
   /**
    * The ranked row a dot on the map would be carded from, or `null`.
@@ -1034,6 +1048,93 @@ export default function App() {
     if (destination === null || artifacts === null) return false;
     return ranked.every((row) => row.meters > COVERAGE_RADIUS_M);
   }, [artifacts, destination, ranked]);
+
+  /**
+   * The filters, as the *map* is allowed to act on them: only while the ranked
+   * list they belong to is actually on screen. See `mapLots` below.
+   */
+  const listFilters = destination !== null && !outsideCoverage ? filters : EMPTY_FILTERS;
+
+  /**
+   * Moved below `ranked` and `outsideCoverage` for one reason, and it is the
+   * `filteredOut` flag below: the dimming is a statement about a list, so it
+   * has to know whether there is a list. **The dots themselves still wait for
+   * nothing** -- every lot is projected here whatever the destination is, which
+   * is the eighth point in the module comment and is not weakened by the move.
+   */
+  /**
+   * Every lot the map draws, projected straight from the artifacts.
+   *
+   * Deliberately not derived from `ranked`: the ranking needs a destination and
+   * this does not, so hanging the map off it drew an empty city until the user
+   * happened to tap -- see the seventh point in the module comment. The list
+   * ordering and the destination pin are all `ranked` is for.
+   *
+   * Recomputed when the arrival time moves: a new column out of a grid already
+   * in memory, no request, no refetch, and a `setData` on one GeoJSON source at
+   * the other end.
+   */
+  const mapLots = useMemo(() => {
+    if (artifacts === null) return [];
+    const { grid: g, lots } = artifacts;
+    return lots.lots.map((lot) =>
+      // Nothing we hold answers this arrival, and the dot goes grey -- the same
+      // "no data" the map already draws for an unknown cell.
+      toMapLot(
+        lot,
+        withheld ? null : probabilityForLot(g, week, lot, horizonFromReadingMin, arrivalTs),
+        // **Every lot still gets a dot.** The filter dims the ones it took out
+        // of the list; it never deletes them from the map. The map is the city
+        // and the list is the recommendation, and a car park that vanished
+        // from a map of car parks would be this project's own "silently absent
+        // lot" failure, dressed up as a feature -- which is also exactly what
+        // the owner's rule for this ("filter narrows, never hides silently")
+        // rules out. So the flag says one thing and one thing only: *the list
+        // you are looking at left this out*. It is not a claim about the car
+        // park -- a lot that reported no scooter bays and a lot that said
+        // nothing about them are both simply not in the list, and tapping
+        // either still opens the full card, which then tells the truth about
+        // that field per `AmenityTile`.
+        //
+        // Which is also why it is `listFilters` and not `filters`: with no
+        // destination, or one the ranking has no answer for, there is no list
+        // on screen for anything to have been left out of, and the chips that
+        // would explain the dimming are not rendered either. A filter left on
+        // from an earlier destination would otherwise fade half the city with
+        // nothing on screen saying why, or how to stop it.
+        exclusionFor(lot, listFilters) !== null,
+      ),
+    );
+    // `withheld` rather than `nowSec`: a boolean that flips at most once as the
+    // clock walks, so this does not re-project 1,075 lots on every tick.
+  }, [artifacts, week, horizonFromReadingMin, arrivalTs, withheld, listFilters]);
+
+  /**
+   * Every probability on screen was read out of `week.bin` rather than out of
+   * `grid.bin`, and the page says so.
+   *
+   * Gated on a probability having actually come back, not merely on the
+   * arrival being far or the table being in hand: a line explaining where
+   * "these chances" came from, over a screen where every cell reads "no data",
+   * would be vouching for numbers that are not there. That is the same rule
+   * the confidence pill follows one layer down -- no grade over an absent
+   * number -- and it is why the check is `some`, off the projection the map is
+   * already given, rather than `week !== null`: a table can be loaded, the
+   * right roster, and still hold nothing for a bucket nobody has watched.
+   *
+   * Deliberately **not** gated on `forecastExpired`. What this states is the
+   * *source* of the figure, which does not change when the collector resumes;
+   * a label that appeared only during a stale period would flicker off while
+   * the number under it stayed exactly the same climatology, and its absence
+   * would then read as "this one is backed by a live reading". The routing in
+   * `probabilityForLot` is per-arrival, not per-lot, so when this is true it
+   * is true of every row.
+   */
+  const fromHistory = useMemo(
+    () => needsWeek && mapLots.some((lot) => lot.probability !== null),
+    [needsWeek, mapLots],
+  );
+
 
   /**
    * The one lot the list crowns, and the only dot that pulses.
@@ -1269,7 +1370,6 @@ export default function App() {
                   lang={lang}
                   baseDataTs={artifacts.grid.baseDataTs}
                   ageMin={ageMin ?? 0}
-                  arrivalTs={arrivalTs}
                   horizonFromReadingMin={horizonFromReadingMin}
                   support={supportById.get(mapCard.id) ?? 0}
                   fromHistory={fromHistory}
@@ -1359,12 +1459,34 @@ export default function App() {
           <h2 className="list-head">
             {forecastExpired && !fromHistory ? s.nearbyCarParks : s.rankedForArrival}
           </h2>
+          <AmenityFilters active={filters} onToggle={toggleFilter} lang={lang} />
+          {/* "Filter narrows, never hides silently." A shorter list with no
+              explanation reads as a city with nothing in it, so what the
+              filter removed is reported here -- as two counts, because a car
+              park that reported none and one that reported nothing are
+              different facts and only the first is a reason to stop looking.
+              Each line appears only when its own count is non-zero, so a
+              filter that hid nothing says nothing. */}
+          {(listed.length === 0 || hidden.none > 0 || hidden.unknown > 0) && filters.length > 0 && (
+            <Notice tone="info" testId="filter-hidden" role="status">
+              {listed.length === 0 && <>{s.filterNoMatch} </>}
+              {hidden.none > 0 && (
+                <span data-testid="filter-hidden-none">
+                  {fillTemplate(s.filterHiddenNoneTemplate, { n: hidden.none })}{" "}
+                </span>
+              )}
+              {hidden.unknown > 0 && (
+                <span data-testid="filter-hidden-unknown">
+                  {fillTemplate(s.filterHiddenUnknownTemplate, { n: hidden.unknown })}
+                </span>
+              )}
+            </Notice>
+          )}
           <LotList
             rows={listed}
             lang={lang}
             baseDataTs={artifacts.grid.baseDataTs}
             ageMin={ageMin ?? 0}
-            arrivalTs={arrivalTs}
             horizonFromReadingMin={horizonFromReadingMin}
             supportById={supportById}
             fromHistory={fromHistory}

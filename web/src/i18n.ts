@@ -133,6 +133,34 @@ export interface Strings {
    * that the order has anything to do with the arrival time.
    */
   nearbyCarParks: string;
+  /** Accessible name for the row of filter chips above the list. */
+  filtersLabel: string;
+  /** Filter chip: show only car parks with 機車 spaces. */
+  filterScooter: string;
+  /** Filter chip: show only car parks with 充電 points. */
+  filterCharging: string;
+  /**
+   * Under a filtered list: how many car parks were dropped because they
+   * reported having none of what was asked for. Carries `{n}`.
+   *
+   * "Filter narrows, never hides silently" -- a shorter list with no
+   * explanation is indistinguishable from a city with nothing in it, so the
+   * count is reported rather than left for the driver to infer.
+   */
+  filterHiddenNoneTemplate: string;
+  /**
+   * The other half of that count, and the reason there are two: how many were
+   * dropped because their feed says nothing about the field. Carries `{n}`.
+   *
+   * It says in as many words that this is not the same as having none,
+   * because that is precisely the confusion a single combined number would
+   * create -- "no car park near here takes scooters" and "nobody has told us"
+   * are different answers to the same question, and only one of them is a
+   * reason to give up and park elsewhere.
+   */
+  filterHiddenUnknownTemplate: string;
+  /** Shown in place of rows when a filter leaves the list with nothing in it. */
+  filterNoMatch: string;
   /**
    * The accessible name of the card the map draws for a tapped car park.
    *
@@ -260,8 +288,24 @@ export interface Strings {
   freshnessLabel: string;
   /** Label on the card's walking-time fact tile. */
   walkTile: string;
-  /** Label on the card's predicted-arrival fact tile. */
-  arrivalTile: string;
+  /**
+   * Label on the card's 機車 fact tile -- how many scooter bays this car park
+   * has. The tile is drawn only when the feed reported the field at all, so
+   * this label never stands over a manufactured number.
+   */
+  scooterTile: string;
+  /** Label on the card's 充電 fact tile -- how many EV charging points it has. */
+  chargingTile: string;
+  /**
+   * The *value* on either amenity tile when the car park reported exactly
+   * zero of it.
+   *
+   * A reported zero is a measurement and gets said in words, not left as a
+   * bare "0" a reader could take for a placeholder. A car park that reported
+   * *nothing* gets no tile at all instead -- absent is not this string, and
+   * the distinction is the point of the whole feature (`../amenities`).
+   */
+  amenityNone: string;
   /** The observed-spaces fact when the lot has a capacity, e.g. "38 / 400 free · 4 min ago". Carries `{f}`, `{c}`, `{n}`. */
   spacesNowTemplate: string;
   /** The observed-spaces fact when the lot has no published capacity, e.g. "38 free · 4 min ago". Carries `{f}`, `{n}`. */
@@ -347,6 +391,13 @@ const en: Strings = {
   clearSearch: "Clear search",
   rankedForArrival: "Ranked for your arrival",
   nearbyCarParks: "Car parks nearby",
+  filtersLabel: "Filter the list",
+  filterScooter: "Scooter",
+  filterCharging: "Charging",
+  filterHiddenNoneTemplate: "{n} car parks are hidden: they report having none of what you filtered for.",
+  filterHiddenUnknownTemplate:
+    "{n} car parks are hidden because their data does not mention it at all, which is not the same as having none.",
+  filterNoMatch: "No car park ranked for this arrival reports what you filtered for.",
   selectedCarPark: "The car park you selected",
   dismissCard: "Close this car park",
   forecastTooOld:
@@ -371,7 +422,9 @@ const en: Strings = {
   expired: "expired",
   freshnessLabel: "Data age",
   walkTile: "Walk",
-  arrivalTile: "Arrival",
+  scooterTile: "Scooter spaces",
+  chargingTile: "EV charging",
+  amenityNone: "None",
   spacesNowTemplate: "{f} / {c} free · {n} min ago",
   spacesNowNoCapacityTemplate: "{f} free · {n} min ago",
   spacesNowLabel: "Observed spaces",
@@ -434,6 +487,12 @@ const zh: Strings = {
   clearSearch: "清除搜尋",
   rankedForArrival: "依抵達時間排序",
   nearbyCarParks: "附近的停車場",
+  filtersLabel: "篩選清單",
+  filterScooter: "機車",
+  filterCharging: "充電",
+  filterHiddenNoneTemplate: "已隱藏 {n} 個停車場，它們回報沒有您篩選的設施。",
+  filterHiddenUnknownTemplate: "有 {n} 個停車場的資料完全沒有提到這項設施，也一併隱藏；這與「回報沒有」並不一樣。",
+  filterNoMatch: "排序結果中沒有停車場回報有您篩選的設施。",
   selectedCarPark: "您選取的停車場",
   dismissCard: "關閉停車場資訊",
   forecastTooOld: "預報資料已過舊，無法推估您抵達時的狀況，因此不顯示有位機率。名稱、步行距離與價格仍然正確。",
@@ -456,7 +515,9 @@ const zh: Strings = {
   expired: "已過期",
   freshnessLabel: "資料時間",
   walkTile: "步行",
-  arrivalTile: "預計抵達",
+  scooterTile: "機車位",
+  chargingTile: "充電車位",
+  amenityNone: "無",
   spacesNowTemplate: "現在 {f} / {c} 位 · {n} 分鐘前",
   spacesNowNoCapacityTemplate: "現在 {f} 位 · {n} 分鐘前",
   spacesNowLabel: "觀測空位",
