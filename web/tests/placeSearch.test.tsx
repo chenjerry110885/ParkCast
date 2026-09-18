@@ -161,4 +161,108 @@ describe("PlaceSearch", () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByText("台北101")).toBeInTheDocument());
   });
+
+  it("stays open when a touch-scroll on the results blurs the input with no relatedTarget", () => {
+    // The reported bug: dragging a finger on the results `<ul>` blurs the input
+    // (the list and its options are not focusable), so `relatedTarget` is `null`
+    // and the old `onBlur`'s `contains(null)` check reads as "focus left the
+    // control" -- dismissing the list on the very touch that was meant to
+    // scroll it. A `pointerdown` inside the list, immediately followed by a
+    // `blur` with `relatedTarget: null`, is that sequence without a browser.
+    const onSelect = vi.fn();
+    render(<PlaceSearch lots={LOTS} indexUrl="/places/taipei.json" onSelect={onSelect} lang="en" storage={storage()} />);
+    const box = screen.getByRole("combobox");
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: "台北101" } });
+    const list = screen.getByTestId("search-results");
+    expect(list).toBeVisible();
+    const option = within(list).getAllByTestId("search-option")[0]!;
+    fireEvent.pointerDown(option);
+    fireEvent.blur(box, { relatedTarget: null });
+    expect(list).toBeVisible();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Counts the `pointerdown` handlers currently registered on `document`, by
+   * reference: added minus removed, not "was `removeEventListener` called".
+   *
+   * A leaked handler cannot be caught behaviourally. It guards on
+   * `containerRef.current`, which React nulls on unmount, so it becomes a
+   * silent no-op rather than a misfire -- which is exactly why it would never
+   * be noticed, and why deleting the cleanup outright left the whole suite
+   * green. The registry is the only place the leak is visible, so the registry
+   * is what this reads.
+   */
+  function trackPointerDownOnDocument(): { live: () => number; restore: () => void } {
+    const live = new Set<unknown>();
+    const add = document.addEventListener.bind(document);
+    const remove = document.removeEventListener.bind(document);
+    const addSpy = vi
+      .spyOn(document, "addEventListener")
+      .mockImplementation(((type: string, handler: unknown, options?: unknown) => {
+        if (type === "pointerdown") live.add(handler);
+        return add(type as keyof DocumentEventMap, handler as EventListener, options as boolean);
+      }) as unknown as typeof document.addEventListener);
+    const removeSpy = vi
+      .spyOn(document, "removeEventListener")
+      .mockImplementation(((type: string, handler: unknown, options?: unknown) => {
+        if (type === "pointerdown") live.delete(handler);
+        return remove(type as keyof DocumentEventMap, handler as EventListener, options as boolean);
+      }) as unknown as typeof document.removeEventListener);
+    return {
+      live: () => live.size,
+      restore: () => {
+        addSpy.mockRestore();
+        removeSpy.mockRestore();
+      },
+    };
+  }
+
+  it("takes its outside-press listener off `document` when the list closes, and on unmount", () => {
+    const tracker = trackPointerDownOnDocument();
+    try {
+      const { unmount } = render(
+        <PlaceSearch lots={LOTS} indexUrl="/places/taipei.json" onSelect={vi.fn()} lang="en" storage={storage()} />,
+      );
+      const box = screen.getByRole("combobox");
+      expect(tracker.live()).toBe(0);
+
+      fireEvent.focus(box);
+      fireEvent.change(box, { target: { value: "台北101" } });
+      expect(screen.getByTestId("search-results")).toBeVisible();
+      expect(tracker.live()).toBe(1);
+
+      // The cleanup has to run on the dependency change as well as on unmount:
+      // an `open` that has already flipped back to `false` must not leave this
+      // listening for the next press anywhere on the page.
+      fireEvent.keyDown(box, { key: "Escape" });
+      expect(screen.getByTestId("search-results")).not.toBeVisible();
+      expect(tracker.live()).toBe(0);
+
+      // Reopened, then unmounted with the list still open. `PlaceSearch` really
+      // does unmount in practice: crossing the 768 px breakpoint swaps
+      // `BottomSheet` for `SidePanel`, so every rotation leaks another one.
+      fireEvent.keyDown(box, { key: "ArrowDown" });
+      expect(screen.getByTestId("search-results")).toBeVisible();
+      expect(tracker.live()).toBe(1);
+
+      unmount();
+      expect(tracker.live()).toBe(0);
+    } finally {
+      tracker.restore();
+    }
+  });
+
+  it("still closes on a pointerdown outside the control", () => {
+    const onSelect = vi.fn();
+    render(<PlaceSearch lots={LOTS} indexUrl="/places/taipei.json" onSelect={onSelect} lang="en" storage={storage()} />);
+    const box = screen.getByRole("combobox");
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: "台北101" } });
+    const list = screen.getByTestId("search-results");
+    expect(list).toBeVisible();
+    fireEvent.pointerDown(document.body);
+    expect(list).not.toBeVisible();
+  });
 });

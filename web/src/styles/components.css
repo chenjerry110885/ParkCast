@@ -24,9 +24,14 @@
   animation: shimmer 2.4s linear infinite;
 }
 .map-unavailable { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; margin: 0; text-align: center; color: var(--muted); }
+/* Centred with auto margins against a pinned inset-inline, not a
+   `transform: translateX(-50%)` -- `.anim-slide-down` (below) sets
+   `transform` in its own keyframes, and with `animation-fill-mode: both`
+   that end value (`none`) would permanently replace whatever transform this
+   rule set, uncentring the hint the instant its entrance finishes. */
 .map-hint {
-  position: absolute; left: 50%; top: calc(var(--safe-top) + var(--topbar-height) + 12px); transform: translateX(-50%);
-  max-width: min(92vw, 420px); margin: 0; padding: 8px 14px; border-radius: var(--radius-pill);
+  position: absolute; inset-inline: 0; top: calc(var(--safe-top) + var(--topbar-height) + 12px);
+  max-width: min(92vw, 420px); margin: 0 auto; padding: 8px 14px; border-radius: var(--radius-pill);
   font-size: 13px; color: var(--text); box-shadow: var(--shadow-2); z-index: 2; text-align: center;
 }
 
@@ -71,7 +76,21 @@
 .sheet--dragging .sheet__grip::before { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
 .sheet__header { padding: 0 16px 8px; }
 .sheet__body { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 0 12px 12px; touch-action: pan-y; }
-.sheet--full .sheet__body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+/* Scrollable at `half` as well as at `full`, because a card is taller than the
+   half sheet's body and always was: the chrome above it (grip, name, freshness,
+   arrival picker) takes 223 px of the 447 px sheet on an 812 px phone, leaving
+   224 px of body for a card measured at 227 px -- and a card carrying a tags row
+   is taller still. Before this, a driver at `half` could see the top of the
+   first card and had no way to reach the rest of it but to drag the whole sheet
+   to `full` -- which is the only state in which a tap on a dot on the map
+   underneath is no longer possible. `peek` stays clipped on purpose: at 53 px of
+   body it is a hint that there is a list, not a list.
+   The drag gestures are untouched -- `bodyDown` only ever starts a drag from
+   `full` at the top of the scroll, and the grip and header still drag from
+   anywhere. Both halves of this are pinned by `sheetBodyScroll.test.tsx`: the
+   selector list here, and the `data-snap` attribute it leans on. */
+.sheet--full .sheet__body,
+.sheet[data-snap="half"] .sheet__body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
 
 .panel {
   position: absolute; left: 0; top: 0; bottom: 0; z-index: 4; width: var(--panel-width);
@@ -83,6 +102,16 @@
 .head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .app-name { margin: 0; font-size: 15px; font-weight: 800; letter-spacing: -0.01em; }
 .list-head { margin: 12px 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
+
+/* The card for a car park the driver selected that the ranked list is not
+   drawing. Ruled off from the list below it, because the one thing it must
+   never read as is the top row of the ranking it is sitting above: its own
+   heading, its own explanatory line, and then a border the ranked list starts
+   under. No animation of its own -- it appears where a selection put it, and
+   the card inside already has the list's entrance. */
+.pinned { margin-bottom: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.pinned .list-head { margin-top: 4px; }
+.pinned__note { margin: 0 0 8px; font-size: 12px; line-height: 1.45; color: var(--muted); }
 
 /* ------------------------------------------------------------ freshness badge */
 .fresh { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--accent); border-radius: var(--radius-pill); padding: 4px 8px; }
@@ -172,6 +201,11 @@
 /* Text-styled, not box-styled: this button wraps only the lot's name (see LotCard.tsx's header
    comment for why), so it must look like plain text, not a button-shaped button inside the card. */
 .lot-card__button { display: block; width: 100%; padding: 0; border: 0; background: none; text-align: left; color: inherit; font: inherit; }
+/* Both of these are `transform`, and they work only because `rise`
+   (motion.css) animates `translate` instead: a filled animation holds the
+   property it ends on at the animation origin, which outranks these rules, so
+   while `rise` ended at `transform: none` the lift and the press never took
+   effect at all. Pinned by cssTransformAnim.test.ts. */
 .lot-card:active { transform: scale(0.98); }
 @media (hover: hover) { .lot-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); } }
 .lot-card--selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow-2); }
@@ -207,7 +241,12 @@
 /* ------------------------------------------------------------ pills and popover */
 .pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: var(--radius-pill); border: 0; font-size: 11px; font-weight: 700; line-height: 1.4; background: var(--unknown-soft); color: var(--muted); position: relative; overflow: hidden; }
 .pill--best { background: var(--gradient-best); color: #fff; }
-.pill--best.anim-shine::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent); animation: shine 800ms var(--ease-out) 1; }
+/* `forwards` (not `both`, and never `infinite`): the sweep must end
+   parked past the pill's right edge -- clipped by `.pill`'s own
+   `overflow: hidden` -- rather than reverting to its resting (untransformed)
+   layout position, which is what left it visibly frozen over the badge's
+   left 40% once the single iteration finished. */
+.pill--best.anim-shine::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent); animation: shine 800ms var(--ease-out) 1 forwards; }
 .pill--high { background: var(--accent-soft); color: var(--accent); }
 .pill--medium { background: var(--warn-soft); color: var(--warn); }
 .pill--low { background: var(--unknown-soft); color: var(--muted); }

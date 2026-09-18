@@ -34,7 +34,7 @@
  * picks live in `localStorage` alone -- see `../places` for the read/write/
  * clear helpers and their failure handling.
  */
-import { useEffect, useId, useMemo, useState, type JSX, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type JSX, type KeyboardEvent } from "react";
 import { Area, CarPark, Cross, Landmark, Search, Station, Street } from "../icons";
 import { districtName, fillTemplate, t, type Lang } from "../i18n";
 import { clearRecent, loadPlaceIndex, lotsAsPlaces, pushRecent, readRecent, searchPlaces, type Place, type PlaceKind } from "../places";
@@ -92,6 +92,8 @@ export function PlaceSearch({ lots, indexUrl, onSelect, lang, storage }: PlaceSe
   /** The heading a `role="group"` points `aria-labelledby` at -- one per group key. */
   const groupHeadingId = (key: string) => `${id}-group-${key}`;
   const store = storage === undefined ? defaultStorage() : storage;
+  /** The whole control, for the outside-press check below -- not just the input. */
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const [query, setQuery] = useState("");
   /** Which option Enter would take. Reset to the top whenever the query moves. */
@@ -185,6 +187,33 @@ export function PlaceSearch({ lots, indexUrl, onSelect, lang, storage }: PlaceSe
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- optionId is a stable closure over `id`, not state; adding it would re-run this on every render for no reason.
   }, [safeActive, open]);
 
+  // Dismissal lives on a `pointerdown` outside the control, not on `blur`: the
+  // desktop `onMouseDown={preventDefault}` guard on each option keeps a click
+  // there from ever blurring the input, but touch has no such guard, and
+  // dragging a finger to scroll the results list blurs the input anyway --
+  // the list and its options are not focusable, so `relatedTarget` is `null`
+  // and the container's own `onBlur` below cannot tell that apart from focus
+  // actually leaving the control. The standard outside-press pattern sidesteps
+  // the question entirely: it does not care whether or how focus moved, only
+  // where the press landed, so a scroll that starts inside the list never
+  // dismisses it. This deliberately does NOT `preventDefault` the `pointerdown`
+  // -- doing that would cancel touch's default scrolling action, trading the
+  // dismiss bug for the very scroll bug this exists to fix.
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(e: PointerEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node | null)) {
+        setDismissed(true);
+        setFocused(false);
+      }
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    // Removed on every dependency change, not just on unmount -- an `open`
+    // that already flipped back to `false` (Escape, a selection) must not
+    // leave this listening for the next press anywhere on the page.
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open]);
+
   function choose(place: Place) {
     // The index's or the roster's own spelling, not the folded search key:
     // this is the name on the sign the driver is about to look for.
@@ -226,11 +255,16 @@ export function PlaceSearch({ lots, indexUrl, onSelect, lang, storage }: PlaceSe
 
   return (
     <div
+      ref={containerRef}
       className="search"
       onBlur={(e) => {
-        // Only a focus move that leaves the whole control closes it, so a
-        // click on an option is not a dismissal of the list it was clicked in.
-        if (!e.currentTarget.contains(e.relatedTarget)) {
+        // Only a genuine keyboard tab-away closes it here -- the outside-press
+        // effect above handles pointer/touch dismissal already, and a blur
+        // whose `relatedTarget` is `null` (the touch-scroll case, but also any
+        // other focus loss with nothing to blame) is not evidence of that: it
+        // takes a real element outside the control on the other end to prove
+        // focus actually left, rather than merely being interrupted.
+        if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget)) {
           setDismissed(true);
           setFocused(false);
         }

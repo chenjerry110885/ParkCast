@@ -12,7 +12,16 @@
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-spring: cubic-bezier(0.2, 0.9, 0.3, 1.1);
 }
-@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+/* `translate`, not `transform`: `.anim-rise` is filled, so whichever property
+   this ends on is held at that value for the life of the card -- at the
+   animation origin, which outranks a normal declaration. While that property
+   was `transform`, `.lot-card:hover`'s lift and `.lot-card:active`'s press
+   (components.css) were dead: the card sat at the identity and neither rule
+   could reach it. The individual transform properties compose with
+   `transform` instead of replacing it, so the entrance and the affordance can
+   have one each -- and `flipMove`'s reorder, which is `transform` too, no
+   longer cancels the entrance either. */
+@keyframes rise { from { opacity: 0; translate: 0 12px; } to { opacity: 1; translate: none; } }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes slide-down { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
 @keyframes shimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }
