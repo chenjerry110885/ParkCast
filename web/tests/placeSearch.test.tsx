@@ -161,4 +161,37 @@ describe("PlaceSearch", () => {
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByText("台北101")).toBeInTheDocument());
   });
+
+  it("stays open when a touch-scroll on the results blurs the input with no relatedTarget", () => {
+    // The reported bug: dragging a finger on the results `<ul>` blurs the input
+    // (the list and its options are not focusable), so `relatedTarget` is `null`
+    // and the old `onBlur`'s `contains(null)` check reads as "focus left the
+    // control" -- dismissing the list on the very touch that was meant to
+    // scroll it. A `pointerdown` inside the list, immediately followed by a
+    // `blur` with `relatedTarget: null`, is that sequence without a browser.
+    const onSelect = vi.fn();
+    render(<PlaceSearch lots={LOTS} indexUrl="/places/taipei.json" onSelect={onSelect} lang="en" storage={storage()} />);
+    const box = screen.getByRole("combobox");
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: "台北101" } });
+    const list = screen.getByTestId("search-results");
+    expect(list).toBeVisible();
+    const option = within(list).getAllByTestId("search-option")[0]!;
+    fireEvent.pointerDown(option);
+    fireEvent.blur(box, { relatedTarget: null });
+    expect(list).toBeVisible();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("still closes on a pointerdown outside the control", () => {
+    const onSelect = vi.fn();
+    render(<PlaceSearch lots={LOTS} indexUrl="/places/taipei.json" onSelect={onSelect} lang="en" storage={storage()} />);
+    const box = screen.getByRole("combobox");
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: "台北101" } });
+    const list = screen.getByTestId("search-results");
+    expect(list).toBeVisible();
+    fireEvent.pointerDown(document.body);
+    expect(list).not.toBeVisible();
+  });
 });
