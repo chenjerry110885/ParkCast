@@ -114,15 +114,39 @@ export interface MapViewProps {
   /** A dot was tapped. The map does not own the selection; it reports one. */
   onSelectLot?: (id: string) => void;
   /**
-   * Where to move the view, and *which time* the request was made.
+   * Whether the app is going to draw a full card for this lot, asked at the
+   * moment of the tap.
+   *
+   * The popup below is the *fallback* answer -- a lot's name and its chance --
+   * for the dots the app cannot card: no destination to measure a trip to, or
+   * a car park further from it than the ranking means anything at. Which dots
+   * those are is the app's question and not the map's (it turns on a ranking
+   * this module has never seen), and it has to be answered *synchronously*:
+   * `onDot` runs inside a MapLibre event handler, before React has re-rendered,
+   * so a prop would be one selection out of date and a dot whose card is about
+   * to open would flash a bubble first. Hence a predicate rather than a flag.
+   *
+   * Absent means "no card ever", which is what a `MapView` rendered on its own
+   * -- every test in `mapSource.test.tsx`'s second half -- should get.
+   */
+  hasCard?: (id: string) => boolean;
+  /**
+   * Where to move the view, how far below the middle to leave it, and *which
+   * time* the request was made.
    *
    * The nonce is the whole point: tapping the same card twice is two requests
    * for the same coordinates, and without it the second one would be
    * indistinguishable from a re-render. The map eases when the nonce changes
    * and at no other time, so a parent that re-renders mid-pan cannot yank the
    * view out from under a finger.
+   *
+   * `offsetY` is how the app keeps a lot out from under something it has drawn
+   * over the map -- its own card, today. Padding could do the same job and does
+   * not, because padding also moves the picture when it is taken away again;
+   * this rides with the movement that was going to happen anyway. Optional and
+   * `0` by default: most requests just want the middle.
    */
-  centerRequest: { lat: number; lon: number; nonce: number } | null;
+  centerRequest: { lat: number; lon: number; offsetY?: number; nonce: number } | null;
   /**
    * The chrome covering the map's edges, in pixels -- the sheet at the bottom,
    * the panel at the side. MapLibre centres on the *unpadded* middle, so this
@@ -143,6 +167,7 @@ export default function MapView({
   bestId = null,
   hoverId = null,
   onSelectLot,
+  hasCard,
   centerRequest = null,
   padding = { top: 0, right: 0, bottom: 0, left: 0 },
 }: MapViewProps) {
@@ -169,6 +194,11 @@ export default function MapView({
   useEffect(() => {
     onSelectLotRef.current = onSelectLot;
   }, [onSelectLot]);
+
+  const hasCardRef = useRef(hasCard);
+  useEffect(() => {
+    hasCardRef.current = hasCard;
+  }, [hasCard]);
 
   const stringsRef = useRef(s);
   useEffect(() => {
@@ -379,6 +409,10 @@ export default function MapView({
     if (map === null || request === null) return;
     map.easeTo({
       center: [request.lon, request.lat],
+      // Relative to the *padded* centre, which is already the middle of the
+      // band the sheet and the panel leave -- so the app only has to say how
+      // far below that its own overlay reaches.
+      offset: [0, request.offsetY ?? 0],
       duration: prefersReducedMotion() ? 0 : CENTRE_MS,
     });
   }, [map, centerNonce]);
@@ -429,11 +463,23 @@ export default function MapView({
       if (properties == null) return;
       const id: unknown = properties.id;
       if (typeof id !== "string") return;
+      // Is the app about to answer this tap with a full card? If so there is
+      // no popup to open -- a card and a bubble saying a strict subset of what
+      // the card says, over the same car park, is one answer too many -- and
+      // any popup still open from an earlier tap goes now. See `hasCard` for
+      // why this is asked here rather than read off a prop.
+      const carded = hasCardRef.current?.(id) === true;
       // Before the selection is reported, not after: the effect that closes a
       // popup the selection has moved past must be able to tell *this* tap's own
-      // selection from one made anywhere else.
-      popupForRef.current = id;
+      // selection from one made anywhere else. A carded tap owns no popup, so
+      // it claims none -- and that effect is then free to close whatever the
+      // last tap left open, which is exactly what should happen.
+      popupForRef.current = carded ? null : id;
       onSelectLotRef.current?.(id);
+      if (carded) {
+        popup.remove();
+        return;
+      }
 
       const name: unknown = properties.name;
       const probability: unknown = properties.probability;

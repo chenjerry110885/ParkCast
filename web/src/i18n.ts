@@ -134,23 +134,20 @@ export interface Strings {
    */
   nearbyCarParks: string;
   /**
-   * Heading over the card pinned above the ranked list for a car park the
-   * driver selected that the list itself is not drawing.
+   * The accessible name of the card the map draws for a tapped car park.
    *
-   * The map draws every car park in the city and the list draws about twenty,
-   * so most dots a driver can tap belong to no row. This heading is what says
-   * the card under it answers "tell me about *that* one" -- it sits above
-   * "Ranked for your arrival", and a card in that position with no heading
-   * would read as the app's own top suggestion.
+   * It was the *visible* heading over that card while the card lived above the
+   * ranked list, where a card with no heading would have read as the app's own
+   * top suggestion. On the map it needs no heading -- it is a card floating
+   * over the dot it is about, and nothing around it could be mistaken for a
+   * ranking -- but a region floating over a map with no name is hard to find
+   * with a screen reader, and this sentence is still exactly what it is.
+   * (`selectedCarParkNote`, which explained the card's position in the list,
+   * went with the position.)
    */
   selectedCarPark: string;
-  /**
-   * The line under `selectedCarPark`, and the half that keeps the ranking's
-   * meaning intact: this car park is on screen because it was asked about,
-   * and its position above the list is not a verdict on it. The same reason
-   * it never wears the "Best pick" badge.
-   */
-  selectedCarParkNote: string;
+  /** The label on the button that closes that card. */
+  dismissCard: string;
   /**
    * Shown when the reading behind the grid is older than the grid's own span,
    * so no arrival time the user can pick has a forecast behind it any more.
@@ -351,7 +348,7 @@ const en: Strings = {
   rankedForArrival: "Ranked for your arrival",
   nearbyCarParks: "Car parks nearby",
   selectedCarPark: "The car park you selected",
-  selectedCarParkNote: "Shown because you asked about it — not one of the ranked results below.",
+  dismissCard: "Close this car park",
   forecastTooOld:
     "This forecast is too old to answer for your arrival time, so no chance of a space is shown. Names, walking distances and prices are still correct.",
   basedOnHistory:
@@ -438,7 +435,7 @@ const zh: Strings = {
   rankedForArrival: "依抵達時間排序",
   nearbyCarParks: "附近的停車場",
   selectedCarPark: "您選取的停車場",
-  selectedCarParkNote: "這是您指定查看的停車場，不在下方的排序結果內。",
+  dismissCard: "關閉停車場資訊",
   forecastTooOld: "預報資料已過舊，無法推估您抵達時的狀況，因此不顯示有位機率。名稱、步行距離與價格仍然正確。",
   basedOnHistory: "這個抵達時間已超出即時讀數能涵蓋的範圍，畫面上的有位機率是依各停車場在每週這個時段的長期紀錄推估，並非來自最新讀數。",
   outsideCoverage:

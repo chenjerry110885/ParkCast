@@ -103,16 +103,6 @@
 .app-name { margin: 0; font-size: 15px; font-weight: 800; letter-spacing: -0.01em; }
 .list-head { margin: 12px 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
 
-/* The card for a car park the driver selected that the ranked list is not
-   drawing. Ruled off from the list below it, because the one thing it must
-   never read as is the top row of the ranking it is sitting above: its own
-   heading, its own explanatory line, and then a border the ranked list starts
-   under. No animation of its own -- it appears where a selection put it, and
-   the card inside already has the list's entrance. */
-.pinned { margin-bottom: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-.pinned .list-head { margin-top: 4px; }
-.pinned__note { margin: 0 0 8px; font-size: 12px; line-height: 1.45; color: var(--muted); }
-
 /* ------------------------------------------------------------ freshness badge */
 .fresh { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--accent); border-radius: var(--radius-pill); padding: 4px 8px; }
 /* No idle animation. A dot that breathes forever keeps the compositor
@@ -288,6 +278,66 @@
 .map-stage .maplibregl-ctrl-attrib { font-size: 11px; }
 .pin-ripple { position: absolute; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%; border: 2px solid var(--accent); animation: ripple 900ms var(--ease-out) 1 both; pointer-events: none; }
 .pin-ripple--late { animation-delay: 220ms; }
+
+/* ------------------------------------------------------------ the map's card */
+/*
+ * The full card for the car park the driver tapped, drawn over the map rather
+ * than in the sheet or the panel. A tap on a dot is answered where the tap
+ * was; the previous version put this card at the top of the ranked list, which
+ * meant the answer appeared in a surface the driver then had to go and find --
+ * and, on a phone at `half`, scroll.
+ *
+ * **Where it sits, and why there.** The top of the band of map that the chrome
+ * leaves: under the top bar on a phone, under the floating controls on
+ * desktop. Not anchored to the dot, and not at the bottom either:
+ *
+ *   - A 255 px card is most of the free band on a 375x812 phone (476 px with
+ *     the sheet at `peek`), so "beside the dot" is not a thing that exists
+ *     there -- wherever the card went, the dot would have to move. So the dot
+ *     moves, deliberately: `App.tsx`'s `padding` tells MapLibre this slot is
+ *     covered and `easeTo` centres the tapped lot in what is left, ~110 px
+ *     below the card. That is what keeps a card off the dot it describes at
+ *     *every* width, with no projection and nothing to recompute on a pan.
+ *   - The top, not the bottom, because a card resting on the sheet's top edge
+ *     reads as the sheet's first row -- which is the confusion this change
+ *     exists to end -- and because a slot pinned to the sheet moves whenever
+ *     the sheet is dragged, while this one stays put and is simply covered.
+ *
+ * `z-index: 3` puts it over the map and the hint and *under* the sheet (4) and
+ * the top bar (5): if the sheet is dragged up over it, the sheet wins, which is
+ * the right answer to "I would rather see the list now".
+ */
+.map-card {
+  position: absolute; z-index: 3;
+  top: calc(var(--safe-top) + var(--topbar-height) + 12px);
+  left: 12px; right: 12px; margin: 0 auto; max-width: 420px;
+}
+/* It is floating over a moving picture, not sitting in a list, so it carries
+   the shadow a floating surface carries. */
+.map-card .lot-card { box-shadow: var(--shadow-2); }
+/* The dismiss target: 44 px square (spec §2), but transparent rather than a
+   button-shaped button on top of the card -- the same treatment
+   `.search__clear` gets inside the search pill, for the same reason. */
+.map-card__dismiss {
+  position: absolute; top: 4px; right: 4px; z-index: 1; width: 44px; height: 44px;
+  border: 0; border-radius: 50%; background: transparent; color: var(--muted);
+  display: grid; place-items: center; cursor: pointer;
+}
+.map-card__dismiss svg { width: 16px; height: 16px; }
+/* The whole identity column, not just the name: the button overlaps the card's
+   top-right corner, and the name, the district line and the tags row all start
+   in that column. Reserving the width here is what keeps the ✕ off the text
+   instead of on top of it. */
+.map-card .lot-card__ident { padding-inline-end: 40px; }
+[data-layout="desktop"] .map-card {
+  /* Under the floating locate and language buttons rather than beside them: at
+     768 px the map is 348 px wide next to the panel, and a readable card and a
+     button row pinned right cannot share that line. Mirrors
+     `MAP_CARD_TOP_DESKTOP_PX`. */
+  top: calc(var(--safe-top) + 72px);
+  left: calc(var(--panel-width) + 16px); right: auto; margin: 0;
+  width: min(380px, calc(100vw - var(--panel-width) - 32px));
+}
 
 @media (max-width: 360px) {
   .facts { grid-template-columns: 1fr; }
