@@ -8,7 +8,7 @@
  * anywhere: the driver's location never leaves the phone, because there is no
  * server to send it to.
  *
- * Eleven things here are load-bearing rather than cosmetic:
+ * Twelve things here are load-bearing rather than cosmetic:
  *
  *   - **The staleness line.** The upstream feed publishes every five minutes
  *     with a ~3-minute lag, so the reading behind any forecast is already a few
@@ -84,6 +84,24 @@
  *     be true and the answer would be useless. `COVERAGE_RADIUS_M` is where the
  *     list stops pretending. The map keeps drawing the whole city either way --
  *     it is the *ranking* that is meaningless out there, not the data.
+ *   - **Every dot is tappable, and a tap on one the list does not show still
+ *     gets a card.** The map draws the whole roster and the list draws
+ *     twenty, so most dots on screen belong to no row: tapping one moved the
+ *     map, drew a halo and answered nothing -- a dead end at 98% of the city.
+ *     `pinned` is the row the ranker already scored for that lot, rendered
+ *     above the list through the same `LotCard` with the same data, so the
+ *     two can never drift into two versions of "the same detail". It is
+ *     headed as the driver's own question rather than as a ranking position,
+ *     and it deliberately never takes the "Best pick" crown or the pulsing
+ *     dot -- see `bestId` for why that badge is withheld even from lots the
+ *     ranking *did* rank. With no destination there is no ranking, no row to
+ *     find and no card: three of the card's four fact tiles measure a trip
+ *     that does not exist yet, and inventing a walk of "0 min" from a
+ *     destination nobody named would be the kind of manufactured number the
+ *     rest of this file exists to refuse. The tap is still answered out
+ *     there -- the map's own popup names the lot and its chance, on the same
+ *     "never 0% for no data" rule -- and `startPromptMap` says how to get the
+ *     rest.
  *   - **A destination can be typed.** `PlaceSearch` looks up car parks in the
  *     roster already in memory and everything else -- stations, landmarks,
  *     streets, neighbourhoods -- in an offline index built from the same
@@ -99,6 +117,7 @@ import { ArrivalPicker } from "./components/ArrivalPicker";
 import { FreshnessBadge } from "./components/FreshnessBadge";
 import { LangToggle } from "./components/LangToggle";
 import { LocateButton } from "./components/LocateButton";
+import { LotCard } from "./components/LotCard";
 import { LotList } from "./components/LotList";
 import { Notice } from "./components/Notice";
 import { PlaceSearch } from "./components/PlaceSearch";
@@ -842,18 +861,86 @@ export default function App() {
   const listed = useMemo(() => listRows(ranked, LIST_LIMIT), [ranked]);
 
   /**
+   * The car park the driver selected that the list is not drawing, or `null`.
+   *
+   * The map draws every lot in the roster and `listed` draws about twenty of
+   * them, so most dots on screen belong to no row -- and `LotList` only
+   * renders a card for a row it was handed. The card for a lot outside the
+   * list therefore has to be rendered here, or a tap on the other 98% of the
+   * city is a halo and nothing else.
+   *
+   * Found in `ranked` rather than scored again: `ranked` is every lot, against
+   * the same destination, at the same arrival, through the same ranker, so
+   * this is exactly the row the list would have drawn had the cap reached it.
+   * A second scoring path would be a second thing to keep in step with the
+   * first. A lot already in `listed` is not pinned -- it has a card, and a
+   * copy of it above the list would be the same car park twice.
+   *
+   * `null` when no destination has been chosen, because `ranked` is empty
+   * then and there is no row to find. See the module comment.
+   */
+  const pinned = useMemo(() => {
+    if (selectedLotId === null) return null;
+    if (listed.some((row) => row.id === selectedLotId)) return null;
+    return ranked.find((row) => row.id === selectedLotId) ?? null;
+  }, [selectedLotId, listed, ranked]);
+
+  /** The pinned card's own node, so the effect below can bring it into view. */
+  const pinnedRef = useRef<HTMLDivElement>(null);
+  const pinnedId = pinned?.id ?? null;
+
+  /**
+   * A card rendered into a surface the driver cannot see is the dead end this
+   * whole path exists to close, with extra steps. Three things put it in
+   * front of them, and none of the three is enough alone:
+   *
+   *   - `selectLot` already opens a `peek` sheet to `half` on a phone. That
+   *     is what makes any selection visible at all, and it predates this.
+   *   - The card is at the *top* of the results body, above the ranked list,
+   *     so the sheet does not have to be open far to reach it.
+   *   - ...and this: the body is a scroll container the driver may have
+   *     scrolled a long way down -- the desktop panel always, the sheet at
+   *     `half` and `full` (see `.sheet__body` in `styles/components.css`) --
+   *     and a card inserted at the top of a scrolled one appears off screen.
+   *     `"nearest"` scrolls the least it can, and does nothing at all when
+   *     the card is already in view, so a selection that was already visible
+   *     is never yanked around.
+   *
+   * A card is taller than the half sheet's body either way (227 px against
+   * 224 px on an 812 px phone), so the last of the driver's own scroll is
+   * theirs to make -- exactly as it already is for the first card of the
+   * ranked list, which has the same two measurements.
+   *
+   * Instant, not smooth: nothing here animates, so `prefers-reduced-motion`
+   * has nothing to honour. Optional-called because jsdom has no
+   * `scrollIntoView` -- the same reason `PlaceSearch` guards its own.
+   */
+  useEffect(() => {
+    if (pinnedId === null) return;
+    pinnedRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [pinnedId]);
+
+  /**
    * How much history stands behind each rendered card's arrival hour, by lot id.
    *
    * A map rather than a callback because `LotList` is memoised: a fresh closure
    * every render would defeat that memo on every mouse move across the list,
-   * which is the exact cost the memo was added to avoid. Built over `listed`
-   * alone -- twenty rows, not the whole 1,075-lot roster -- because a card is
-   * the only thing that shows a confidence grade.
+   * which is the exact cost the memo was added to avoid. Built over the rows
+   * that actually render a card -- `listed`, plus the pinned lot when there is
+   * one -- and not the whole 1,075-lot roster, because a card is the only
+   * thing that shows a confidence grade.
+   *
+   * The pinned row belongs in here rather than being left to the `?? 0`
+   * default: `0` is `confidence.ts`'s thinnest evidence ("not watched at this
+   * time of week often enough yet"), so a pinned card missing from this map
+   * would read "Low · thin" beside list cards reading "High · 5 weeks" for the
+   * same arrival -- the card quietly *less* informative than the list's, which
+   * is the one thing it was added not to be.
    */
-  const supportById = useMemo(
-    () => new Map(listed.map((r) => [r.id, supportForLot(week, r.lot, arrivalTs)])),
-    [listed, week, arrivalTs],
-  );
+  const supportById = useMemo(() => {
+    const carded = pinned === null ? listed : [...listed, pinned];
+    return new Map(carded.map((r) => [r.id, supportForLot(week, r.lot, arrivalTs)]));
+  }, [listed, pinned, week, arrivalTs]);
 
   /**
    * The destination is somewhere this app cannot answer for.
@@ -1077,6 +1164,50 @@ export default function App() {
         <Notice tone="warn" testId="outside-coverage" role="status">
           {fillTemplate(s.outsideCoverage, { km: COVERAGE_RADIUS_M / 1000 })}
         </Notice>
+      )}
+      {/* The card for a lot the ranked list below is not drawing, pinned over
+          it. Above the list and not inside it, because it is not a position in
+          the ranking and must never read as one: the heading and the line
+          under it say whose question it answers, and `best` is hard-wired
+          `false` rather than compared against `bestId` -- a lot outside
+          `listed` can never *be* `bestId`, and spelling that out here is what
+          keeps a later edit to either from quietly crowning a car park the
+          ranking never vouched for. Gated on the same three conditions as the
+          list itself: with no destination there is nothing to rank against,
+          and outside the covered area there is nothing worth ranking, which
+          `outsideCoverage` has already said in words. */}
+      {artifacts !== null && destination !== null && !outsideCoverage && pinned !== null && (
+        <div className="pinned" data-testid="pinned-lot" ref={pinnedRef}>
+          <h2 className="list-head">{s.selectedCarPark}</h2>
+          <p className="pinned__note">{s.selectedCarParkNote}</p>
+          {/* A list of one, because `LotCard` is an `<li>` and an `<li>` with
+              no list around it is invalid markup. Unordered: one card has no
+              order to announce, and `.lots` is only carrying the card's own
+              spacing here. */}
+          <ul className="lots">
+            <LotCard
+              // Keyed by lot, exactly as `LotList` keys its rows: without it
+              // React reuses one card across two car parks, and
+              // `ProbabilityRing`'s tween animates the first lot's percentage
+              // into the second's -- a number that belongs to neither of them
+              // while it is on screen.
+              key={pinned.id}
+              row={pinned}
+              lang={lang}
+              baseDataTs={artifacts.grid.baseDataTs}
+              ageMin={ageMin ?? 0}
+              arrivalTs={arrivalTs}
+              horizonFromReadingMin={horizonFromReadingMin}
+              support={supportById.get(pinned.id) ?? 0}
+              fromHistory={fromHistory}
+              best={false}
+              selected
+              onSelect={selectLot}
+              onHover={setHoverLotId}
+              index={0}
+            />
+          </ul>
+        </div>
       )}
       {artifacts !== null && destination !== null && !outsideCoverage && (
         <>

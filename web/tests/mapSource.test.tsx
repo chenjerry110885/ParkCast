@@ -25,13 +25,14 @@
  * to hand it the props and watch what it does to MapLibre. Those tests keep the
  * same fake map, so what they assert is still "what MapLibre was actually told".
  */
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { FeatureCollection, Point } from "geojson";
 import type { MapLibreMap } from "maplibre-gl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "../src/App";
-import { HEADER_SIZE } from "../src/artifacts";
-import { t } from "../src/i18n";
+import App, { LIST_LIMIT } from "../src/App";
+import { HEADER_SIZE, resetWeekCache } from "../src/artifacts";
+import { WEEKLY_OBSERVATIONS } from "../src/confidence";
+import { districtName, fillTemplate, t } from "../src/i18n";
 import MapView, { LOTS_SOURCE } from "../src/map/MapView";
 import { toMapLot, type LotProperties, type MapLot } from "../src/map/lotSource";
 import type { Lot, LotsDoc } from "../src/types";
@@ -240,23 +241,28 @@ const LOTS: Lot[] = [
 /** One distinct percentage per grid row, so a feature names the row it read. */
 const ROW_MARK = [10, 50, 90];
 
-function encodeGrid(): ArrayBuffer {
-  const body: number[] = [];
-  for (const lot of LOTS) {
-    for (let h = 0; h < N_HORIZONS; h += 1) body.push(ROW_MARK[lot.i]!);
-  }
+/** `grid.bin` exactly as the Python encoder writes it: `<4sBIIHBBI`, no padding. */
+function encodeGridBody(body: number[], nLots: number): ArrayBuffer {
   const buf = new ArrayBuffer(HEADER_SIZE + body.length);
   const dv = new DataView(buf);
   new Uint8Array(buf).set(new TextEncoder().encode("PCG1"), 0);
   dv.setUint8(4, 1);
   dv.setUint32(5, BASE_DATA_TS + 213, true);
   dv.setUint32(9, BASE_DATA_TS, true);
-  dv.setUint16(13, LOTS.length, true);
+  dv.setUint16(13, nLots, true);
   dv.setUint8(15, N_HORIZONS);
   dv.setUint8(16, STEP_MIN);
   dv.setUint32(17, ROSTER_ID, true);
   new Uint8Array(buf).set(body, HEADER_SIZE);
   return buf;
+}
+
+function encodeGrid(): ArrayBuffer {
+  const body: number[] = [];
+  for (const lot of LOTS) {
+    for (let h = 0; h < N_HORIZONS; h += 1) body.push(ROW_MARK[lot.i]!);
+  }
+  return encodeGridBody(body, LOTS.length);
 }
 
 /** `n_lots` counts the published roster, including the row we cannot place. */
@@ -628,5 +634,377 @@ describe("the map's selection, padding and taps", () => {
     fire("click", null, { lngLat: { lat: 25.03, lng: 121.56 }, point: { x: 10, y: 20 } });
 
     expect(onPick).toHaveBeenCalledWith({ lat: 25.03, lon: 121.56 });
+  });
+});
+
+/**
+ * The dead end this file's fake map is the only way to reach.
+ *
+ * The map draws every car park in the roster and the list draws twenty, so
+ * most dots on screen belong to no row. Tapping one already selected it --
+ * `onSelectLot` fired, `App` set `selectedLotId`, the halo moved -- and then
+ * nothing: `LotList` only renders a card for a row it was handed, so a lot
+ * outside `listed` got a ring on the map and no way to read it.
+ *
+ * Every test here goes through the whole screen -- the real `loadArtifacts`,
+ * the real ranker, the real `LotCard` -- and drives it the way MapLibre would:
+ * one tap on empty map to say where the driver is going, then one on a dot.
+ * Nothing asserts that "a card rendered"; a card showing the wrong car park
+ * would pass that. What is asserted is the *identity* of the lot on the card,
+ * from facts no listed lot in this fixture shares with it.
+ */
+describe("a car park the ranked list does not show", () => {
+  /** Where the driver is going: the tap on empty map that sets the destination. */
+  const DEST = { lat: 25.0375, lon: 121.5637 };
+
+  /** The lot the complaint is about: ranked past the cap, and tapped anyway. */
+  const OUTSIDER_ID = "TPE_OUTSIDER";
+  const OUTSIDER_NAME = "北投公園地下停車場";
+  /** Facts that belong to this lot and to no other row in the fixture. */
+  const OUTSIDER_PERCENT = 34;
+  const OUTSIDER_PRICE = 90;
+  const OUTSIDER_FREE = 7;
+  const OUTSIDER_CAPACITY = 200;
+
+  /** A second one, so "tap another dot" has somewhere to land. */
+  const SECOND_ID = "TPE_OUTSIDER_2";
+  const SECOND_NAME = "洲美運動公園停車場";
+  const SECOND_PERCENT = 12;
+
+  /** Every listed lot shares these, so any of them on the pinned card is caught. */
+  const LISTED_PERCENT = 70;
+  const LISTED_PRICE = 30;
+
+  /**
+   * Twenty-two near lots and two far ones, all priced and scored so that the
+   * two outsiders can only rank last: lower probability, higher price, further
+   * to walk. `LIST_LIMIT` is 20, so they are the rows the cap drops -- which is
+   * the situation under test, produced by the real ranker rather than asserted
+   * into being.
+   */
+  function crowd(): Lot[] {
+    const near = Array.from({ length: 22 }, (_unused, k): Lot => ({
+      i: k,
+      id: `TPE_LISTED_${k}`,
+      n: `已知停車場${k}`,
+      a: "信義區",
+      y: DEST.lat + 0.0002 * (k + 1),
+      x: DEST.lon,
+      c: 50,
+      t: "民營停車場",
+      p: { k: "exact", lo: LISTED_PRICE, hi: LISTED_PRICE },
+    }));
+    const outsiders: Lot[] = [
+      {
+        i: 22,
+        id: OUTSIDER_ID,
+        n: OUTSIDER_NAME,
+        a: "北投區",
+        y: DEST.lat + 0.02,
+        x: DEST.lon,
+        c: OUTSIDER_CAPACITY,
+        t: "市府委外停車場",
+        p: { k: "exact", lo: OUTSIDER_PRICE, hi: OUTSIDER_PRICE },
+        f: OUTSIDER_FREE,
+      },
+      {
+        i: 23,
+        id: SECOND_ID,
+        n: SECOND_NAME,
+        a: "士林區",
+        y: DEST.lat + 0.025,
+        x: DEST.lon,
+        c: 80,
+        t: "民營停車場",
+        p: { k: "exact", lo: OUTSIDER_PRICE, hi: OUTSIDER_PRICE },
+      },
+    ];
+    return [...near, ...outsiders];
+  }
+
+  const CROWD = crowd();
+
+  const percentOf = (lot: Lot): number =>
+    lot.id === OUTSIDER_ID ? OUTSIDER_PERCENT : lot.id === SECOND_ID ? SECOND_PERCENT : LISTED_PERCENT;
+
+  function crowdedGrid(): ArrayBuffer {
+    const body: number[] = [];
+    for (const lot of CROWD) {
+      for (let h = 0; h < N_HORIZONS; h += 1) body.push(percentOf(lot));
+    }
+    return encodeGridBody(body, CROWD.length);
+  }
+
+  beforeEach(() => {
+    // Runs after the outer `beforeEach`, so this replaces its three-lot fixture.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.endsWith("grid.bin")) {
+          return Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(crowdedGrid()) });
+        }
+        if (url.endsWith("lots.json")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                v: 1,
+                generated_at: BASE_DATA_TS + 213,
+                base_data_ts: BASE_DATA_TS,
+                n_lots: CROWD.length,
+                roster_id: ROSTER_ID,
+                lots: CROWD,
+              }),
+          });
+        }
+        return Promise.reject(new Error(`unexpected url ${url}`));
+      }),
+    );
+  });
+
+  /** Render, wait for the map, then tap empty map to choose a destination. */
+  async function renderWithDestination(): Promise<void> {
+    render(<App />);
+    await screen.findByTestId("staleness");
+    await screen.findByRole("region", { name: t("en").mapLabel });
+    // `queryRenderedFeatures` answers `[]` by default, so nothing is under the
+    // point and the map-wide handler takes the tap as the destination.
+    await act(async () => {
+      fire("click", null, { lngLat: { lat: DEST.lat, lng: DEST.lon }, point: { x: 1, y: 1 } });
+    });
+    await screen.findByTestId("lot-list");
+  }
+
+  /** The tap MapLibre would deliver on a dot. */
+  function tapDot(lot: Lot): void {
+    act(() => {
+      fire("click", LOTS_LAYER, {
+        features: [{ properties: { id: lot.id, name: lot.n, probability: percentOf(lot) / 100 } }],
+        lngLat: { lat: lot.y, lng: lot.x },
+        point: { x: 10, y: 20 },
+      });
+    });
+  }
+
+  /** The rows the ranked list itself is drawing -- never the pinned card. */
+  function listedRows(): HTMLElement[] {
+    return within(screen.getByTestId("lot-list")).getAllByTestId("lot-row");
+  }
+
+  it("gives a tapped car park outside the list the list's own card", async () => {
+    await renderWithDestination();
+
+    // The situation: twenty rows, and this car park is not one of them.
+    expect(listedRows()).toHaveLength(LIST_LIMIT);
+    expect(screen.queryByText(OUTSIDER_NAME)).toBeNull();
+    expect(screen.queryByTestId("pinned-lot")).toBeNull();
+
+    tapDot(CROWD[22]!);
+
+    const pinned = screen.getByTestId("pinned-lot");
+    // Identity first: the name, then facts no listed lot carries -- its own
+    // percentage, its own fare, its own observed count and its own district. A
+    // card for the wrong car park passes "a card rendered" and fails all four.
+    expect(within(pinned).getByTestId("lot-name")).toHaveTextContent(OUTSIDER_NAME);
+    expect(within(pinned).getByTestId("lot-probability")).toHaveTextContent(`${OUTSIDER_PERCENT}%`);
+    expect(within(pinned).getByTestId("lot-probability")).not.toHaveTextContent(`${LISTED_PERCENT}%`);
+    expect(within(pinned).getByTestId("lot-price").textContent).toContain(`NT$${OUTSIDER_PRICE}`);
+    expect(within(pinned).getByTestId("lot-spaces").textContent).toContain(
+      `${OUTSIDER_FREE} / ${OUTSIDER_CAPACITY}`,
+    );
+    // The district, which is chrome and so *is* translated -- unlike the lot's
+    // own name above, which is the sign at the entrance and never is.
+    expect(pinned.textContent).toContain(districtName("北投區", "en"));
+    expect(pinned.textContent).not.toContain(districtName("信義區", "en"));
+    // "The same detail as the list's card": every tile a listed card carries.
+    for (const tile of ["lot-walk", "lot-price", "lot-arrival"]) {
+      expect(within(listedRows()[0]!).getByTestId(tile)).toBeInTheDocument();
+      expect(within(pinned).getByTestId(tile)).toBeInTheDocument();
+    }
+
+    // Above the ranked list, and the list is untouched by it: still twenty
+    // rows, still without this car park among them.
+    expect(pinned.compareDocumentPosition(screen.getByTestId("lot-list"))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(listedRows()).toHaveLength(LIST_LIMIT);
+    expect(listedRows().map((row) => row.getAttribute("data-lot-id"))).not.toContain(OUTSIDER_ID);
+  });
+
+  it("never crowns it, and never pulses its dot", async () => {
+    await renderWithDestination();
+    tapDot(CROWD[22]!);
+
+    const pinned = screen.getByTestId("pinned-lot");
+    // The badge the ranking withholds from lots it cannot vouch for is withheld
+    // with more force from one the ranking's output never reached.
+    expect(within(pinned).queryByText(t("en").bestPick)).toBeNull();
+    expect(pinned.querySelector(".lot-card--best")).toBeNull();
+    // ...and the crown is still where the ranking put it.
+    expect(within(screen.getByTestId("lot-list")).getByText(t("en").bestPick)).toBeInTheDocument();
+
+    // The map says the same thing: this dot is selected and is not the best
+    // pick, so the layer that pulses can never match it.
+    const drawn = drawnLots().features.find((f) => f.properties.id === OUTSIDER_ID);
+    expect(drawn?.properties.selected).toBe(true);
+    expect(drawn?.properties.best).toBe(false);
+    expect(drawnLots().features.filter((f) => f.properties.best)).toHaveLength(1);
+  });
+
+  it("replaces the card when a second dot is tapped, rather than stacking them", async () => {
+    await renderWithDestination();
+    tapDot(CROWD[22]!);
+    expect(within(screen.getByTestId("pinned-lot")).getByTestId("lot-name")).toHaveTextContent(OUTSIDER_NAME);
+
+    tapDot(CROWD[23]!);
+
+    const pinned = screen.getByTestId("pinned-lot");
+    expect(screen.getAllByTestId("pinned-lot")).toHaveLength(1);
+    expect(within(pinned).getByTestId("lot-name")).toHaveTextContent(SECOND_NAME);
+    expect(within(pinned).getByTestId("lot-probability")).toHaveTextContent(`${SECOND_PERCENT}%`);
+    // The first car park is gone from the screen entirely, not merely demoted.
+    expect(screen.queryByText(OUTSIDER_NAME)).toBeNull();
+  });
+
+  it("leaves a lot the list already shows in the list, with no second copy", async () => {
+    await renderWithDestination();
+    const id = listedRows()[0]!.getAttribute("data-lot-id") ?? "";
+    const lot = CROWD.find((l) => l.id === id);
+    expect(lot).toBeDefined();
+
+    tapDot(lot!);
+
+    // Today's behaviour, unchanged: the row highlights where it already is.
+    expect(screen.queryByTestId("pinned-lot")).toBeNull();
+    expect(listedRows()).toHaveLength(LIST_LIMIT);
+    expect(screen.getByTestId("lot-list").querySelector(`[data-lot-id="${id}"]`)?.className).toContain(
+      "lot-card--selected",
+    );
+    expect(screen.getAllByText(lot!.n)).toHaveLength(1);
+  });
+
+  /**
+   * A uniform `week.bin`: the same probability and the same support in all 336
+   * buckets, so this test is about *whether* a card was given its lot's support
+   * at all and not about which half-hour it read (`app.test.tsx` owns that, and
+   * `seam.test.ts` owns agreeing with Python about it).
+   *
+   * Header `<4sBIHHBI`, no padding, mirroring `web/src/week.ts` -- laid out by
+   * hand here for the same reason `encodeGridBody` is: a fixture written by the
+   * code under test can only prove the client agrees with itself.
+   */
+  function encodeWeek(percent: number, support: number): ArrayBuffer {
+    const buckets = 336;
+    const buf = new ArrayBuffer(18 + CROWD.length * buckets * 2);
+    const dv = new DataView(buf);
+    const bytes = new Uint8Array(buf);
+    bytes.set(new TextEncoder().encode("PCW1"), 0);
+    dv.setUint8(4, 1);
+    dv.setUint32(5, BASE_DATA_TS - 3600, true);
+    dv.setUint16(9, CROWD.length, true);
+    dv.setUint16(11, buckets, true);
+    dv.setUint8(13, 30);
+    dv.setUint32(14, ROSTER_ID, true);
+    for (let cell = 0; cell < CROWD.length * buckets; cell += 1) {
+      bytes[18 + cell * 2] = percent;
+      bytes[18 + cell * 2 + 1] = support;
+    }
+    return buf;
+  }
+
+  /**
+   * The pinned card's confidence grade has to rest on this lot's own history,
+   * exactly as a listed card's does.
+   *
+   * `supportById` is built over the rows that render a card, and the pinned row
+   * has to be one of them: `LotCard`'s `support` defaults to `0`, which
+   * `confidence.ts` reads as its *thinnest* evidence ("not watched at this time
+   * of week often enough yet"). A pinned row left out of that map therefore
+   * does not fail loudly -- it renders "Low · thin" beside twenty cards reading
+   * "High · 5 weeks" for the same arrival, a card quietly less informative than
+   * the list's, which is the one thing it exists not to be.
+   *
+   * Reached without touching the arrival picker: a reading 110 minutes old puts
+   * the default +15 min arrival 125 minutes past it, which is beyond the grid's
+   * 120-minute span but not far enough for `forecastExpired`, so `week.bin` is
+   * fetched and the reading is too old to carry the grade on its own. Support
+   * is then the only thing left deciding it, which is what makes the two
+   * outcomes visibly different.
+   */
+  it("grades the pinned card on its own history, not on a default of none", async () => {
+    resetWeekCache();
+    const week = encodeWeek(73, 5 * WEEKLY_OBSERVATIONS);
+    const grid = crowdedGrid();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.endsWith("grid.bin")) {
+          return Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(grid) });
+        }
+        if (url.endsWith("week.bin")) {
+          return Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(week) });
+        }
+        if (url.endsWith("lots.json")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                v: 1,
+                generated_at: BASE_DATA_TS + 213,
+                base_data_ts: BASE_DATA_TS,
+                n_lots: CROWD.length,
+                roster_id: ROSTER_ID,
+                lots: CROWD,
+              }),
+          });
+        }
+        return Promise.reject(new Error(`unexpected url ${url}`));
+      }),
+    );
+    vi.spyOn(Date, "now").mockReturnValue((BASE_DATA_TS + 110 * 60) * 1000);
+
+    await renderWithDestination();
+    // The table has landed and the page says the numbers came out of it.
+    await screen.findByTestId("from-history");
+
+    // The list's own cards grade on five weeks of history, the reading being
+    // far too old to speak for itself.
+    const listedPill = within(listedRows()[0]!).getByRole("button", { name: /Confidence/ });
+    await waitFor(() => expect(listedPill).toHaveTextContent(t("en").confidenceHigh));
+
+    tapDot(CROWD[22]!);
+
+    const pinned = screen.getByTestId("pinned-lot");
+    const pill = within(pinned).getByRole("button", { name: /Confidence/ });
+    expect(pill).toHaveTextContent(t("en").confidenceHigh);
+    expect(pill).not.toHaveTextContent(t("en").confidenceLow);
+    // ...and the evidence it names is the history, not a bare grade: the
+    // popover is where a default of `0` would have said "not watched yet".
+    fireEvent.click(pill);
+    expect(within(pinned).getByRole("note").textContent).toBe(
+      fillTemplate(t("en").confidenceWeeksTemplate, { n: 5 }),
+    );
+  });
+
+  it("shows no card before a destination is chosen, and does not go silent either", async () => {
+    render(<App />);
+    await screen.findByTestId("staleness");
+    await screen.findByRole("region", { name: t("en").mapLabel });
+
+    tapDot(CROWD[22]!);
+
+    // Nothing to rank against, so there is no row to render: three of the
+    // card's four fact tiles measure a trip that has no destination yet, and
+    // inventing one would be the manufactured number this app exists to refuse.
+    expect(screen.queryByTestId("pinned-lot")).toBeNull();
+    expect(screen.queryByTestId("lot-list")).toBeNull();
+    // The tap is still answered -- by the map's own popup -- and the page still
+    // says how to get the rest.
+    const popup = popups.opened.at(-1);
+    expect(popup?.content?.textContent).toContain(OUTSIDER_NAME);
+    expect(popup?.content?.textContent).toContain(`${OUTSIDER_PERCENT}%`);
+    expect(screen.getByText(t("en").startPromptMap)).toBeInTheDocument();
   });
 });

@@ -103,6 +103,16 @@
 .app-name { margin: 0; font-size: 15px; font-weight: 800; letter-spacing: -0.01em; }
 .list-head { margin: 12px 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
 
+/* The card for a car park the driver selected that the ranked list is not
+   drawing. Ruled off from the list below it, because the one thing it must
+   never read as is the top row of the ranking it is sitting above: its own
+   heading, its own explanatory line, and then a border the ranked list starts
+   under. No animation of its own -- it appears where a selection put it, and
+   the card inside already has the list's entrance. */
+.pinned { margin-bottom: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+.pinned .list-head { margin-top: 4px; }
+.pinned__note { margin: 0 0 8px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+
 /* ------------------------------------------------------------ freshness badge */
 .fresh { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--accent); border-radius: var(--radius-pill); padding: 4px 8px; }
 /* No idle animation. A dot that breathes forever keeps the compositor
