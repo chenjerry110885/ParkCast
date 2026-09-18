@@ -48,41 +48,77 @@ So:
 | Constant | Prices | Preference moves it? |
 |---|---|---|
 | `WALK_VALUE` | a minute walking from the car park to the destination | **yes** |
-| `DELAY_VALUE` | a minute lost circling, and driving to the fallback | **no**, fixed at 5 |
+| `DELAY_VALUE` | a minute lost circling, and driving to the fallback | **upward only**: `max(5, WALK_VALUE)` |
 
-`DELAY_VALUE` keeps today's value, so the failure branch is byte-for-byte what it is now and the
-2026-09-09 and 2026-09-14 calibrations stand unchanged.
+**`DELAY_VALUE = max(5, WALK_VALUE)` — floor-coupled, and that rule is measured, not reasoned.**
+An earlier draft of this spec pinned `DELAY_VALUE` at 5 outright. §5 shows why that is unsafe at the
+Closer end, and why coupling the two symmetrically — the obvious repair — is unsafe at the Cheaper
+end instead. The floor satisfies both: the delay price can never fall below today's value, so a
+preference still cannot erode the penalty for being sent away, but it rises with `WALK_VALUE` so
+that making walking expensive does not *relatively* cheapen being turned away.
 
 ## 4. The three presets
 
-| Preset | `WALK_VALUE` | What it means in practice |
-|---|---|---|
-| Cheaper | 2 | A 10-minute walk costs NT$20 against a typical NT$60–120 fare: fare dominates |
-| **Balanced** (default) | **5** | 10 minutes ≈ NT$50, comparable to the fare — today's behaviour, unchanged |
-| Closer | 12 | 10 minutes ≈ NT$120, more than a typical fare: distance dominates |
+| Preset | `WALK_VALUE` | `DELAY_VALUE` | What it means in practice |
+|---|---|---|---|
+| Cheaper | 2 | 5 | A 10-minute walk costs NT$20 against a typical NT$60–120 fare: fare dominates |
+| **Balanced** (default) | **5** | **5** | 10 minutes ≈ NT$50, comparable to the fare — today's behaviour, unchanged |
+| Closer | 12 | 12 | 10 minutes ≈ NT$120, more than a typical fare: distance dominates — and being turned away costs proportionately more too, which is what keeps it safe |
 
-Balanced is the current constant, so **an existing user who never opens the control sees exactly what
-they see today**. That is the property that makes this safe to ship.
+Only Closer's `DELAY_VALUE` moves. Balanced is the shipped pair unchanged, so **a driver who never
+opens the control sees exactly what they see today** — the property that makes this safe to ship.
 
 ## 5. The invariant: availability still leads
 
-**A preference re-weights walking against money. It must never reorder past probability.**
+**A preference must never make the app recommend a car park it believes is full.**
 
-Splitting the constants mostly achieves this by construction — the failure branch keeps its full
-weight under every preset. Checking the arithmetic at the extreme: a 20%-likely cheap lot 20 minutes
-away scores about NT$142 under *Cheaper*, against about NT$32 for a 90%-likely lot 5 minutes away.
-The probable lot wins comfortably, and it is the failure branch that does the work.
+The first draft of this spec said "must never reorder past probability", which is a stronger claim
+and **already false before this feature exists**. `scripts/probe-ranker.py` finds **11 inversions at
+the shipped constants**, the worst reaching position #3 — a lot at P=14% and 0 m outranking one at
+P=97% and 777 m, because the failure branch (NT$107.9) is narrowly cheaper than the likelier lot's
+total (NT$110.4). An invariant that fails on day one protects nothing.
 
-That reasoning is not evidence, so it does not ship as a comment.
+So the line is **position**, and the probe already argues why: *"A likely-full lot deep in a list is
+a trade-off the driver can see and reject; one at the top is the app recommending a car park it
+believes is full."* The invariant is that **no preset puts an inversion at #1**, and that no preset
+is materially worse than Balanced on inversion count or worst position.
 
-`scripts/probe-ranker.py` already measures orderings across the live roster, and it already
-**parses the constants out of the TypeScript rather than copying them**, precisely so a probe cannot
-report stale numbers as current. It gains a preference sweep: for every destination it samples, under
-all three presets, assert no ordering places a materially-less-likely lot above a materially-more-
-likely one. The threshold, the sample and the measured counts belong in the plan, not here.
+### What the measurement found
 
-Renaming `TIME_VALUE` will break `load_constants()`. That is the design working: the probe fails
-loudly rather than silently scoring the old world.
+Measured with a harness reusing the probe's own `Ranker`, `load_constants` and `count_inversions`,
+verified to reproduce the shipped figures exactly at 5/5. Lot-position destinations (the adversarial
+sample — you have driven somewhere and there is a car park right there):
+
+| Scheme | WALK | DELAY | Inversions | Worst | At #1 | far@20 |
+|---|---|---|---|---|---|---|
+| Cheaper, pinned | 2 | 5 | **0** | — | 0 | 19 |
+| Balanced (shipped) | 5 | 5 | 11 | #3 | 0 | 299 |
+| Closer, pinned | 12 | 5 | **35** | **#2** | 0 | **963** |
+| Cheaper, symmetric | 2 | 2 | **19** | **#2** | 0 | 618 |
+| **Closer, floor-coupled** | **12** | **12** | **8** | **#6** | 0 | **173** |
+
+Three findings, none of which survived being guessed at:
+
+1. **Closer is the dangerous direction, not Cheaper.** Every inversion has the shape *near, cheap,
+   unlikely* beating *far, expensive, likely*. Raising `WALK_VALUE` penalises only the **far** lot —
+   which is the reliable one — while the risky lot sits at the destination paying nothing.
+2. **Symmetric coupling fixes Closer and breaks Cheaper.** Dropping `DELAY_VALUE` to 2 makes being
+   turned away cheap, and Cheaper goes from 0 inversions to 19.
+3. **Floor-coupling fixes both.** Closer at 12/12 is safer than the *shipped* ranker on every
+   column — 8 inversions against 11, worst #6 against #3 — while still changing the top pick for
+   **29.8%** of destinations against the unsafe version's 30.3%. It loses none of its point.
+
+**Realistic destinations sharpen this rather than softening it.** Re-run over 700 points from the
+offline place index (POIs only, ≥ 50 m from every lot), the effect is larger, not smaller: Balanced
+88 inversions, Closer-pinned **603**, Cheaper-symmetric 195. Lot-position sampling was not
+exaggerating anything. **No scheme, in either sample, ever reaches #1.**
+
+### What ships as a check
+
+`probe-ranker.py` gains a preference sweep asserting the invariant above across both samples. It
+already **parses the constants out of the TypeScript rather than copying them**, precisely so a probe
+cannot report stale numbers as current — and renaming `TIME_VALUE` will break `load_constants()`,
+which is the design working: it fails loudly rather than silently scoring the old world.
 
 ## 6. What the list shows
 
