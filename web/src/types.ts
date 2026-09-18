@@ -63,6 +63,25 @@ export interface Lot {
    * forecast: the UI shows it with the reading's age for that reason.
    */
   f?: number | null;
+  /**
+   * 機車 (scooter/motorcycle) capacity, from Taipei's `totalmotor`.
+   *
+   * **Present, including `0`, when the feed reported it; absent when it did
+   * not** -- and the two mean different things all the way to the screen. `0`
+   * is a measurement ("this car park has no scooter bays"); absent is the
+   * absence of one, and rendering it as `0` would manufacture the measurement.
+   * Unlike `c`, a `0` here is never collapsed to "not reported" on the way out
+   * of `metadata.parse_metadata`: `totalcar` carries a second meaning about the
+   * lot's own type and this does not.
+   *
+   * Taipei-only today. The other five city adapters have no matching field and
+   * leave it at `None`, which publishes as no key at all -- so an absent `m` is
+   * the routine state outside Taipei, not an anomaly. Read it through
+   * `../amenities`, never directly, so the three states stay three.
+   */
+  m?: number;
+  /** 充電 (EV charging) points, from Taipei's `ChargingStation`. Same three states as `m`. */
+  e?: number;
 }
 
 export interface LotsDoc {

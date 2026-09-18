@@ -84,27 +84,31 @@
  *     be true and the answer would be useless. `COVERAGE_RADIUS_M` is where the
  *     list stops pretending. The map keeps drawing the whole city either way --
  *     it is the *ranking* that is meaningless out there, not the data.
- *   - **Every dot is tappable, and a tap on one the list does not show still
- *     gets a card.** The map draws the whole roster and the list draws
- *     twenty, so most dots on screen belong to no row: tapping one moved the
- *     map, drew a halo and answered nothing -- a dead end at 98% of the city.
- *     `pinned` is the row the ranker already scored for that lot, rendered
- *     above the list through the same `LotCard` with the same data, so the
- *     two can never drift into two versions of "the same detail". It is
- *     headed as the driver's own question rather than as a ranking position,
- *     and it deliberately never takes the "Best pick" crown or the pulsing
- *     dot -- see `bestId` for why that badge is withheld even from lots the
- *     ranking *did* rank. With no destination there is no ranking, no row to
- *     find and no card: three of the card's four fact tiles measure a trip
- *     that does not exist yet, and inventing a walk of "0 min" from a
- *     destination nobody named would be the kind of manufactured number the
- *     rest of this file exists to refuse -- and the same refusal bounds the
- *     card by distance, because a lot 16 km from the destination would fill
- *     that same tile with "206 min". `pinned` stops at `COVERAGE_RADIUS_M`,
- *     the edge the list already stops at. The tap is still answered out
- *     there -- the map's own popup names the lot and its chance, on the same
- *     "never 0% for no data" rule -- and `startPromptMap` says how to get the
- *     rest.
+ *   - **A tap is answered where the tap was.** Every dot on the map is
+ *     tappable, and tapping one used to move the map, draw a halo and answer
+ *     nothing -- a dead end at 98% of the city, because the list draws twenty
+ *     rows and the map draws the whole roster. The first fix put the missing
+ *     card at the top of the *list*, which the owner reported as the thing
+ *     that makes no sense: the detail appeared somewhere they then had to go
+ *     and find, and on a phone had to scroll to. So the card is now drawn on
+ *     the map itself, in `mapCard` -- the row the ranker already scored, in
+ *     the same `LotCard` the list uses, so the two can never drift into two
+ *     versions of "the same detail" -- floating in the band of map the top
+ *     bar and the sheet leave, with the tapped dot centred in what is left of
+ *     that band (see `mapCardDepthPx` and `padding`) so the card never covers the
+ *     dot it describes. It takes the "Best pick" crown only when the lot the
+ *     ranking crowned is the lot that was tapped; see `bestId` for why that
+ *     badge is withheld even from lots the ranking *did* rank. With no
+ *     destination there is no ranking, no row to find and no card: three of
+ *     the card's four fact tiles measure a trip that does not exist yet, and
+ *     inventing a walk of "0 min" from a destination nobody named would be the
+ *     kind of manufactured number the rest of this file exists to refuse --
+ *     and the same refusal bounds the card by distance, because a lot 16 km
+ *     from the destination would fill that same tile with "206 min".
+ *     `cardRowFor` stops at `COVERAGE_RADIUS_M`, the edge the list already
+ *     stops at. The tap is still answered out there -- the map's own popup
+ *     names the lot and its chance, on the same "never 0% for no data" rule --
+ *     and `startPromptMap` says how to get the rest.
  *   - **A destination can be typed.** `PlaceSearch` looks up car parks in the
  *     roster already in memory and everything else -- stations, landmarks,
  *     streets, neighbourhoods -- in an offline index built from the same
@@ -113,9 +117,11 @@
  *     phone -- which is the same promise the rest of this file makes, and would
  *     have been the first thing an address search quietly broke.
  */
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { answerable, exclusionFor, tallyHidden, toggleAmenity, type Amenity } from "./amenities";
 import { MAX_LEAD_SEC, MIN_LEAD_SEC, ceilToStep, clampArrival, defaultArrival, horizonFromReading } from "./arrival";
 import { artifactsBase, horizonColumn, loadArtifacts, loadWeek, probabilityAt } from "./artifacts";
+import { AmenityFilters } from "./components/AmenityFilters";
 import { ArrivalPicker } from "./components/ArrivalPicker";
 import { FreshnessBadge } from "./components/FreshnessBadge";
 import { LangToggle } from "./components/LangToggle";
@@ -127,12 +133,13 @@ import { PlaceSearch } from "./components/PlaceSearch";
 import { Skeleton } from "./components/Skeleton";
 import { TopBar } from "./components/TopBar";
 import type { LatLon } from "./geo";
+import { Cross } from "./icons";
 import { detectLang, fillTemplate, t, type Lang } from "./i18n";
 import { Shell, useIsDesktop } from "./layout/Shell";
 import { snapHeights, type Snap } from "./layout/sheet";
 import { toMapLot } from "./map/lotSource";
 import type { Place } from "./places";
-import { listRows, notUpdating, rankLots } from "./rank";
+import { listRows, notUpdating, rankLots, type Ranked } from "./rank";
 import type { Grid, Lot, LotsDoc, WeekTable } from "./types";
 import { useGeolocation } from "./useGeolocation";
 import { blend, probabilityAt as weekProbabilityAt } from "./week";
@@ -213,6 +220,13 @@ export const LIST_LIMIT = 20;
  */
 export const COVERAGE_RADIUS_M = 10_000;
 
+/**
+ * "No filters", as one frozen array rather than a fresh `[]` per render: it is
+ * a `useMemo` dependency below, and a new empty array every render would
+ * re-project the whole roster on every tick.
+ */
+const EMPTY_FILTERS: readonly Amenity[] = [];
+
 /** How often the staleness badge re-reads the clock. */
 const CLOCK_TICK_MS = 30_000;
 
@@ -256,6 +270,56 @@ const TOP_BAR_PX = 60;
 
 /** The side panel's width, mirroring `--panel-width`: the map's padding at the left. */
 const PANEL_PX = 420;
+
+/**
+ * How deep into the map's own band the card reaches, measured off the card
+ * that is on screen rather than declared beside it.
+ *
+ * **This was a constant, and the constant is what broke.** `MAP_CARD_PX = 288`
+ * was measured once, against a card with a confidence pill and four fact
+ * tiles. `c0ff877` then dropped the arrival tile and added two amenity ones:
+ * the card became 289 px at 375 px wide, and 385 px at 360 px, where
+ * `components.css` stacks the fact tiles into a single column. The number
+ * beside the code and the box on the screen drifted apart in silence, and at
+ * 360 px the eased dot landed *inside* the card that describes it -- the one
+ * thing this geometry exists to prevent. Nothing could have caught it: jsdom
+ * lays nothing out, so the test compared the offset against the same constant
+ * the offset came from, and the two agreed with each other all the way down.
+ *
+ * So the card is asked instead. `offsetTop` and `offsetHeight` are layout
+ * values: they ignore the entrance transform that `getBoundingClientRect`
+ * would have included, and read in a layout effect one commit after the card
+ * mounts they are the box the driver is about to look at. A tile added
+ * tomorrow moves the dot tomorrow, with nothing to update and nothing to
+ * remember.
+ *
+ * `bandTop` is `padding.top` -- where the strip of map the chrome leaves
+ * begins -- so the answer is how much of that strip the card is sitting on.
+ *
+ * **Spent as half of itself**, as the `offset` on the centre request: without
+ * one, `easeTo` puts the tapped lot in the middle of the band the top bar and
+ * the sheet leave, which is inside the card. Displacing it by half of what the
+ * card covers puts it in the middle of what the card leaves -- ~88 px clear of
+ * each on a 375x812 phone at `peek`, ~64 px at 360x740.
+ *
+ * Which is also why this is not folded into `padding`. Padding decides where
+ * on the canvas the map's centre is *drawn*, so adding the card's depth to it
+ * and taking it away again moves the whole picture by half that depth twice,
+ * and the second of those happens when the card is dismissed with no camera
+ * movement to absorb it: the map lurching as a card closes. The offset rides
+ * with the ease that is already happening instead.
+ *
+ * **The other half of the guarantee is in CSS.** Measuring puts the dot below
+ * whatever the card turned out to be, but it cannot invent room that is not
+ * there -- at 320x568 the card wants 309 px of a 268 px band, and no offset
+ * fixes that. `.map-card`'s own `max-height` in `styles/components.css` is
+ * what bounds it, so the gap this arithmetic centres the dot in is never empty
+ * however many tiles the card grows.
+ */
+function mapCardDepthPx(card: HTMLElement | null, bandTop: number): number {
+  if (card === null) return 0;
+  return Math.max(0, card.offsetTop + card.offsetHeight - bandTop);
+}
 
 interface Artifacts {
   grid: Grid;
@@ -416,8 +480,28 @@ export default function App() {
    * different a minute later the way a relative one can.
    */
   const [arrivalTs, setArrivalTs] = useState(() => defaultArrival(Math.floor(Date.now() / 1000)));
-  /** The lot tapped on the map or in the list. The map draws a halo; it does not own this. */
-  const [selectedLotId, setSelectedLotId] = useState<string | null>(null);
+  /**
+   * The lot tapped on the map or in the list, and which of the two it was.
+   * The map draws a halo; it does not own this.
+   *
+   * The source rides with the id rather than in a second piece of state, so
+   * the two cannot drift: a selection made in the list must never leave a
+   * `fromMap` flag behind from the tap before it, which is what would put a
+   * card over the map for a row the driver is already looking at. See
+   * `mapCard`, which is the only thing that reads it.
+   */
+  const [selected, setSelected] = useState<{ id: string; fromMap: boolean } | null>(null);
+  const selectedLotId = selected?.id ?? null;
+  /**
+   * Which of 機車 / 充電 the driver is filtering the list on. Empty is the
+   * unfiltered screen, and the one this app opens in.
+   *
+   * State rather than a URL parameter or storage on purpose: it is a question
+   * about this trip ("I am on a scooter today"), not a preference, and a
+   * filter silently restored from a previous session would shorten the list
+   * for a reason nothing on screen explains.
+   */
+  const [pressedFilters, setPressedFilters] = useState<readonly Amenity[]>([]);
   /**
    * The card the pointer is over, which the map answers with a faint ring on
    * that lot's dot (spec §5.6) -- the link between a row in the list and a point
@@ -429,8 +513,26 @@ export default function App() {
   const [centerRequest, setCenterRequest] = useState<{
     lat: number;
     lon: number;
+    offsetY: number;
     nonce: number;
   } | null>(null);
+  /**
+   * The same move, before the card it has to clear has been measured.
+   *
+   * A tap does two things at once: it draws a card and it moves the map out
+   * from under it. The second needs the first's height, and in the click
+   * handler the card does not exist yet -- which is the hole the old constant
+   * was filling. So a tap records *what* to centre here, and the layout effect
+   * below turns it into a real `centerRequest` once the card is on the page.
+   */
+  const [centerPending, setCenterPending] = useState<{
+    lat: number;
+    lon: number;
+    carded: boolean;
+    nonce: number;
+  } | null>(null);
+  /** The card the map draws, so its rendered box can be asked about. See `mapCardDepthPx`. */
+  const mapCardRef = useRef<HTMLElement | null>(null);
   const [snap, setSnap] = useState<Snap>("peek");
   /**
    * The viewport's height, because the sheet's is a fraction of it and the map
@@ -777,7 +879,7 @@ export default function App() {
   const pickDestination = useCallback((at: LatLon) => {
     abandonRef.current?.();
     clearFailureRef.current?.();
-    setSelectedLotId(null);
+    setSelected(null);
     setDestination(at);
   }, []);
 
@@ -787,6 +889,259 @@ export default function App() {
     clearFailureRef.current = clearFailure;
   }, [abandon, clearFailure]);
 
+  /**
+   * Which of the two filters the roster on hand can actually answer.
+   *
+   * **A control whose only possible outcome is an empty list is not a
+   * control.** `lots.json` carries `m` and `e` only from a collector built
+   * after `edc980b`, and the roster live today has 1,089 lots and neither key
+   * on any of them. Pressing 機車 against that roster is honest at every word
+   * -- the notice says "does not mention it at all, which is not the same as
+   * having none" -- and completely useless: no rows, every dot in the city
+   * dimmed, and a hidden count of twenty standing for 1,089. So the chip is
+   * not offered until some car park in the roster has answered the question it
+   * asks.
+   *
+   * This says something about the data on hand, never about a car park, so it
+   * breaks nothing the rest of this feature promises: a lot that reports zero
+   * scooter bays still keeps the chip on screen and is still hidden by it,
+   * because a reported zero is an answer. It is the same guard `listFilters`
+   * already applies one layer down -- refusing to act on a filter when there
+   * is no list for it to be a statement about -- and it covers the five cities
+   * still to come online as well as the window between the collector's rebuild
+   * and the web app's release.
+   */
+  const availableFilters = useMemo(
+    () => (artifacts === null ? EMPTY_FILTERS : answerable(artifacts.lots.lots)),
+    [artifacts],
+  );
+
+  /**
+   * The filters as the list may act on them: what the driver pressed, narrowed
+   * to what the roster can answer.
+   *
+   * Derived rather than pruned in place, because a roster can change under a
+   * pressed chip -- the app refetches `lots.json` and the collector's rebuild
+   * lands mid-session -- and a filter left active with no chip to unpress it
+   * would be a shorter list the driver has no way to lengthen again.
+   */
+  const filters = useMemo(
+    () => pressedFilters.filter((a) => availableFilters.includes(a)),
+    [pressedFilters, availableFilters],
+  );
+
+  /**
+   * Every lot, ranked. Not sliced: `listRows` decides what the list shows.
+   *
+   * Recomputed when the arrival time moves: a new column out of a grid already
+   * in memory, no request, no refetch.
+   */
+  const ranked = useMemo(() => {
+    if (artifacts === null || destination === null) return [];
+    const { grid: g, lots } = artifacts;
+    const rows = lots.lots;
+    return rankLots({
+      destination,
+      horizonMin: horizonFromReadingMin,
+      lots: rows,
+      // `rows[i]`, resolved through `Lot.i` inside: `rankLots` reports the array
+      // position it scored, and the grid row is the lot's own business.
+      probability: (i, h) => (withheld ? null : probabilityForLot(g, week, rows[i], h, arrivalTs)),
+    });
+  }, [artifacts, week, destination, horizonFromReadingMin, arrivalTs, withheld]);
+
+  /**
+   * The ranking, narrowed to the lots that have what the driver asked for.
+   *
+   * **Applied to the whole ranking and not to the list's own head**, which is
+   * the difference between a filter and a blindfold: 395 of Taipei's 1,773
+   * car parks have scooter bays, so filtering the twenty rows the list already
+   * shows would usually leave two or three and stop there, while the ranking
+   * has plenty more a little further down. Narrowing first and slicing after
+   * lets the list refill from the same ordering.
+   *
+   * It narrows and never reorders: `Array#filter` preserves order, so row 40's
+   * promotion to row 3 is the ranker's own verdict on the lots that remain,
+   * not a second opinion about them.
+   */
+  const matching = useMemo(
+    () => (filters.length === 0 ? ranked : ranked.filter((row) => exclusionFor(row.lot, filters) === null)),
+    [ranked, filters],
+  );
+
+  /**
+   * What the list draws: the head of the ranking, grown if the cap would
+   * otherwise drop a nearby lot the ranker kept on purpose. See `listRows`.
+   */
+  const listed = useMemo(() => listRows(matching, LIST_LIMIT), [matching]);
+
+  /**
+   * How many car parks the filter took out of the list, split by why.
+   *
+   * **The scope is the rows the list would have shown with no filter on** --
+   * `listRows(ranked, LIST_LIMIT)`, normally twenty. Not the whole roster: a
+   * tally of "1,050 hidden" is arithmetic about a city, and what a driver
+   * needs explained is the list in front of them that just got shorter. Not
+   * the filtered list either, which by construction has nothing hidden in it.
+   *
+   * **And it is two numbers, never one.** That is the whole reason this
+   * exists. "No car park near here takes scooters" and "the data doesn't say"
+   * are different answers, and a single hidden count would fuse them into the
+   * pessimistic one -- which is the same lie as rendering an absent `m` as
+   * `0`, just arrived at by subtraction. `exclusionFor` keeps them apart and
+   * the notice below prints both.
+   */
+  const hidden = useMemo(
+    () => tallyHidden(listRows(ranked, LIST_LIMIT).map((row) => row.lot), filters),
+    [ranked, filters],
+  );
+
+  /** Turn one filter chip on or off. Stable, so `AmenityFilters` never re-renders for a hover. */
+  const toggleFilter = useCallback((amenity: Amenity) => {
+    setPressedFilters((active) => toggleAmenity(active, amenity));
+  }, []);
+
+  /**
+   * The ranked row a dot on the map would be carded from, or `null`.
+   *
+   * Every dot is tappable and the ranking has a row for every lot, so this is
+   * a lookup rather than a second scoring path: `ranked` is every lot, against
+   * the same destination, at the same arrival, through the same ranker, so the
+   * card the map draws is exactly the card the list would have drawn for that
+   * car park. A second path would be a second thing to keep in step.
+   *
+   * `null` when no destination has been chosen, because `ranked` is empty then
+   * and there is no row to find. Three of the card's four fact tiles measure a
+   * trip that does not exist yet, and inventing a walk of "0 min" from a
+   * destination nobody named would be the kind of manufactured number the rest
+   * of this file exists to refuse. See the module comment.
+   *
+   * `null` too when the tapped lot is further than `COVERAGE_RADIUS_M` from the
+   * destination, which is the same edge the list stops at. `ranked` has no
+   * distance cutoff, so it scores a car park 16 km away as readily as one
+   * 200 m away, and the card would fill its walk tile with "206 min" -- every
+   * number of it true, and none of it a trip anybody is going to make. 100 of
+   * the roster's 1,090 lots are more than 10 km from Taipei 101, and the map
+   * draws and answers every one of them.
+   *
+   * Per row, not per destination. `outsideCoverage` below asks whether the
+   * *destination* has any car park near it, which says nothing about how far
+   * the *tapped* one is, so gating the card on it left the case above wide
+   * open. The per-row bound subsumes it in the other direction -- if nothing in
+   * `ranked` is within the radius then this row is not either.
+   *
+   * Either way the tap is still answered: `MapView` falls back to the popup it
+   * has always drawn -- the lot's name and its chance, on the same "never 0%
+   * for no data" rule -- for exactly the dots this returns `null` for, which is
+   * what `hasCard` below tells it, at the moment of the tap. `startPromptMap`
+   * and `outsideCoverage`'s notice say in words how to get the rest.
+   */
+  const cardRowFor = useCallback(
+    (id: string): Ranked | null => {
+      const row = ranked.find((r) => r.id === id) ?? null;
+      return row === null || row.meters > COVERAGE_RADIUS_M ? null : row;
+    },
+    [ranked],
+  );
+
+  /**
+   * The card the map is drawing, or `null`.
+   *
+   * **Where a tap is answered is where the tap was.** A dot tapped on the map
+   * gets its card on the map, over the dot's own surroundings; a row tapped in
+   * the list is already a card under the driver's finger and gets nothing new.
+   * The version this replaces put the card for a tapped dot at the top of the
+   * *list* instead, which the owner reported as the thing that makes no sense:
+   * "when user clicks something [it] does appear on the list but still has to
+   * scroll to see its detail". A card you have to go and find is not an answer
+   * to a tap, and on a phone at `half` the sheet's body is 224 px against a
+   * 255 px card, so finding it meant scrolling too.
+   *
+   * It is drawn for *every* dot, including one the list is already showing.
+   * Restricting it to lots outside the list -- which is what `pinned` did --
+   * rebuilds a smaller version of the same dead end: the twentieth row of a
+   * scrolled list is exactly as far from the driver's finger as no row at all.
+   * The row still highlights where it is, so the list keeps saying where the
+   * lot ranks; the map says what it is.
+   *
+   * `fromMap` is what keeps that rule honest in one place. Without it the card
+   * would also appear for a list tap, fighting the sheet for the same band of
+   * screen -- and at `full` there is no band to fight over.
+   */
+  const mapCard = useMemo(
+    () => (selected === null || !selected.fromMap ? null : cardRowFor(selected.id)),
+    [selected, cardRowFor],
+  );
+
+  /**
+   * Whether a tapped dot will be answered by the card above, asked at the
+   * moment of the tap.
+   *
+   * `MapView` builds its popup inside a MapLibre event handler, which runs
+   * before React has re-rendered anything -- so "is this dot carded?" cannot be
+   * read off a prop without being one selection out of date, and a dot whose
+   * card is about to open would flash a name-and-chance bubble first. A
+   * predicate is the same question asked at the only moment it can be answered.
+   */
+  const hasCard = useCallback((id: string) => cardRowFor(id) !== null, [cardRowFor]);
+
+  /** Dismiss the map card, and the selection it is about, together. */
+  const dismissMapCard = useCallback(() => setSelected(null), []);
+
+  /**
+   * How much history stands behind each rendered card's arrival hour, by lot id.
+   *
+   * A map rather than a callback because `LotList` is memoised: a fresh closure
+   * every render would defeat that memo on every mouse move across the list,
+   * which is the exact cost the memo was added to avoid. Built over the rows
+   * that actually render a card -- `listed`, plus the pinned lot when there is
+   * one -- and not the whole 1,075-lot roster, because a card is the only
+   * thing that shows a confidence grade.
+   *
+   * The map card's row belongs in here rather than being left to the `?? 0`
+   * default: `0` is `confidence.ts`'s thinnest evidence ("not watched at this
+   * time of week often enough yet"), so a map card missing from this map
+   * would read "Low · thin" beside list cards reading "High · 5 weeks" for the
+   * same arrival -- the card quietly *less* informative than the list's, which
+   * is the one thing it was added not to be. A card for a lot the list is also
+   * showing lands on the same key with the same value, so the duplicate costs
+   * nothing and the gate stays one line.
+   */
+  const supportById = useMemo(() => {
+    const carded = mapCard === null ? listed : [...listed, mapCard];
+    return new Map(carded.map((r) => [r.id, supportForLot(week, r.lot, arrivalTs)]));
+  }, [listed, mapCard, week, arrivalTs]);
+
+  /**
+   * The destination is somewhere this app cannot answer for.
+   *
+   * Read off the *nearest* lot rather than the best-ranked one: `ranked` is
+   * sorted by expected cost, so its first row is whichever car park won the
+   * trade between probability, walk and price -- which at 290 km is a lottery
+   * between a thousand equally hopeless candidates. Distance is the question
+   * being asked, so distance is what gets minimised.
+   *
+   * An empty ranking lands here too, and truthfully: with no car park in the
+   * roster, none is within `COVERAGE_RADIUS_M` of anywhere.
+   */
+  const outsideCoverage = useMemo(() => {
+    if (destination === null || artifacts === null) return false;
+    return ranked.every((row) => row.meters > COVERAGE_RADIUS_M);
+  }, [artifacts, destination, ranked]);
+
+  /**
+   * The filters, as the *map* is allowed to act on them: only while the ranked
+   * list they belong to is actually on screen. See `mapLots` below.
+   */
+  const listFilters = destination !== null && !outsideCoverage ? filters : EMPTY_FILTERS;
+
+  /**
+   * Moved below `ranked` and `outsideCoverage` for one reason, and it is the
+   * `filteredOut` flag below: the dimming is a statement about a list, so it
+   * has to know whether there is a list. **The dots themselves still wait for
+   * nothing** -- every lot is projected here whatever the destination is, which
+   * is the eighth point in the module comment and is not weakened by the move.
+   */
   /**
    * Every lot the map draws, projected straight from the artifacts.
    *
@@ -805,11 +1160,34 @@ export default function App() {
     return lots.lots.map((lot) =>
       // Nothing we hold answers this arrival, and the dot goes grey -- the same
       // "no data" the map already draws for an unknown cell.
-      toMapLot(lot, withheld ? null : probabilityForLot(g, week, lot, horizonFromReadingMin, arrivalTs)),
+      toMapLot(
+        lot,
+        withheld ? null : probabilityForLot(g, week, lot, horizonFromReadingMin, arrivalTs),
+        // **Every lot still gets a dot.** The filter dims the ones it took out
+        // of the list; it never deletes them from the map. The map is the city
+        // and the list is the recommendation, and a car park that vanished
+        // from a map of car parks would be this project's own "silently absent
+        // lot" failure, dressed up as a feature -- which is also exactly what
+        // the owner's rule for this ("filter narrows, never hides silently")
+        // rules out. So the flag says one thing and one thing only: *the list
+        // you are looking at left this out*. It is not a claim about the car
+        // park -- a lot that reported no scooter bays and a lot that said
+        // nothing about them are both simply not in the list, and tapping
+        // either still opens the full card, which then tells the truth about
+        // that field per `AmenityTile`.
+        //
+        // Which is also why it is `listFilters` and not `filters`: with no
+        // destination, or one the ranking has no answer for, there is no list
+        // on screen for anything to have been left out of, and the chips that
+        // would explain the dimming are not rendered either. A filter left on
+        // from an earlier destination would otherwise fade half the city with
+        // nothing on screen saying why, or how to stop it.
+        exclusionFor(lot, listFilters) !== null,
+      ),
     );
     // `withheld` rather than `nowSec`: a boolean that flips at most once as the
     // clock walks, so this does not re-project 1,075 lots on every tick.
-  }, [artifacts, week, horizonFromReadingMin, arrivalTs, withheld]);
+  }, [artifacts, week, horizonFromReadingMin, arrivalTs, withheld, listFilters]);
 
   /**
    * Every probability on screen was read out of `week.bin` rather than out of
@@ -837,154 +1215,6 @@ export default function App() {
     [needsWeek, mapLots],
   );
 
-  /**
-   * Every lot, ranked. Not sliced: `listRows` decides what the list shows.
-   *
-   * Recomputed when the arrival time moves: a new column out of a grid already
-   * in memory, no request, no refetch.
-   */
-  const ranked = useMemo(() => {
-    if (artifacts === null || destination === null) return [];
-    const { grid: g, lots } = artifacts;
-    const rows = lots.lots;
-    return rankLots({
-      destination,
-      horizonMin: horizonFromReadingMin,
-      lots: rows,
-      // `rows[i]`, resolved through `Lot.i` inside: `rankLots` reports the array
-      // position it scored, and the grid row is the lot's own business.
-      probability: (i, h) => (withheld ? null : probabilityForLot(g, week, rows[i], h, arrivalTs)),
-    });
-  }, [artifacts, week, destination, horizonFromReadingMin, arrivalTs, withheld]);
-
-  /**
-   * What the list draws: the head of the ranking, grown if the cap would
-   * otherwise drop a nearby lot the ranker kept on purpose. See `listRows`.
-   */
-  const listed = useMemo(() => listRows(ranked, LIST_LIMIT), [ranked]);
-
-  /**
-   * The car park the driver selected that the list is not drawing, or `null`.
-   *
-   * The map draws every lot in the roster and `listed` draws about twenty of
-   * them, so most dots on screen belong to no row -- and `LotList` only
-   * renders a card for a row it was handed. The card for a lot outside the
-   * list therefore has to be rendered here, or a tap on the other 98% of the
-   * city is a halo and nothing else.
-   *
-   * Found in `ranked` rather than scored again: `ranked` is every lot, against
-   * the same destination, at the same arrival, through the same ranker, so
-   * this is exactly the row the list would have drawn had the cap reached it.
-   * A second scoring path would be a second thing to keep in step with the
-   * first. A lot already in `listed` is not pinned -- it has a card, and a
-   * copy of it above the list would be the same car park twice.
-   *
-   * `null` when no destination has been chosen, because `ranked` is empty
-   * then and there is no row to find. See the module comment.
-   *
-   * `null` too when the tapped lot is further than `COVERAGE_RADIUS_M` from
-   * the destination, which is the same edge the list stops at. `ranked` has
-   * no distance cutoff, so it scores a car park 16 km away as readily as one
-   * 200 m away, and the card would fill its walk tile with "206 min" -- every
-   * number of it true, and none of it a trip anybody is going to make. That is
-   * the manufactured walk the no-destination case already refuses, reached
-   * here from *inside* coverage: 100 of the roster's 1,090 lots are more than
-   * 10 km from Taipei 101, and the map draws and answers every one of them.
-   *
-   * Per row, not per destination. `outsideCoverage` below asks whether the
-   * *destination* has any car park near it, which says nothing about how far
-   * the *tapped* one is, so gating this card on it left the case above wide
-   * open. The per-row bound subsumes it in the other direction -- if nothing
-   * in `ranked` is within the radius then this row is not either -- which is
-   * why the render gate below no longer repeats it.
-   *
-   * Out there the tap is answered the way the no-destination tap is: `MapView`
-   * opens its popup on every dot, with the lot's name and its chance on the
-   * same "never 0% for no data" rule, and `outsideCoverage`'s notice says in
-   * words how far away everything is. One rule either way -- a card needs a
-   * trip worth describing, and past that the popup answers instead.
-   */
-  const pinned = useMemo(() => {
-    if (selectedLotId === null) return null;
-    if (listed.some((row) => row.id === selectedLotId)) return null;
-    const row = ranked.find((r) => r.id === selectedLotId) ?? null;
-    if (row === null || row.meters > COVERAGE_RADIUS_M) return null;
-    return row;
-  }, [selectedLotId, listed, ranked]);
-
-  /** The pinned card's own node, so the effect below can bring it into view. */
-  const pinnedRef = useRef<HTMLDivElement>(null);
-  const pinnedId = pinned?.id ?? null;
-
-  /**
-   * A card rendered into a surface the driver cannot see is the dead end this
-   * whole path exists to close, with extra steps. Three things put it in
-   * front of them, and none of the three is enough alone:
-   *
-   *   - `selectLot` already opens a `peek` sheet to `half` on a phone. That
-   *     is what makes any selection visible at all, and it predates this.
-   *   - The card is at the *top* of the results body, above the ranked list,
-   *     so the sheet does not have to be open far to reach it.
-   *   - ...and this: the body is a scroll container the driver may have
-   *     scrolled a long way down -- the desktop panel always, the sheet at
-   *     `half` and `full` (see `.sheet__body` in `styles/components.css`) --
-   *     and a card inserted at the top of a scrolled one appears off screen.
-   *     `"nearest"` scrolls the least it can, and does nothing at all when
-   *     the card is already in view, so a selection that was already visible
-   *     is never yanked around.
-   *
-   * A card is taller than the half sheet's body either way (227 px against
-   * 224 px on an 812 px phone), so the last of the driver's own scroll is
-   * theirs to make -- exactly as it already is for the first card of the
-   * ranked list, which has the same two measurements.
-   *
-   * Instant, not smooth: nothing here animates, so `prefers-reduced-motion`
-   * has nothing to honour. Optional-called because jsdom has no
-   * `scrollIntoView` -- the same reason `PlaceSearch` guards its own.
-   */
-  useEffect(() => {
-    if (pinnedId === null) return;
-    pinnedRef.current?.scrollIntoView?.({ block: "nearest" });
-  }, [pinnedId]);
-
-  /**
-   * How much history stands behind each rendered card's arrival hour, by lot id.
-   *
-   * A map rather than a callback because `LotList` is memoised: a fresh closure
-   * every render would defeat that memo on every mouse move across the list,
-   * which is the exact cost the memo was added to avoid. Built over the rows
-   * that actually render a card -- `listed`, plus the pinned lot when there is
-   * one -- and not the whole 1,075-lot roster, because a card is the only
-   * thing that shows a confidence grade.
-   *
-   * The pinned row belongs in here rather than being left to the `?? 0`
-   * default: `0` is `confidence.ts`'s thinnest evidence ("not watched at this
-   * time of week often enough yet"), so a pinned card missing from this map
-   * would read "Low · thin" beside list cards reading "High · 5 weeks" for the
-   * same arrival -- the card quietly *less* informative than the list's, which
-   * is the one thing it was added not to be.
-   */
-  const supportById = useMemo(() => {
-    const carded = pinned === null ? listed : [...listed, pinned];
-    return new Map(carded.map((r) => [r.id, supportForLot(week, r.lot, arrivalTs)]));
-  }, [listed, pinned, week, arrivalTs]);
-
-  /**
-   * The destination is somewhere this app cannot answer for.
-   *
-   * Read off the *nearest* lot rather than the best-ranked one: `ranked` is
-   * sorted by expected cost, so its first row is whichever car park won the
-   * trade between probability, walk and price -- which at 290 km is a lottery
-   * between a thousand equally hopeless candidates. Distance is the question
-   * being asked, so distance is what gets minimised.
-   *
-   * An empty ranking lands here too, and truthfully: with no car park in the
-   * roster, none is within `COVERAGE_RADIUS_M` of anywhere.
-   */
-  const outsideCoverage = useMemo(() => {
-    if (destination === null || artifacts === null) return false;
-    return ranked.every((row) => row.meters > COVERAGE_RADIUS_M);
-  }, [artifacts, destination, ranked]);
 
   /**
    * The one lot the list crowns, and the only dot that pulses.
@@ -1013,19 +1243,80 @@ export default function App() {
    * A lot was chosen, in the list or on the map. One path for both, so the
    * halo, the centred view and the card's selected state can never disagree
    * about which lot is current.
+   *
+   * `fromMap` is the one thing the two ends do not share, and it decides two
+   * things: whether the card is drawn over the map (see `mapCard`), and which
+   * way the sheet moves on a phone.
    */
-  const selectLot = useCallback((id: string) => {
+  const selectLot = useCallback((id: string, fromMap = false) => {
     const lot = artifacts?.lots.lots.find((l) => l.id === id);
-    setSelectedLotId(id);
+    // Whether this selection is about to put a card over the top of the map
+    // band, which is the only reason the lot is not centred in the middle of
+    // that band. See `mapCardDepthPx`.
+    const carded = fromMap && cardRowFor(id) !== null;
+    setSelected({ id, fromMap });
     // The nonce, not the coordinates, is what makes the map move: tapping the
-    // same card twice is two requests, and the map must honour both.
-    if (lot) setCenterRequest((c) => ({ lat: lot.y, lon: lot.x, nonce: (c?.nonce ?? 0) + 1 }));
-    // On a phone the sheet is covering the half of the map the lot just moved
-    // into; opening it a step is what makes the selection visible at all.
-    if (!desktop && snap === "peek") setSnap("half");
+    // same card twice is two requests, and the map must honour both. How far
+    // below centre the lot has to land is not decided here -- the card whose
+    // height decides it has not been drawn yet.
+    if (lot) {
+      setCenterPending((c) => ({
+        lat: lot.y,
+        lon: lot.x,
+        carded,
+        nonce: (c?.nonce ?? 0) + 1,
+      }));
+    }
+    if (desktop) return;
+    // A dot tapped on the map is answered on the map, and the card needs the
+    // band the sheet is sitting in: at `half` the sheet leaves 305 px between
+    // the top bar and its own top edge, and the card's slot alone is 288 of
+    // them. So the sheet steps *down*, which is the opposite of what this did
+    // when the answer was in the sheet -- and it is the same reason both
+    // times. Only when there is a card to make room for: a dot outside
+    // coverage is answered by the map's popup, and moving the list for a
+    // popup would be a surprise with nothing behind it.
+    if (fromMap) {
+      if (carded) setSnap("peek");
+      return;
+    }
+    // A row tapped in the list at `peek`: 53 px of body is a hint that there
+    // is a list, not enough of one to read the card that was just tapped.
+    if (snap === "peek") setSnap("half");
     // Stable across a hover-only render, which is what lets `LotList`'s memo
     // hold: a fresh closure here would defeat it on every mouse move.
-  }, [artifacts, desktop, snap]);
+  }, [artifacts, desktop, snap, cardRowFor]);
+
+  /**
+   * The pending move, once the card it has to clear can be measured.
+   *
+   * A layout effect and not an ordinary one: it runs in the same commit that
+   * put the card in the document, before the browser has painted, so the ease
+   * begins on the frame the tap did rather than one after it. Two renders,
+   * still exactly one `easeTo` -- `MapView` keys the camera on the nonce
+   * alone, and the nonce is carried through unchanged from the tap.
+   *
+   * `desktop` is a dependency because it moves the band's top edge (the side
+   * panel pads the left, the top bar the top). A layout flip while a card is
+   * open re-runs this with the same nonce, which recomputes the offset for the
+   * next tap and moves nothing now.
+   */
+  useLayoutEffect(() => {
+    if (centerPending === null) return;
+    const { lat, lon, carded, nonce } = centerPending;
+    const depth = carded ? mapCardDepthPx(mapCardRef.current, desktop ? 0 : TOP_BAR_PX) : 0;
+    setCenterRequest({ lat, lon, offsetY: depth / 2, nonce });
+  }, [centerPending, desktop]);
+
+  /**
+   * The same selection, made by a tap on a dot.
+   *
+   * `MapView`'s `onSelectLot` is `(id) => void` on purpose -- the map reports a
+   * lot, it does not know or care what the app does about it -- so the source
+   * of the tap is bound here rather than becoming a second argument the map
+   * would have to be trusted to pass.
+   */
+  const selectLotOnMap = useCallback((id: string) => selectLot(id, true), [selectLot]);
 
   /**
    * A place chosen by name. Straight into the one destination path a map tap
@@ -1043,8 +1334,13 @@ export default function App() {
    * What the sheet or the panel covers, in pixels. MapLibre centres on the
    * middle of the *unpadded* canvas, so without this a lot the driver just
    * tapped arrives underneath the sheet that is showing it.
+   *
+   * The map card is deliberately *not* in here -- see `mapCardDepthPx`, half of
+   * whose answer is spent on the centre request's offset instead. This stays what
+   * it has always been: the chrome that is always there.
    */
-  const sheetHeight = snapHeights(viewportHeight, TOP_BAR_PX)[snap];
+  const snaps = snapHeights(viewportHeight, TOP_BAR_PX);
+  const sheetHeight = snaps[snap];
   const padding = desktop
     ? { left: PANEL_PX, top: 0, right: 0, bottom: 0 }
     : { left: 0, top: TOP_BAR_PX, right: 0, bottom: sheetHeight };
@@ -1107,7 +1403,8 @@ export default function App() {
         selectedId={selectedLotId}
         bestId={bestId}
         hoverId={hoverLotId}
-        onSelectLot={selectLot}
+        onSelectLot={selectLotOnMap}
+        hasCard={hasCard}
         centerRequest={centerRequest}
         padding={padding}
       />
@@ -1129,9 +1426,84 @@ export default function App() {
       onSnapChange={setSnap}
       lang={lang}
       overlay={
-        artifacts !== null && destination === null ? (
-          <p className="map-hint glass anim-slide-down">{s.startPromptMap}</p>
-        ) : null
+        <>
+          {artifacts !== null && destination === null && (
+            <p className="map-hint glass anim-slide-down">{s.startPromptMap}</p>
+          )}
+          {/* The card for the car park the driver tapped, drawn *on the map*.
+              It sits in the overlay slot rather than in the sheet or the panel
+              because that is the whole of the change: a tap on a dot is
+              answered over the dot's own surroundings, not in the surface the
+              ranked list lives in. `padding` above has already told MapLibre
+              that this band is covered, so the dot the card is about is
+              centred below it rather than under it.
+
+              `best` is compared against `bestId` rather than hard-wired: the
+              card is now drawn for listed lots too, and the lot the ranking
+              crowned is allowed to wear its crown here. Every other lot is
+              `false` by the same comparison -- `bestId` only ever names a row
+              in `listed` with a forecast and a live feed (see `bestId`), so a
+              lot the ranking could not vouch for cannot match it, and a car
+              park the cap never reached cannot either.
+
+              The hint above and this are mutually exclusive by construction:
+              the hint needs no destination, and `mapCard` needs one. */}
+          {artifacts !== null && mapCard !== null && (
+            <section
+              className="map-card"
+              data-testid="map-card"
+              aria-label={s.selectedCarPark}
+              ref={mapCardRef}
+              // Where the sheet rests while a card is open -- opening one
+              // steps the sheet down to `peek` -- so `.map-card`'s own
+              // `max-height` can be written against the band the card and its
+              // dot have to share. From `snapHeights`, which is the one place
+              // that knows how tall a peeking sheet is; a second copy of that
+              // arithmetic in CSS would be the drift this whole change is
+              // about, one layer over.
+              style={{ "--sheet-peek": `${snaps.peek}px` } as CSSProperties}
+            >
+              <button
+                type="button"
+                className="map-card__dismiss"
+                aria-label={s.dismissCard}
+                onClick={dismissMapCard}
+              >
+                <Cross />
+              </button>
+              {/* A list of one, because `LotCard` is an `<li>` and an `<li>`
+                  with no list around it is invalid markup. Unordered: one card
+                  has no order to announce, and `.lots` is only carrying the
+                  card's own spacing here. */}
+              <ul className="lots">
+                <LotCard
+                  // Keyed by lot, exactly as `LotList` keys its rows: without
+                  // it React reuses one card across two car parks, and
+                  // `ProbabilityRing`'s tween animates the first lot's
+                  // percentage into the second's -- a number that belongs to
+                  // neither of them while it is on screen.
+                  key={mapCard.id}
+                  row={mapCard}
+                  lang={lang}
+                  baseDataTs={artifacts.grid.baseDataTs}
+                  ageMin={ageMin ?? 0}
+                  horizonFromReadingMin={horizonFromReadingMin}
+                  support={supportById.get(mapCard.id) ?? 0}
+                  fromHistory={fromHistory}
+                  best={mapCard.id === bestId}
+                  selected
+                  // Tapping the card itself re-centres the map on its lot and
+                  // keeps the card: routing this through the list's own
+                  // `selectLot` would clear `fromMap` and close the card the
+                  // tap landed on.
+                  onSelect={selectLotOnMap}
+                  onHover={setHoverLotId}
+                  index={0}
+                />
+              </ul>
+            </section>
+          )}
+        </>
       }
     >
       {loadFailed && (
@@ -1192,52 +1564,6 @@ export default function App() {
           {fillTemplate(s.outsideCoverage, { km: COVERAGE_RADIUS_M / 1000 })}
         </Notice>
       )}
-      {/* The card for a lot the ranked list below is not drawing, pinned over
-          it. Above the list and not inside it, because it is not a position in
-          the ranking and must never read as one: the heading and the line
-          under it say whose question it answers, and `best` is hard-wired
-          `false` rather than compared against `bestId` -- a lot outside
-          `listed` can never *be* `bestId`, and spelling that out here is what
-          keeps a later edit to either from quietly crowning a car park the
-          ranking never vouched for. One gate, not three: `pinned` is already
-          `null` without a destination (there is nothing to rank against), and
-          already `null` for a lot further out than `COVERAGE_RADIUS_M` --
-          which covers a destination with nothing near it too, since then no
-          row is inside the radius at all. Only `artifacts` is re-checked, and
-          only because the card reads `baseDataTs` off it below. */}
-      {artifacts !== null && pinned !== null && (
-        <div className="pinned" data-testid="pinned-lot" ref={pinnedRef}>
-          <h2 className="list-head">{s.selectedCarPark}</h2>
-          <p className="pinned__note">{s.selectedCarParkNote}</p>
-          {/* A list of one, because `LotCard` is an `<li>` and an `<li>` with
-              no list around it is invalid markup. Unordered: one card has no
-              order to announce, and `.lots` is only carrying the card's own
-              spacing here. */}
-          <ul className="lots">
-            <LotCard
-              // Keyed by lot, exactly as `LotList` keys its rows: without it
-              // React reuses one card across two car parks, and
-              // `ProbabilityRing`'s tween animates the first lot's percentage
-              // into the second's -- a number that belongs to neither of them
-              // while it is on screen.
-              key={pinned.id}
-              row={pinned}
-              lang={lang}
-              baseDataTs={artifacts.grid.baseDataTs}
-              ageMin={ageMin ?? 0}
-              arrivalTs={arrivalTs}
-              horizonFromReadingMin={horizonFromReadingMin}
-              support={supportById.get(pinned.id) ?? 0}
-              fromHistory={fromHistory}
-              best={false}
-              selected
-              onSelect={selectLot}
-              onHover={setHoverLotId}
-              index={0}
-            />
-          </ul>
-        </div>
-      )}
       {artifacts !== null && destination !== null && !outsideCoverage && (
         <>
           {/* The heading follows what the order actually means: with no forecast
@@ -1250,12 +1576,46 @@ export default function App() {
           <h2 className="list-head">
             {forecastExpired && !fromHistory ? s.nearbyCarParks : s.rankedForArrival}
           </h2>
+          <AmenityFilters active={filters} available={availableFilters} onToggle={toggleFilter} lang={lang} />
+          {/* "Filter narrows, never hides silently." A shorter list with no
+              explanation reads as a city with nothing in it, so what the
+              filter removed is reported here -- as two counts, because a car
+              park that reported none and one that reported nothing are
+              different facts and only the first is a reason to stop looking.
+              Each line appears only when its own count is non-zero, so a
+              filter that hid nothing says nothing.
+
+              Both templates come in a singular and a plural, chosen on the
+              count the way `ConfidencePill` chooses between
+              `confidenceWeekTemplate` and `confidenceWeeksTemplate`; zh's two
+              are the same text, so the branch is a no-op there. "1 car parks
+              are hidden" is common on the unknown line especially. */}
+          {(listed.length === 0 || hidden.none > 0 || hidden.unknown > 0) && filters.length > 0 && (
+            <Notice tone="info" testId="filter-hidden" role="status">
+              {listed.length === 0 && <>{s.filterNoMatch} </>}
+              {hidden.none > 0 && (
+                <span data-testid="filter-hidden-none">
+                  {fillTemplate(
+                    hidden.none === 1 ? s.filterHiddenNoneOneTemplate : s.filterHiddenNoneTemplate,
+                    { n: hidden.none },
+                  )}{" "}
+                </span>
+              )}
+              {hidden.unknown > 0 && (
+                <span data-testid="filter-hidden-unknown">
+                  {fillTemplate(
+                    hidden.unknown === 1 ? s.filterHiddenUnknownOneTemplate : s.filterHiddenUnknownTemplate,
+                    { n: hidden.unknown },
+                  )}
+                </span>
+              )}
+            </Notice>
+          )}
           <LotList
             rows={listed}
             lang={lang}
             baseDataTs={artifacts.grid.baseDataTs}
             ageMin={ageMin ?? 0}
-            arrivalTs={arrivalTs}
             horizonFromReadingMin={horizonFromReadingMin}
             supportById={supportById}
             fromHistory={fromHistory}

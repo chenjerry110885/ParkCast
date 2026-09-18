@@ -14,13 +14,13 @@ const row = (over: Partial<Ranked> = {}, lotOver: Partial<Lot> = {}): Ranked => 
 // `support: 0` is the honest default, not a placeholder: a card the week table
 // has never been consulted for has no history behind this half-hour to cite.
 // Tests that want history say so themselves.
-const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, arrivalTs: BASE + 22 * 60, horizonFromReadingMin: 22, support: 0, fromHistory: false, onSelect: vi.fn(), index: 0 };
+const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, horizonFromReadingMin: 22, support: 0, fromHistory: false, onSelect: vi.fn(), index: 0 };
 
 beforeEach(() => vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} }))));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("LotCard", () => {
-  it("shows P, walk, price, the observed count with its age, and the arrival time as separate facts", () => {
+  it("shows P, walk, price and the observed count with its age as separate facts", () => {
     render(<ol><LotCard row={row()} {...props} best selected={false} /></ol>);
     const card = screen.getByTestId("lot-row");
     expect(within(card).getByTestId("lot-probability")).toHaveTextContent("86%");
@@ -28,11 +28,22 @@ describe("LotCard", () => {
     expect(within(card).getByTestId("lot-walk")).toHaveTextContent("320 m");
     expect(within(card).getByTestId("lot-price")).toHaveTextContent("NT$60");
     expect(within(card).getByTestId("lot-spaces")).toHaveTextContent("38 / 400 free · 4 min ago");
-    expect(within(card).getByTestId("lot-arrival")).toHaveTextContent("15:10");
     expect(within(card).getByText(t("en").bestPick)).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: /confidence.*high/i })).toBeInTheDocument();
     expect(card).toHaveClass("lot-card--best");
     expect(card.textContent).not.toMatch(/cost|NT\$100/);
+  });
+
+  it("does not repeat the arrival time the driver already chose", () => {
+    // It was a fact tile until the owner's colleague pointed out that every
+    // card was restating one number the picker had just been set to and the
+    // readout above the list already shows. `arrivalTs` is 15:10 Taipei here,
+    // so a card that still carried it -- as a tile, or anywhere else -- would
+    // put that clock time on screen.
+    render(<ol><LotCard row={row()} {...props} best selected={false} /></ol>);
+    const card = screen.getByTestId("lot-row");
+    expect(within(card).queryByTestId("lot-arrival")).toBeNull();
+    expect(card.textContent).not.toContain("15:10");
   });
 
   it("omits the count tile without an observation, and shows the count alone without a capacity", () => {
@@ -40,6 +51,58 @@ describe("LotCard", () => {
     expect(screen.queryByTestId("lot-spaces")).toBeNull();
     rerender(<ol><LotCard row={row({}, { f: 7, c: null })} {...props} best={false} selected={false} /></ol>);
     expect(screen.getByTestId("lot-spaces")).toHaveTextContent("7 free · 4 min ago");
+  });
+
+  it("shows the scooter and charging counts a car park reported", () => {
+    render(<ol><LotCard row={row({}, { m: 120, e: 8 })} {...props} best={false} selected={false} /></ol>);
+    const card = screen.getByTestId("lot-row");
+    expect(within(card).getByTestId("lot-scooter")).toHaveTextContent("120");
+    expect(within(card).getByTestId("lot-scooter")).toHaveTextContent(t("en").scooterTile);
+    expect(within(card).getByTestId("lot-charging")).toHaveTextContent("8");
+    expect(within(card).getByTestId("lot-charging")).toHaveTextContent(t("en").chargingTile);
+  });
+
+  it("tells a reported zero from a field the feed never mentioned, on one card", () => {
+    // **The test the rest of this feature rests on.** `m: 0` is a measurement
+    // -- this car park was asked and has no scooter bays -- and `e` absent is
+    // the absence of one. They must not render the same way, and a test that
+    // only checked the zero case would pass just as happily against code that
+    // rendered both as "None". So both states sit on the same card and are
+    // asserted against each other:
+    //
+    //   - render absent as 0/"None" and the charging tile appears -> fails;
+    //   - drop the zero as if it were absent and the scooter tile goes -> fails;
+    //   - print the zero as a bare "0" and the `amenityNone` check fails.
+    render(<ol><LotCard row={row({}, { m: 0 })} {...props} best={false} selected={false} /></ol>);
+    const card = screen.getByTestId("lot-row");
+    const scooter = within(card).getByTestId("lot-scooter");
+    expect(scooter).toHaveTextContent(t("en").amenityNone);
+    expect(scooter.querySelector(".fact__value")?.textContent).not.toBe("0");
+    expect(within(card).queryByTestId("lot-charging")).toBeNull();
+    // ...and nothing else on the card leaked the word in from somewhere else.
+    expect(card.textContent).not.toContain(t("en").chargingTile);
+  });
+
+  it("says nothing at all about either field when neither was reported", () => {
+    // The default fixture carries no `m` and no `e`, which is what every lot
+    // outside Taipei publishes. Two absent tiles, not two zeroes.
+    render(<ol><LotCard row={row()} {...props} best={false} selected={false} /></ol>);
+    const card = screen.getByTestId("lot-row");
+    expect(within(card).queryByTestId("lot-scooter")).toBeNull();
+    expect(within(card).queryByTestId("lot-charging")).toBeNull();
+    expect(card.textContent).not.toContain(t("en").amenityNone);
+    expect(card.textContent).not.toContain(t("en").scooterTile);
+  });
+
+  it("says the same two things in Chinese", () => {
+    // The zero and the silence have to stay distinguishable under the zh
+    // dictionary too -- this is the language the owner reviews, and 0 and
+    // "未提供" collapsing into one another is not a bug an English-only
+    // test would ever see.
+    render(<ol><LotCard row={row({}, { m: 0, e: 3 })} {...props} lang="zh" best={false} selected={false} /></ol>);
+    const card = screen.getByTestId("lot-row");
+    expect(within(card).getByTestId("lot-scooter")).toHaveTextContent(`${t("zh").amenityNone}${t("zh").scooterTile}`);
+    expect(within(card).getByTestId("lot-charging")).toHaveTextContent(`3${t("zh").chargingTile}`);
   });
 
   it("says no data for a missing forecast, with no confidence and never 0%", () => {

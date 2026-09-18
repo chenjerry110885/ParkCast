@@ -103,16 +103,6 @@
 .app-name { margin: 0; font-size: 15px; font-weight: 800; letter-spacing: -0.01em; }
 .list-head { margin: 12px 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); }
 
-/* The card for a car park the driver selected that the ranked list is not
-   drawing. Ruled off from the list below it, because the one thing it must
-   never read as is the top row of the ranking it is sitting above: its own
-   heading, its own explanatory line, and then a border the ranked list starts
-   under. No animation of its own -- it appears where a selection put it, and
-   the card inside already has the list's entrance. */
-.pinned { margin-bottom: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-.pinned .list-head { margin-top: 4px; }
-.pinned__note { margin: 0 0 8px; font-size: 12px; line-height: 1.45; color: var(--muted); }
-
 /* ------------------------------------------------------------ freshness badge */
 .fresh { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; color: var(--accent); border-radius: var(--radius-pill); padding: 4px 8px; }
 /* No idle animation. A dot that breathes forever keeps the compositor
@@ -191,6 +181,29 @@
   background: var(--surface); color: var(--text); font-weight: 700; font-size: 14px;
 }
 
+/* ------------------------------------------------------------ list filters */
+/*
+ * The 機車 / 充電 chips over the ranked list. Same shape and the same 44 px
+ * floor as `.qchip` above, but outlined rather than filled when off, so the
+ * row reads as two switches a driver can turn on and not as two more quick
+ * actions -- and `[aria-pressed="true"]` is what colours them, so the pressed
+ * look cannot drift out of step with the state a screen reader is told.
+ *
+ * Nothing here animates at rest: only the colour change on a press, and the
+ * same scale nudge every other chip in this file uses.
+ */
+.filters { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
+.fchip {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+  min-height: 44px; padding: 0 14px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); color: var(--text); font-weight: 700; font-size: 13px; cursor: pointer;
+  transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast), transform var(--dur-fast);
+}
+.fchip__icon { width: 16px; height: 16px; flex: 0 0 auto; }
+.fchip:active { transform: scale(0.96); }
+.fchip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+@media (hover: hover) { .fchip:hover { border-color: var(--accent); } }
+
 /* ------------------------------------------------------------ cards */
 .lots { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .lot-card {
@@ -241,12 +254,27 @@
 /* ------------------------------------------------------------ pills and popover */
 .pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: var(--radius-pill); border: 0; font-size: 11px; font-weight: 700; line-height: 1.4; background: var(--unknown-soft); color: var(--muted); position: relative; overflow: hidden; }
 .pill--best { background: var(--gradient-best); color: #fff; }
-/* `forwards` (not `both`, and never `infinite`): the sweep must end
-   parked past the pill's right edge -- clipped by `.pill`'s own
-   `overflow: hidden` -- rather than reverting to its resting (untransformed)
-   layout position, which is what left it visibly frozen over the badge's
-   left 40% once the single iteration finished. */
-.pill--best.anim-shine::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent); animation: shine 800ms var(--ease-out) 1 forwards; }
+/* The badge keeps shining, on purpose -- and with four seconds of stillness
+   between sweeps, which is the whole of the design here.
+ *
+ * `infinite`, because a highlight that fires once is over before a driver
+ * glancing down has looked at the sheet; "best pick" is the one thing on this
+ * screen worth a second glance. But an 800 ms sweep repeating end to end over a
+ * moving map is a strobe, and a strobe beside a percentage reads as an alarm
+ * rather than as emphasis. So the *pause* lives in `shine`'s own keyframes
+ * (motion.css): the band crosses in the first 16% of the cycle and holds past
+ * the pill's right edge for the other 84%. One duration drives both, which is
+ * why 5s here is 800 ms of sweep and 4.2 s of stillness rather than two numbers
+ * that can disagree. `cssTransformAnim.test.ts` pins the ratio, not the values.
+ *
+ * `forwards` survives from the fix it replaces and still earns its place: it is
+ * inert while the count is `infinite`, and it is exactly what holds the band
+ * clear of the badge in the one case where the count is not -- a reduced-motion
+ * reader, whose `animation-iteration-count: 1 !important` would otherwise end
+ * the single iteration by snapping the band back to its resting position, over
+ * the badge's left 40%, which is the bug the `1 forwards` version was fixing.
+ * (That reader has no band at all: motion.css takes the pseudo-element away.) */
+.pill--best.anim-shine::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent); animation: shine 5s var(--ease-out) infinite forwards; }
 .pill--high { background: var(--accent-soft); color: var(--accent); }
 .pill--medium { background: var(--warn-soft); color: var(--warn); }
 .pill--low { background: var(--unknown-soft); color: var(--muted); }
@@ -274,8 +302,106 @@
 .pin-ripple { position: absolute; width: 28px; height: 28px; margin: -14px 0 0 -14px; border-radius: 50%; border: 2px solid var(--accent); animation: ripple 900ms var(--ease-out) 1 both; pointer-events: none; }
 .pin-ripple--late { animation-delay: 220ms; }
 
+/* ------------------------------------------------------------ the map's card */
+/*
+ * The full card for the car park the driver tapped, drawn over the map rather
+ * than in the sheet or the panel. A tap on a dot is answered where the tap
+ * was; the previous version put this card at the top of the ranked list, which
+ * meant the answer appeared in a surface the driver then had to go and find --
+ * and, on a phone at `half`, scroll.
+ *
+ * **Where it sits, and why there.** The top of the band of map that the chrome
+ * leaves: under the top bar on a phone, under the floating controls on
+ * desktop. Not anchored to the dot, and not at the bottom either:
+ *
+ *   - A 289 px card is most of the free band on a 375x812 phone (476 px with
+ *     the sheet at `peek`), so "beside the dot" is not a thing that exists
+ *     there -- wherever the card went, the dot would have to move. So the dot
+ *     moves, deliberately, and by exactly as much as this card turns out to
+ *     be: `App.tsx`'s `mapCardDepthPx` measures the rendered box and spends
+ *     half of it as the centre request's `offset`, which lands the tapped lot
+ *     in the middle of the gap between this card's bottom edge and the sheet's
+ *     top one. Not in the map's `padding` -- padding moves the whole picture,
+ *     including when the card is dismissed with no camera movement to hide it.
+ *   - The top, not the bottom, because a card resting on the sheet's top edge
+ *     reads as the sheet's first row -- which is the confusion this change
+ *     exists to end -- and because a slot pinned to the sheet moves whenever
+ *     the sheet is dragged, while this one stays put and is simply covered.
+ *
+ * **`max-height` is the other half of that, and it is not decoration.** An
+ * offset measured off the card puts the dot below whatever the card is, but it
+ * cannot invent room that does not exist: at 320x568 this card wants 309 px of
+ * a 268 px band, and every choice of offset puts the dot under the sheet. So
+ * the card is bounded by the band it has to share, `--map-card-dot-gap` is the
+ * clear map left for the dot inside it, and a card with more in it than that
+ * allows scrolls rather than growing. Every term below is either literally in
+ * this rule (the top offset) or comes from the one place that knows it:
+ * `--sheet-peek` is set on the element by `App.tsx` from `layout/sheet`'s
+ * `snapHeights`, because a second copy of "how tall is a peeking sheet" here
+ * is exactly the drift that made `MAP_CARD_PX` wrong.
+ *
+ * `z-index: 3` puts it over the map and the hint and *under* the sheet (4) and
+ * the top bar (5): if the sheet is dragged up over it, the sheet wins, which is
+ * the right answer to "I would rather see the list now".
+ */
+.map-card {
+  position: absolute; z-index: 3;
+  --map-card-dot-gap: 72px;
+  --map-card-max: calc(
+    100dvh - var(--safe-top) - var(--topbar-height) - 12px - var(--sheet-peek, 240px) - var(--map-card-dot-gap)
+  );
+  top: calc(var(--safe-top) + var(--topbar-height) + 12px);
+  left: 12px; right: 12px; margin: 0 auto; max-width: 420px;
+  max-height: var(--map-card-max);
+}
+/* It is floating over a moving picture, not sitting in a list, so it carries
+   the shadow a floating surface carries.
+
+   The bound is repeated on the card itself because the card is what has to
+   scroll: `.lots` has no padding, so the two boxes are the same box, and
+   `overflow-y` on the card clips its descendants without clipping its own
+   shadow. `overflow-x` stays `hidden` from `.lot-card`, so nothing about the
+   ordinary case -- a card well short of the bound, no scrollbar, nothing
+   clipped -- changes. */
+.map-card .lot-card { box-shadow: var(--shadow-2); max-height: var(--map-card-max); overflow-y: auto; }
+/* The dismiss target: 44 px square (spec §2), but transparent rather than a
+   button-shaped button on top of the card -- the same treatment
+   `.search__clear` gets inside the search pill, for the same reason. */
+.map-card__dismiss {
+  position: absolute; top: 4px; right: 4px; z-index: 1; width: 44px; height: 44px;
+  border: 0; border-radius: 50%; background: transparent; color: var(--muted);
+  display: grid; place-items: center; cursor: pointer;
+}
+.map-card__dismiss svg { width: 16px; height: 16px; }
+/* The whole identity column, not just the name: the button overlaps the card's
+   top-right corner, and the name, the district line and the tags row all start
+   in that column. Reserving the width here is what keeps the ✕ off the text
+   instead of on top of it. */
+.map-card .lot-card__ident { padding-inline-end: 40px; }
+[data-layout="desktop"] .map-card {
+  /* Under the floating locate and language buttons rather than beside them: at
+     768 px the map is 348 px wide next to the panel, and a readable card and a
+     button row pinned right cannot share that line. */
+  top: calc(var(--safe-top) + 72px);
+  left: calc(var(--panel-width) + 16px); right: auto; margin: 0;
+  width: min(380px, calc(100vw - var(--panel-width) - 32px));
+  /* The same bound against a band with no sheet at the bottom of it: the panel
+     is beside the map here, not over it, so the whole window height below the
+     card's own top offset is the card's to share with its dot. */
+  --map-card-max: calc(100dvh - var(--safe-top) - 72px - var(--map-card-dot-gap));
+}
+
 @media (max-width: 360px) {
   .facts { grid-template-columns: 1fr; }
   .ring { width: 56px; height: 56px; }
   .ring__value { font-size: 15px; }
+  /* ...except on the map's card, which is the one card that has to leave room
+     on screen for something else: the dot it describes. Stacking its five
+     tiles into one column took the same card from 289 px to 385 px at 360x740,
+     against a band of 428, and from 309 px to 405 px at 320x568, against a
+     band of 268 -- and the dot, eased into what was left, came to rest inside
+     the card describing it. Two columns is 151 px each at 360 px and 131 px at
+     320 px, which the tiles' own `min-width: 0` and 11 px labels take without
+     overflowing in either language (measured in Chrome at both widths). */
+  .map-card .facts { grid-template-columns: 1fr 1fr; }
 }

@@ -268,6 +268,58 @@ def test_free_count_is_additive_and_leaves_the_schema_version_alone():
     assert "f" not in without["lots"][0]
 
 
+# --- m/e: motor capacity and EV charging, Taipei-only for now --------------
+
+
+def _lot_with_amenities(**overrides):
+    kwargs = dict(id="taipei:TPE0009", name="n", area="a", lot_type="t",
+                  capacity_car=50, lat=25.05, lon=121.52,
+                  service_time="", fare_text="")
+    kwargs.update(overrides)
+    return Lot(**kwargs)
+
+
+def test_motor_capacity_and_charging_are_present_when_known():
+    doc = json.loads(build_lots_json(
+        [_lot_with_amenities(capacity_motor=30, charging=2)],
+        generated_at=1, base_data_ts=1,
+    ))
+    assert doc["lots"][0]["m"] == 30
+    assert doc["lots"][0]["e"] == 2
+
+
+def test_zero_motor_capacity_and_charging_are_published_as_zero_not_omitted():
+    """0 is a known fact ('we checked, there are none') and must survive to
+    the client as a real 0 -- omitting the key here would make it
+    indistinguishable from 'not reported', the same failure `clean_count`'s
+    None guards against upstream of this file."""
+    doc = json.loads(build_lots_json(
+        [_lot_with_amenities(capacity_motor=0, charging=0)],
+        generated_at=1, base_data_ts=1,
+    ))
+    assert doc["lots"][0]["m"] == 0
+    assert doc["lots"][0]["e"] == 0
+
+
+def test_unknown_motor_capacity_and_charging_carry_no_key_at_all():
+    """None (not reported, or not Taipei) must not be shipped as `null`: a
+    parser that wrote `"m": null` would pass a naive 'does m exist' check
+    but this test would catch it, and at ~1,100 lots a null for every
+    lot lacking a value is bytes spent on nothing a client can use, where an
+    absent key means the same 'unknown' for free."""
+    doc = json.loads(lots_json([lot(1)]))  # helper never sets these
+    assert "m" not in doc["lots"][0]
+    assert "e" not in doc["lots"][0]
+
+
+def test_motor_and_charging_are_additive_and_leave_the_schema_version_alone():
+    doc = json.loads(build_lots_json(
+        [_lot_with_amenities(capacity_motor=5, charging=1)],
+        generated_at=1, base_data_ts=1,
+    ))
+    assert doc["v"] == VERSION
+
+
 # --- one shard per city -----------------------------------------------------
 #
 # The store namespaces every lot id by city so two feeds cannot collide on a

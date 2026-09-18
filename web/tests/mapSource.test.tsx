@@ -25,6 +25,9 @@
  * to hand it the props and watch what it does to MapLibre. Those tests keep the
  * same fake map, so what they assert is still "what MapLibre was actually told".
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { FeatureCollection, Point } from "geojson";
 import type { MapLibreMap } from "maplibre-gl";
@@ -34,7 +37,7 @@ import { HEADER_SIZE, resetWeekCache } from "../src/artifacts";
 import { WEEKLY_OBSERVATIONS } from "../src/confidence";
 import { haversineMeters, walkMinutes } from "../src/geo";
 import { districtName, fillTemplate, t } from "../src/i18n";
-import MapView, { LOTS_SOURCE } from "../src/map/MapView";
+import MapView, { FILTERED_OUT_OPACITY, LOTS_SOURCE } from "../src/map/MapView";
 import { toMapLot, type LotProperties, type MapLot } from "../src/map/lotSource";
 import type { Lot, LotsDoc } from "../src/types";
 
@@ -506,6 +509,53 @@ describe("the map's selection, padding and taps", () => {
     expect(popup?.removed).toBeGreaterThan(0);
   });
 
+  /**
+   * The popup is the *fallback*, and it steps aside for a card.
+   *
+   * `MapView` cannot know which dots the app can card -- that turns on a
+   * ranking it has never seen -- so it asks, at the moment of the tap. Asked
+   * here with both answers, from otherwise identical props, so what is being
+   * pinned is the predicate deciding it and not some other difference: the
+   * same dot, the same handler, one popup between them.
+   */
+  it("opens no popup for a dot the app is going to draw a card for", () => {
+    const view = (hasCard: (id: string) => boolean) => (
+      <MapView
+        lots={MAP_LOTS}
+        destination={null}
+        lang="en"
+        selectedId={null}
+        bestId={null}
+        onSelectLot={() => {}}
+        hasCard={hasCard}
+        centerRequest={null}
+        padding={NO_PADDING}
+      />
+    );
+    const tap = () =>
+      fire("click", LOTS_LAYER, {
+        features: [{ properties: { id: "TPE_C", name: "至善公園平面停車場", probability: 0.9 } }],
+        lngLat: { lat: 25.0382, lng: 121.5643 },
+        point: { x: 10, y: 20 },
+      });
+
+    const { unmount } = render(view(() => true));
+    tap();
+    // Not merely "a popup with nothing in it": none was opened at all, so the
+    // name-and-chance bubble cannot flash before the card arrives.
+    expect(popups.opened).toHaveLength(0);
+    unmount();
+
+    // The same tap, with the app saying it has no card for this lot: the
+    // fallback is exactly what it always was.
+    shared.map = makeFakeMap();
+    render(view(() => false));
+    tap();
+    expect(popups.opened).toHaveLength(1);
+    expect(popups.opened[0]?.content?.textContent).toContain("至善公園平面停車場");
+    expect(popups.opened[0]?.content?.textContent).toContain("90%");
+  });
+
   it("says no data on a lot with no forecast, never 0%", () => {
     render(
       <MapView
@@ -639,13 +689,24 @@ describe("the map's selection, padding and taps", () => {
 });
 
 /**
- * The dead end this file's fake map is the only way to reach.
+ * The dead end this file's fake map is the only way to reach, and the second
+ * answer to it.
  *
  * The map draws every car park in the roster and the list draws twenty, so
  * most dots on screen belong to no row. Tapping one already selected it --
- * `onSelectLot` fired, `App` set `selectedLotId`, the halo moved -- and then
+ * `onSelectLot` fired, `App` set the selection, the halo moved -- and then
  * nothing: `LotList` only renders a card for a row it was handed, so a lot
  * outside `listed` got a ring on the map and no way to read it.
+ *
+ * The first fix put that card at the top of the ranked *list*, which the owner
+ * rejected from their own testing: "when clicking on a lot, what I expected to
+ * happen is the full card will show on the map where it now shows the bubble
+ * indicating the name and %. Not on the side where the list is." They are
+ * right -- a card that appears somewhere you then have to go and find is not an
+ * answer to a tap -- so the card is now drawn over the map, and these tests
+ * moved with it. `map-card` is the same `LotCard` in a different place; what
+ * changed is *where* it is asserted to be, which is now something this file
+ * checks rather than something a screenshot did.
  *
  * Every test here goes through the whole screen -- the real `loadArtifacts`,
  * the real ranker, the real `LotCard` -- and drives it the way MapLibre would:
@@ -654,7 +715,7 @@ describe("the map's selection, padding and taps", () => {
  * would pass that. What is asserted is the *identity* of the lot on the card,
  * from facts no listed lot in this fixture shares with it.
  */
-describe("a car park the ranked list does not show", () => {
+describe("a car park tapped on the map", () => {
   /** Where the driver is going: the tap on empty map that sets the destination. */
   const DEST = { lat: 25.0375, lon: 121.5637 };
 
@@ -680,7 +741,7 @@ describe("a car park the ranked list does not show", () => {
   const FAR_NAME = "淡水文化園區停車場";
   const FAR_PERCENT = 23;
 
-  /** Every listed lot shares these, so any of them on the pinned card is caught. */
+  /** Every listed lot shares these, so any of them on the map card is caught. */
   const LISTED_PERCENT = 70;
   const LISTED_PRICE = 30;
 
@@ -702,6 +763,10 @@ describe("a car park the ranked list does not show", () => {
       c: 50,
       t: "民營停車場",
       p: { k: "exact", lo: LISTED_PRICE, hi: LISTED_PRICE },
+      // Both amenity keys present, so the tile-parity check below has
+      // something to compare on every listed card as well as on the map's.
+      m: 30,
+      e: 4,
     }));
     const outsiders: Lot[] = [
       {
@@ -715,6 +780,8 @@ describe("a car park the ranked list does not show", () => {
         t: "市府委外停車場",
         p: { k: "exact", lo: OUTSIDER_PRICE, hi: OUTSIDER_PRICE },
         f: OUTSIDER_FREE,
+        m: 12,
+        e: 6,
       },
       {
         i: 23,
@@ -826,9 +893,102 @@ describe("a car park the ranked list does not show", () => {
     });
   }
 
-  /** The rows the ranked list itself is drawing -- never the pinned card. */
+  /** The rows the ranked list itself is drawing -- never the map's card. */
   function listedRows(): HTMLElement[] {
     return within(screen.getByTestId("lot-list")).getAllByTestId("lot-row");
+  }
+
+  /** The last padding MapLibre was told about, which is what `easeTo` centres into. */
+  function lastPadding(): { top: number; right: number; bottom: number; left: number } {
+    const calls = shared.map?.setPadding.mock.calls ?? [];
+    const last = calls.at(-1)?.[0];
+    if (last === undefined) throw new Error("the map was never given a padding");
+    return last as { top: number; right: number; bottom: number; left: number };
+  }
+
+  /**
+   * Where the last `easeTo` actually leaves the lot on screen, in pixels from
+   * the top of the canvas.
+   *
+   * MapLibre's own rule, not the app's: a centre request lands at the middle of
+   * what the padding leaves, displaced by the request's `offset`. Recomputing
+   * it here is what makes the assertion about the *screen* rather than about a
+   * number the app passed itself.
+   */
+  function easedDotY(): number {
+    const call = (shared.map?.easeTo.mock.calls ?? []).at(-1)?.[0] as
+      | { offset?: [number, number] }
+      | undefined;
+    if (call === undefined) throw new Error("the map was never asked to move");
+    const { top, bottom } = lastPadding();
+    return (top + (window.innerHeight - bottom)) / 2 + (call.offset?.[1] ?? 0);
+  }
+
+  /**
+   * The card's rendered box, which jsdom does not have one of.
+   *
+   * `offsetTop` and `offsetHeight` are `0` for everything in jsdom, so a test
+   * that wants to say anything about where the card is has to say how tall it
+   * is. Stating it here is the *point* rather than a concession: the app now
+   * asks the card instead of carrying a number, so what these tests pin is
+   * that the dot follows whatever answer it gets -- which is a claim a stale
+   * constant cannot satisfy, and the old assertion (`easedDotY()` against
+   * `MAP_CARD_PX`) could not make. The two heights below are real: measured in
+   * Chrome against the dev roster, card open, sheet at `peek`.
+   */
+  const CARD_TOP_PX = 72;
+  /** The card's other half of the geometry, asserted on text since jsdom lays nothing out. */
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "src", "styles", "components.css"),
+    "utf8",
+  );
+  /** 375x812, two columns of fact tiles. */
+  const SHORT_CARD_PX = 289;
+  /** 360x740 before this branch's CSS fix, where the tiles stacked into one column. */
+  const TALL_CARD_PX = 385;
+
+  const LAYOUT_BOX = ["offsetTop", "offsetHeight"] as const;
+  /** jsdom's own getters, put back after each test so nothing else sees the stub. */
+  const realLayoutBox = LAYOUT_BOX.map((name) => {
+    const real = Object.getOwnPropertyDescriptor(HTMLElement.prototype, name);
+    if (real === undefined) throw new Error(`jsdom no longer defines ${name}`);
+    return real;
+  });
+  let cardBox: { top: number; height: number } | null = null;
+
+  /** Render the map's card as a box `height` tall, `top` px down the page. */
+  function drawCardAs(height: number, top = CARD_TOP_PX): void {
+    cardBox = { top, height };
+    Object.defineProperty(HTMLElement.prototype, "offsetTop", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.dataset?.testid === "map-card" && cardBox !== null ? cardBox.top : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.dataset?.testid === "map-card" && cardBox !== null ? cardBox.height : 0;
+      },
+    });
+  }
+
+  afterEach(() => {
+    cardBox = null;
+    LAYOUT_BOX.forEach((name, i) => {
+      Object.defineProperty(HTMLElement.prototype, name, realLayoutBox[i]!);
+    });
+  });
+
+  /** The bottom edge of the card the app was just told to measure. */
+  function cardBottom(): number {
+    if (cardBox === null) throw new Error("no card box was stated");
+    return cardBox.top + cardBox.height;
+  }
+
+  /** The top edge of the sheet, which is the other wall of the gap the dot lands in. */
+  function sheetTop(): number {
+    return window.innerHeight - lastPadding().bottom;
   }
 
   it("gives a tapped car park outside the list the list's own card", async () => {
@@ -837,49 +997,222 @@ describe("a car park the ranked list does not show", () => {
     // The situation: twenty rows, and this car park is not one of them.
     expect(listedRows()).toHaveLength(LIST_LIMIT);
     expect(screen.queryByText(OUTSIDER_NAME)).toBeNull();
-    expect(screen.queryByTestId("pinned-lot")).toBeNull();
+    expect(screen.queryByTestId("map-card")).toBeNull();
 
     tapDot(CROWD[22]!);
 
-    const pinned = screen.getByTestId("pinned-lot");
+    const card = screen.getByTestId("map-card");
     // Identity first: the name, then facts no listed lot carries -- its own
     // percentage, its own fare, its own observed count and its own district. A
     // card for the wrong car park passes "a card rendered" and fails all four.
-    expect(within(pinned).getByTestId("lot-name")).toHaveTextContent(OUTSIDER_NAME);
-    expect(within(pinned).getByTestId("lot-probability")).toHaveTextContent(`${OUTSIDER_PERCENT}%`);
-    expect(within(pinned).getByTestId("lot-probability")).not.toHaveTextContent(`${LISTED_PERCENT}%`);
-    expect(within(pinned).getByTestId("lot-price").textContent).toContain(`NT$${OUTSIDER_PRICE}`);
-    expect(within(pinned).getByTestId("lot-spaces").textContent).toContain(
+    expect(within(card).getByTestId("lot-name")).toHaveTextContent(OUTSIDER_NAME);
+    expect(within(card).getByTestId("lot-probability")).toHaveTextContent(`${OUTSIDER_PERCENT}%`);
+    expect(within(card).getByTestId("lot-probability")).not.toHaveTextContent(`${LISTED_PERCENT}%`);
+    expect(within(card).getByTestId("lot-price").textContent).toContain(`NT$${OUTSIDER_PRICE}`);
+    expect(within(card).getByTestId("lot-spaces").textContent).toContain(
       `${OUTSIDER_FREE} / ${OUTSIDER_CAPACITY}`,
     );
     // The district, which is chrome and so *is* translated -- unlike the lot's
     // own name above, which is the sign at the entrance and never is.
-    expect(pinned.textContent).toContain(districtName("北投區", "en"));
-    expect(pinned.textContent).not.toContain(districtName("信義區", "en"));
+    expect(card.textContent).toContain(districtName("北投區", "en"));
+    expect(card.textContent).not.toContain(districtName("信義區", "en"));
     // "The same detail as the list's card": every tile a listed card carries.
-    for (const tile of ["lot-walk", "lot-price", "lot-arrival"]) {
+    for (const tile of ["lot-walk", "lot-price", "lot-scooter", "lot-charging"]) {
       expect(within(listedRows()[0]!).getByTestId(tile)).toBeInTheDocument();
-      expect(within(pinned).getByTestId(tile)).toBeInTheDocument();
+      expect(within(card).getByTestId(tile)).toBeInTheDocument();
     }
 
-    // Above the ranked list, and the list is untouched by it: still twenty
-    // rows, still without this car park among them.
-    expect(pinned.compareDocumentPosition(screen.getByTestId("lot-list"))).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    );
+    // The list is untouched by it: still twenty rows, still without this car
+    // park among them.
     expect(listedRows()).toHaveLength(LIST_LIMIT);
     expect(listedRows().map((row) => row.getAttribute("data-lot-id"))).not.toContain(OUTSIDER_ID);
+
+    // ...and the bubble the card replaces is not also on screen. It says a
+    // strict subset of what the card says, about the same car park, which is
+    // one answer too many -- and it would say it first, in the frame between
+    // the tap and the render.
+    expect(popups.opened).toHaveLength(0);
   });
 
-  it("never crowns it, and never pulses its dot", async () => {
+  /**
+   * The reported complaint, as a structural assertion.
+   *
+   * "Not on the side where the list is" is a claim about which surface the card
+   * is in, and the DOM says which surface a node is in. The sheet (`.sheet`) is
+   * the phone's results surface and `lot-list` is the ranked list inside it; the
+   * card has to be in neither, and in the map's own overlay layer instead --
+   * which is a sibling of `.map-stage`, above it in document order and before
+   * the sheet. The old card passes none of this, which is the point.
+   */
+  it("draws the card over the map, not inside the sheet the list lives in", async () => {
     await renderWithDestination();
     tapDot(CROWD[22]!);
 
-    const pinned = screen.getByTestId("pinned-lot");
+    const card = screen.getByTestId("map-card");
+    const sheet = screen.getByTestId("sheet");
+    expect(sheet.contains(card)).toBe(false);
+    expect(screen.getByTestId("lot-list").contains(card)).toBe(false);
+    // Over the map: a child of the shell, after the map's stage and before the
+    // sheet -- which is the stacking order `.map-card`'s `z-index: 3` spells
+    // out and the only order in which a card can float over a map at all.
+    const shell = card.closest("[data-layout]");
+    expect(shell).not.toBeNull();
+    expect(card.parentElement).toBe(shell);
+    const stage = shell!.querySelector(".map-stage");
+    expect(stage).not.toBeNull();
+    expect(stage!.compareDocumentPosition(card)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(card.compareDocumentPosition(sheet)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  });
+
+  /**
+   * ...and the other half of "on the map": not on top of the dot it is about.
+   *
+   * The card's box is drawn by CSS, which jsdom does not run, so the box is
+   * stated (`drawCardAs`) and what is checked is where the dot goes given one.
+   * The claim is not "the dot clears 288 px" -- that was the old assertion and
+   * it was true against a constant that had stopped being true of the card.
+   * It is "the dot lands in the gap between the card's bottom edge and the
+   * sheet's top one", which is a statement about two boxes and cannot be
+   * satisfied by a number that has drifted away from either.
+   */
+  it("eases the tapped dot into the gap the card leaves, not into the middle of the card", async () => {
+    await renderWithDestination();
+    // Started from an open sheet, the way a driver who has been reading the
+    // list leaves it: a row tap at `peek` steps it to `half`. That is also the
+    // only state in which the step *down* below is observable -- and it is the
+    // state that needs it, because `half` leaves less room between the top bar
+    // and the sheet than the card itself takes.
+    fireEvent.click(listedRows()[1]!);
+    expect(screen.getByTestId("sheet")).toHaveAttribute("data-snap", "half");
+
+    drawCardAs(SHORT_CARD_PX);
+    tapDot(CROWD[22]!);
+
+    // Below the card, above the sheet, and in the middle of what is between
+    // them -- the whole of the geometry, in the units the driver sees.
+    expect(easedDotY()).toBeGreaterThan(cardBottom());
+    expect(easedDotY()).toBeLessThan(sheetTop());
+    expect(easedDotY()).toBe((cardBottom() + sheetTop()) / 2);
+    // The sheet steps down to `peek` rather than up, because the answer is on
+    // the map now and the card needs the band the sheet was sitting in. (Up is
+    // what this did when the answer was in the sheet. Same reason, other way.)
+    expect(screen.getByTestId("sheet")).toHaveAttribute("data-snap", "peek");
+  });
+
+  /**
+   * The reason the number is gone, stated as a test.
+   *
+   * `MAP_CARD_PX = 288` was measured against a four-tile card. `c0ff877` added
+   * two amenity tiles and the card grew -- to 289 px at 375 px, and to 385 px
+   * at 360 px where the tiles stacked -- while the constant did not, and at
+   * 360 px the dot came to rest *inside* the card describing it. Every test
+   * still passed, because the offset and the assertion were both reading the
+   * same stale number.
+   *
+   * So this taps the same dot against two different cards and requires the dot
+   * to move with the card: exactly half the extra height, because half of what
+   * the card covers is what the offset spends. A constant of any value gives
+   * the same answer twice and fails the last line; a constant that happened to
+   * be right for one of them still puts the dot inside the other.
+   */
+  it("moves the dot by however much the card grew, so another tile cannot land it back underneath", async () => {
+    await renderWithDestination();
+
+    drawCardAs(SHORT_CARD_PX);
+    tapDot(CROWD[22]!);
+    const shortDot = easedDotY();
+    expect(shortDot).toBeGreaterThan(cardBottom());
+
+    drawCardAs(TALL_CARD_PX);
+    tapDot(CROWD[22]!);
+    const tallDot = easedDotY();
+    expect(tallDot).toBeGreaterThan(cardBottom());
+    expect(tallDot).toBeLessThan(sheetTop());
+
+    expect(tallDot - shortDot).toBe((TALL_CARD_PX - SHORT_CARD_PX) / 2);
+  });
+
+  /**
+   * ...and the bound's one unknown reaches the CSS from the same place.
+   *
+   * `--map-card-max` is written out of quantities that are literally in
+   * `.map-card`'s own rule, plus one that is not: how tall the sheet is when
+   * it peeks. That number lives in `layout/sheet`'s `snapHeights`, and it is
+   * also what the map is told the sheet covers -- so asserting the custom
+   * property against `padding.bottom` (a carded tap steps the sheet to `peek`)
+   * says the two consumers read one source. A second copy of `max(240, 34vh)`
+   * in the stylesheet would pass every other test in this file.
+   */
+  it("hands the card's bound the peek height the map was given, not a second copy of it", async () => {
+    await renderWithDestination();
+    drawCardAs(SHORT_CARD_PX);
+    tapDot(CROWD[22]!);
+
+    expect(screen.getByTestId("sheet")).toHaveAttribute("data-snap", "peek");
+    expect(screen.getByTestId("map-card").style.getPropertyValue("--sheet-peek")).toBe(
+      `${lastPadding().bottom}px`,
+    );
+  });
+
+  /**
+   * The bound that makes the gap above exist at all.
+   *
+   * Measuring puts the dot below whatever the card is; it cannot invent map
+   * that is not there. At 320x568 the card wants 309 px of a 268 px band, so
+   * the card is capped instead -- and the cap is written in CSS, against the
+   * peek height `App` hands it, because that is where the card's own top
+   * offset is written too. On text, not layout: jsdom lays nothing out, and
+   * what is checkable is that the rule exists and is built from the sheet's
+   * real height rather than a second copy of it. (Measured live in Chrome:
+   * 320x568 caps the card at 184 px and leaves the dot 36 px of clear map on
+   * each side.)
+   */
+  it("bounds the card by the band it shares with its dot, in terms of the sheet's own height", () => {
+    const block = css.match(/\.map-card\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(block).toMatch(/max-height:\s*var\(--map-card-max\)/);
+    expect(block).toMatch(/--map-card-max:\s*calc\(/);
+    // The peek height comes from `layout/sheet`'s `snapHeights` by way of an
+    // inline custom property, never from a number retyped here.
+    expect(block).toMatch(/var\(--sheet-peek/);
+    expect(block).toMatch(/var\(--map-card-dot-gap\)/);
+    // ...and the card is what scrolls when the bound bites, so nothing is
+    // clipped away unreachably.
+    expect(css).toMatch(/\.map-card \.lot-card \{[^}]*overflow-y:\s*auto/);
+    // The narrow-width rule that stacked the tiles does not reach this card.
+    expect(css).toMatch(/\.map-card \.facts \{\s*grid-template-columns:\s*1fr 1fr;?\s*\}/);
+  });
+
+  /**
+   * The card's room is taken out of the *movement*, never out of the padding.
+   *
+   * Padding decides where on the canvas the map's centre is drawn, so a card
+   * that added 288 px to it would move the whole picture by 144 px when it
+   * opened and by 144 px again when it closed -- and the closing half has no
+   * camera movement to absorb it, so the map lurches as the card goes away.
+   * Measured in a browser before it was written down. This is the assertion
+   * that keeps the fix from being quietly undone.
+   */
+  it("does not move the map by opening or closing the card", async () => {
+    await renderWithDestination();
+    const before = lastPadding();
+
+    tapDot(CROWD[22]!);
+    expect(lastPadding().top).toBe(before.top);
+
+    fireEvent.click(screen.getByRole("button", { name: t("en").dismissCard }));
+    expect(lastPadding().top).toBe(before.top);
+    expect(lastPadding().bottom).toBe(before.bottom);
+  });
+
+  it("never crowns a car park the ranking never reached, and never pulses its dot", async () => {
+    await renderWithDestination();
+    tapDot(CROWD[22]!);
+
+    const card = screen.getByTestId("map-card");
     // The badge the ranking withholds from lots it cannot vouch for is withheld
     // with more force from one the ranking's output never reached.
-    expect(within(pinned).queryByText(t("en").bestPick)).toBeNull();
-    expect(pinned.querySelector(".lot-card--best")).toBeNull();
+    expect(within(card).queryByText(t("en").bestPick)).toBeNull();
+    expect(card.querySelector(".lot-card--best")).toBeNull();
     // ...and the crown is still where the ranking put it.
     expect(within(screen.getByTestId("lot-list")).getByText(t("en").bestPick)).toBeInTheDocument();
 
@@ -894,19 +1227,49 @@ describe("a car park the ranked list does not show", () => {
   it("replaces the card when a second dot is tapped, rather than stacking them", async () => {
     await renderWithDestination();
     tapDot(CROWD[22]!);
-    expect(within(screen.getByTestId("pinned-lot")).getByTestId("lot-name")).toHaveTextContent(OUTSIDER_NAME);
+    expect(within(screen.getByTestId("map-card")).getByTestId("lot-name")).toHaveTextContent(OUTSIDER_NAME);
 
     tapDot(CROWD[23]!);
 
-    const pinned = screen.getByTestId("pinned-lot");
-    expect(screen.getAllByTestId("pinned-lot")).toHaveLength(1);
-    expect(within(pinned).getByTestId("lot-name")).toHaveTextContent(SECOND_NAME);
-    expect(within(pinned).getByTestId("lot-probability")).toHaveTextContent(`${SECOND_PERCENT}%`);
+    const card = screen.getByTestId("map-card");
+    expect(screen.getAllByTestId("map-card")).toHaveLength(1);
+    expect(within(card).getByTestId("lot-name")).toHaveTextContent(SECOND_NAME);
+    expect(within(card).getByTestId("lot-probability")).toHaveTextContent(`${SECOND_PERCENT}%`);
     // The first car park is gone from the screen entirely, not merely demoted.
     expect(screen.queryByText(OUTSIDER_NAME)).toBeNull();
+    // ...and the halo went with it: one selected dot, and it is the second one.
+    const selected = drawnLots().features.filter((f) => f.properties.selected);
+    expect(selected.map((f) => f.properties.id)).toEqual([SECOND_ID]);
   });
 
-  it("leaves a lot the list already shows in the list, with no second copy", async () => {
+  it("closes on its own button, and lets go of the selection with it", async () => {
+    await renderWithDestination();
+    tapDot(CROWD[22]!);
+    expect(drawnLots().features.filter((f) => f.properties.selected)).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: t("en").dismissCard }));
+
+    expect(screen.queryByTestId("map-card")).toBeNull();
+    expect(screen.queryByText(OUTSIDER_NAME)).toBeNull();
+    // Dismissing the card dismisses the selection it was about: a ring left
+    // behind on a dot with nothing on screen naming it is the dead end again.
+    expect(drawnLots().features.filter((f) => f.properties.selected)).toHaveLength(0);
+    // The list is where it was.
+    expect(listedRows()).toHaveLength(LIST_LIMIT);
+  });
+
+  /**
+   * A dot the list *is* showing gets the card too.
+   *
+   * The previous version withheld it, on the grounds that the lot already has a
+   * card in the list. That rebuilds a smaller copy of the dead end this whole
+   * path exists to close: the twentieth row of a scrolled list is exactly as
+   * far from the driver's finger as no row at all, and the complaint was about
+   * having to go and find the detail. So the card appears, and the row still
+   * highlights -- the map says what the car park is, the list says where it
+   * ranks. What must not happen is a *second row* appearing in the list.
+   */
+  it("cards a lot the list already shows, and still highlights its row", async () => {
     await renderWithDestination();
     const id = listedRows()[0]!.getAttribute("data-lot-id") ?? "";
     const lot = CROWD.find((l) => l.id === id);
@@ -914,13 +1277,74 @@ describe("a car park the ranked list does not show", () => {
 
     tapDot(lot!);
 
-    // Today's behaviour, unchanged: the row highlights where it already is.
-    expect(screen.queryByTestId("pinned-lot")).toBeNull();
-    expect(listedRows()).toHaveLength(LIST_LIMIT);
+    const card = screen.getByTestId("map-card");
+    expect(within(card).getByTestId("lot-name")).toHaveTextContent(lot!.n);
+    expect(screen.getByTestId("lot-list").contains(card)).toBe(false);
+    // Today's behaviour, kept: the row highlights where it already is...
     expect(screen.getByTestId("lot-list").querySelector(`[data-lot-id="${id}"]`)?.className).toContain(
       "lot-card--selected",
     );
-    expect(screen.getAllByText(lot!.n)).toHaveLength(1);
+    // ...and the list is still the same twenty rows, with this lot in it once.
+    expect(listedRows()).toHaveLength(LIST_LIMIT);
+    expect(
+      listedRows().filter((row) => row.getAttribute("data-lot-id") === id),
+    ).toHaveLength(1);
+  });
+
+  /**
+   * The crown is not withheld from the lot that has earned it.
+   *
+   * `best` used to be hard-wired `false` on this card, which was right while it
+   * only ever drew lots outside the list -- none of them can be `bestId`. Now
+   * that it draws listed lots too, hard-wiring would mean the app's own top
+   * pick losing its crown by being tapped, and comparing against `bestId` is
+   * what keeps the badge honest in both directions at once.
+   */
+  it("wears the crown only when the tapped lot is the one the ranking crowned", async () => {
+    await renderWithDestination();
+    const crowned = within(screen.getByTestId("lot-list")).getByText(t("en").bestPick);
+    const bestRow = crowned.closest("[data-lot-id]");
+    const bestLotId = bestRow?.getAttribute("data-lot-id") ?? "";
+    const best = CROWD.find((l) => l.id === bestLotId);
+    expect(best).toBeDefined();
+
+    tapDot(best!);
+
+    const card = screen.getByTestId("map-card");
+    expect(within(card).getByTestId("lot-name")).toHaveTextContent(best!.n);
+    expect(within(card).getByText(t("en").bestPick)).toBeInTheDocument();
+    expect(card.querySelector(".lot-card--best")).not.toBeNull();
+
+    // ...and tapping any other listed lot takes it straight back off.
+    const other = listedRows()
+      .map((row) => row.getAttribute("data-lot-id") ?? "")
+      .find((id) => id !== bestLotId);
+    expect(other).toBeDefined();
+    tapDot(CROWD.find((l) => l.id === other)!);
+    const second = screen.getByTestId("map-card");
+    expect(within(second).queryByText(t("en").bestPick)).toBeNull();
+    expect(second.querySelector(".lot-card--best")).toBeNull();
+  });
+
+  it("gives no card to a row tapped in the list, which is already a card", async () => {
+    await renderWithDestination();
+    const row = listedRows()[1]!;
+    const id = row.getAttribute("data-lot-id") ?? "";
+    const before = lastPadding();
+
+    fireEvent.click(row);
+
+    // The finger is on the card. A second copy of it over the map would be the
+    // same car park twice, and would fight the sheet for the same band.
+    expect(screen.queryByTestId("map-card")).toBeNull();
+    expect(screen.getByTestId("lot-list").querySelector(`[data-lot-id="${id}"]`)?.className).toContain(
+      "lot-card--selected",
+    );
+    // ...and the map is not asked to make room for a card that is not there:
+    // the lot goes to the middle of the band, which is where a selection with
+    // nothing drawn over it belongs.
+    expect(lastPadding().top).toBe(before.top);
+    expect(easedDotY()).toBe((before.top + (window.innerHeight - lastPadding().bottom)) / 2);
   });
 
   /**
@@ -953,13 +1377,13 @@ describe("a car park the ranked list does not show", () => {
   }
 
   /**
-   * The pinned card's confidence grade has to rest on this lot's own history,
+   * The map card's confidence grade has to rest on this lot's own history,
    * exactly as a listed card's does.
    *
-   * `supportById` is built over the rows that render a card, and the pinned row
+   * `supportById` is built over the rows that render a card, and the carded row
    * has to be one of them: `LotCard`'s `support` defaults to `0`, which
    * `confidence.ts` reads as its *thinnest* evidence ("not watched at this time
-   * of week often enough yet"). A pinned row left out of that map therefore
+   * of week often enough yet"). A carded row left out of that map therefore
    * does not fail loudly -- it renders "Low · thin" beside twenty cards reading
    * "High · 5 weeks" for the same arrival, a card quietly less informative than
    * the list's, which is the one thing it exists not to be.
@@ -971,7 +1395,7 @@ describe("a car park the ranked list does not show", () => {
    * is then the only thing left deciding it, which is what makes the two
    * outcomes visibly different.
    */
-  it("grades the pinned card on its own history, not on a default of none", async () => {
+  it("grades the map card on its own history, not on a default of none", async () => {
     resetWeekCache();
     const week = encodeWeek(73, 5 * WEEKLY_OBSERVATIONS);
     const grid = crowdedGrid();
@@ -1015,14 +1439,14 @@ describe("a car park the ranked list does not show", () => {
 
     tapDot(CROWD[22]!);
 
-    const pinned = screen.getByTestId("pinned-lot");
-    const pill = within(pinned).getByRole("button", { name: /Confidence/ });
+    const card = screen.getByTestId("map-card");
+    const pill = within(card).getByRole("button", { name: /Confidence/ });
     expect(pill).toHaveTextContent(t("en").confidenceHigh);
     expect(pill).not.toHaveTextContent(t("en").confidenceLow);
     // ...and the evidence it names is the history, not a bare grade: the
     // popover is where a default of `0` would have said "not watched yet".
     fireEvent.click(pill);
-    expect(within(pinned).getByRole("note").textContent).toBe(
+    expect(within(card).getByRole("note").textContent).toBe(
       fillTemplate(t("en").confidenceWeeksTemplate, { n: 5 }),
     );
   });
@@ -1059,12 +1483,12 @@ describe("a car park the ranked list does not show", () => {
 
     tapDot(edge);
 
-    const pinned = screen.getByTestId("pinned-lot");
-    expect(within(pinned).getByTestId("lot-name")).toHaveTextContent(EDGE_NAME);
-    expect(within(pinned).getByTestId("lot-probability")).toHaveTextContent(`${EDGE_PERCENT}%`);
+    const card = screen.getByTestId("map-card");
+    expect(within(card).getByTestId("lot-name")).toHaveTextContent(EDGE_NAME);
+    expect(within(card).getByTestId("lot-probability")).toHaveTextContent(`${EDGE_PERCENT}%`);
     // Nine and a half kilometres is a long walk and the card says so; what it
     // does not do is refuse to answer a question the ranker can answer.
-    expect(within(pinned).getByTestId("lot-walk")).toBeInTheDocument();
+    expect(within(card).getByTestId("lot-walk")).toBeInTheDocument();
   });
 
   it("answers a car park past that edge with the map's popup, not with a manufactured walk", async () => {
@@ -1079,7 +1503,7 @@ describe("a car park the ranked list does not show", () => {
 
     tapDot(far);
 
-    expect(screen.queryByTestId("pinned-lot")).toBeNull();
+    expect(screen.queryByTestId("map-card")).toBeNull();
     // Not merely "no card": the number the card would have carried is
     // nowhere on the screen either.
     const minutes = walkMinutes(meters);
@@ -1110,7 +1534,7 @@ describe("a car park the ranked list does not show", () => {
     // The per-row bound covers this direction too, which is why the render
     // gate no longer repeats `outsideCoverage`: if no row is within the
     // radius then the tapped row is not either.
-    expect(screen.queryByTestId("pinned-lot")).toBeNull();
+    expect(screen.queryByTestId("map-card")).toBeNull();
     expect(screen.queryByTestId("lot-list")).toBeNull();
     // The notice says in words how far away everything is, and the popup
     // still names the car park that was tapped.
@@ -1127,7 +1551,7 @@ describe("a car park the ranked list does not show", () => {
     // Nothing to rank against, so there is no row to render: three of the
     // card's four fact tiles measure a trip that has no destination yet, and
     // inventing one would be the manufactured number this app exists to refuse.
-    expect(screen.queryByTestId("pinned-lot")).toBeNull();
+    expect(screen.queryByTestId("map-card")).toBeNull();
     expect(screen.queryByTestId("lot-list")).toBeNull();
     // The tap is still answered -- by the map's own popup -- and the page still
     // says how to get the rest.
@@ -1135,5 +1559,100 @@ describe("a car park the ranked list does not show", () => {
     expect(popup?.content?.textContent).toContain(OUTSIDER_NAME);
     expect(popup?.content?.textContent).toContain(`${OUTSIDER_PERCENT}%`);
     expect(screen.getByText(t("en").startPromptMap)).toBeInTheDocument();
+  });
+  /** Press one of the list's amenity filter chips. */
+  function pressFilter(amenity: "scooter" | "charging"): void {
+    act(() => {
+      fireEvent.click(screen.getByTestId(`filter-${amenity}`));
+    });
+  }
+
+  /**
+   * The list's filter reaches the map, and it reaches it as a *dimming*.
+   *
+   * The map is the whole city and has never been derived from the ranking
+   * (`App.tsx`), so the filter must not delete dots: a car park missing from a
+   * map of car parks is this project's "silently absent lot" failure, and the
+   * owner's rule for this feature -- "filter narrows, never hides silently" --
+   * rules it out in so many words. But leaving 1,089 identical dots under a
+   * list of six is the other failure: the driver cannot see which ones the
+   * list is talking about. So every feature stays and carries a flag instead.
+   *
+   * The flag means "the list you are looking at left this out", nothing more.
+   * The two reasons a lot can be left out -- reported none, said nothing --
+   * are deliberately *not* distinguished on a 5-px dot; the card is where that
+   * distinction is told, and the test below taps through to it.
+   */
+  it("dims the dots its filter dropped instead of deleting them", async () => {
+    await renderWithDestination();
+    const before = drawnLots().features.length;
+    expect(drawnLots().features.every((f) => f.properties.filteredOut === false)).toBe(true);
+
+    pressFilter("scooter");
+
+    const after = drawnLots();
+    // Not one car park fewer.
+    expect(after.features).toHaveLength(before);
+    const flag = new Map(after.features.map((f) => [f.properties.id, f.properties.filteredOut]));
+    // Fixture lots with scooter bays stay bright...
+    expect(flag.get(CROWD[0]!.id)).toBe(false);
+    expect(flag.get(OUTSIDER_ID)).toBe(false);
+    // ...and the ones whose feed never mentions them are dimmed, exactly as
+    // the list dropped them.
+    expect(flag.get(SECOND_ID)).toBe(true);
+    expect(flag.get(FAR_ID)).toBe(true);
+    expect(listedRows().map((row) => row.getAttribute("data-lot-id"))).not.toContain(SECOND_ID);
+  });
+
+  it("paints the dimming, rather than filtering the layer down to the matches", async () => {
+    await renderWithDestination();
+    const lots = shared.map?.layerSpecs.get(LOTS_LAYER);
+    // No layer-level `filter`: removing the feature is the thing this must not do.
+    expect(lots?.filter).toBeUndefined();
+    const opacity = JSON.stringify(lots?.paint?.["circle-opacity"]);
+    expect(opacity).toContain("filteredOut");
+    expect(opacity).toContain(String(FILTERED_OUT_OPACITY));
+    // Well clear of the 0.5 an unknown *forecast* already gets, so the two
+    // dimmings cannot be read as the same statement.
+    expect(FILTERED_OUT_OPACITY).toBeLessThan(0.5);
+  });
+
+  it("stops dimming once there is no list for the dimming to be a statement about", async () => {
+    // The dim means "the list left this out". Move the destination somewhere
+    // the ranking has no answer for and there is no list -- and no filter row
+    // either, since both live with it. A dimming that outlived them would
+    // fade half the city with nothing on screen saying why or how to stop it,
+    // which is the silent hiding this feature's own rule forbids.
+    await renderWithDestination();
+    pressFilter("scooter");
+    expect(drawnLots().features.some((f) => f.properties.filteredOut)).toBe(true);
+
+    await act(async () => {
+      fire("click", null, { lngLat: { lat: 22.63, lng: 120.3 }, point: { x: 1, y: 1 } });
+    });
+    await screen.findByTestId("outside-coverage");
+
+    expect(screen.queryByTestId("filter-scooter")).toBeNull();
+    expect(drawnLots().features.every((f) => f.properties.filteredOut === false)).toBe(true);
+    // ...and not one dot went with it.
+    expect(drawnLots().features).toHaveLength(CROWD.length);
+  });
+
+  it("still answers a tap on a dimmed dot, with the card that explains why it is dim", async () => {
+    await renderWithDestination();
+    pressFilter("scooter");
+
+    tapDot(lotById(SECOND_ID));
+
+    // The tap is answered where the tap was, filter or no filter: the ranking
+    // behind the card is the unfiltered one, because the driver asked about
+    // this car park specifically.
+    const card = screen.getByTestId("map-card");
+    expect(within(card).getByTestId("lot-name")).toHaveTextContent(SECOND_NAME);
+    // And the card tells the truth about the field that dropped it: this lot's
+    // feed never mentioned scooters, so the card says nothing about them --
+    // it does not say "none", which would be a measurement nobody made.
+    expect(within(card).queryByTestId("lot-scooter")).toBeNull();
+    expect(card.textContent).not.toContain(t("en").amenityNone);
   });
 });

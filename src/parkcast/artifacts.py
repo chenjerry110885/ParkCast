@@ -294,6 +294,16 @@ def build_lots_json(
     app's stored recents key on the id it already knows. A namespaced id here
     would orphan every saved lot and change every published byte.
 
+    `m` and `e` are `Lot.capacity_motor` (scooter/motorcycle capacity) and
+    `Lot.charging` (EV charging points), Taipei-only today -- see
+    `metadata.Lot`. Each is present only when its value is not None: a real
+    `0` still gets the key (a car park with a measured zero of either is a
+    fact worth shipping), but "not reported" gets no key at all rather than
+    a `null`, the same economy `u` and `f` already use below -- at roughly
+    1,100 lots, a `null` written for every lot lacking a value is bytes spent
+    on nothing a client can use, where an absent key means exactly the same
+    "unknown" for free. Additive, like `u` and `f`: `v` stays where it is.
+
     `not_updating` and `free` are keyed by the STORED (namespaced) id, because
     that is what the store and `liveness` deal in. Only the published `id`
     field and `roster_id` are bare.
@@ -312,6 +322,10 @@ def build_lots_json(
             row["u"] = withheld[lot.id]
         if free is not None and lot.id in free:
             row["f"] = free[lot.id]
+        if lot.capacity_motor is not None:
+            row["m"] = lot.capacity_motor
+        if lot.charging is not None:
+            row["e"] = lot.charging
         rows.append(row)
     payload = {
         "v": VERSION,

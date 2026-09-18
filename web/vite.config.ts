@@ -9,12 +9,19 @@ import { createLocalArtifacts } from './dev/localArtifacts.ts'
  * Forecast files for `npm run dev`. With PARKCAST_LIVE_ORIGIN set, from the live
  * site through a shared, budgeted copy; otherwise from web/.dev-artifacts/.
  * Nothing under public/ -- whatever is there is copied into every build.
+ *
+ * PARKCAST_DEV_NO_AMENITIES=1 serves the local roster with `m` and `e` stripped
+ * off every row: the state of the live site until the collector is rebuilt, and
+ * the only way to look at the "nobody said" branch over 1,089 real car parks.
+ * See `LocalOptions.stripAmenities`.
  */
 function devArtifacts(): Plugin {
   const live = process.env.PARKCAST_LIVE_ORIGIN
   const middleware = live
     ? createLiveArtifacts({ origin: live })
-    : createLocalArtifacts(fileURLToPath(new URL('./.dev-artifacts', import.meta.url)))
+    : createLocalArtifacts(fileURLToPath(new URL('./.dev-artifacts', import.meta.url)), {
+        stripAmenities: process.env.PARKCAST_DEV_NO_AMENITIES === '1',
+      })
   return {
     name: 'parkcast-dev-artifacts',
     apply: 'serve',

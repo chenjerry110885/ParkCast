@@ -67,4 +67,55 @@ describe("local artifacts middleware", () => {
     await mw({ url: "/other", method: "GET" }, res, next);
     expect(next).toHaveBeenCalled();
   });
+
+  /**
+   * The dev loop's fixture for the branch neither the dev roster nor the live
+   * site reaches -- and which the live site will be *entirely* made of until
+   * the rebuilt collector publishes. See `LocalOptions.stripAmenities`.
+   */
+  describe("with PARKCAST_DEV_NO_AMENITIES", () => {
+    const ROSTER = {
+      v: 1,
+      roster_id: 4242,
+      n_lots: 2,
+      lots: [
+        { i: 0, id: "TPE0001", n: "甲", m: 40, e: 2 },
+        { i: 1, id: "TPE0002", n: "乙", m: 0, e: 0 },
+      ],
+    };
+
+    beforeEach(() => {
+      writeFileSync(join(dir, "lots.json"), JSON.stringify(ROSTER));
+    });
+
+    it("serves the roster with both keys gone, including the reported zeroes", async () => {
+      const mw = createLocalArtifacts(dir, { stripAmenities: true });
+      const res = fakeRes();
+      await mw({ url: "/artifacts/lots.json", method: "GET" }, res, vi.fn());
+      const doc = JSON.parse(res.body as string) as typeof ROSTER;
+      // Absent, not zeroed: a `0` left behind would be the collapse the whole
+      // feature refuses, arrived at from the other end.
+      for (const lot of doc.lots) {
+        expect(lot).not.toHaveProperty("m");
+        expect(lot).not.toHaveProperty("e");
+      }
+      // Everything else is the roster the grid is paired with, untouched.
+      expect(doc.roster_id).toBe(ROSTER.roster_id);
+      expect(doc.lots.map((l) => l.id)).toEqual(["TPE0001", "TPE0002"]);
+      expect(doc.lots[0]!.n).toBe("甲");
+      expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
+    });
+
+    it("leaves the grid alone, and leaves the roster alone when it is off", async () => {
+      const stripped = createLocalArtifacts(dir, { stripAmenities: true });
+      const gridRes = fakeRes();
+      await stripped({ url: "/artifacts/grid.bin", method: "GET" }, gridRes, vi.fn());
+      expect(Array.from(gridRes.body as Uint8Array)).toEqual(Array.from(gridBytes));
+
+      const plain = createLocalArtifacts(dir);
+      const res = fakeRes();
+      await plain({ url: "/artifacts/lots.json", method: "GET" }, res, vi.fn());
+      expect(JSON.parse(new TextDecoder().decode(res.body as Uint8Array)).lots[0].m).toBe(40);
+    });
+  });
 });

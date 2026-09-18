@@ -375,6 +375,50 @@ basemap tiles or place index it verifies.
 
 ---
 
+## Scooter and charging on the card — built 2026-09-18 on `fix/map-card-and-amenities`, **not yet deployed, and the deploy is ordered**
+
+`lots.json` gained two more optional keys beside `f`: **`m`**, Taipei's `totalmotor` (scooter /
+motorcycle capacity), and **`e`**, its `ChargingStation` (EV charging points). Both come from
+`TCMSV_alldesc.json` through `metadata.parse_metadata` → `Lot.capacity_motor` / `Lot.charging` →
+`artifacts.build_lots_json`, and both are **Taipei-only today**: the other five cities either report
+a *live* motorcycle count under another name (a different fact — occupancy, not capacity) or no
+motorcycle field at all, and none has anything resembling `ChargingStation`. Surveyed live
+2026-09-18 over 1,773 lots: **395 non-zero `totalmotor`, 662 non-zero `ChargingStation`**. Six
+neighbouring metadata fields are uniformly `'0'` across the whole roster and were deliberately not
+added — see [`docs/sources.md`](sources.md), which has the full survey.
+
+**Three states per field, not two, and the whole feature rests on the difference.** A count is a
+count; **`0` is a measurement** ("we asked, there are none"); **an absent key is not** ("nobody
+said"). `quality.clean_count` makes that split at the collector — negative or unparseable → `None`,
+a real `0` survives — and unlike `totalcar`, neither field gets the `capacity_car`-style `0 → None`
+collapse, because a `0` here carries no second meaning about the lot's own type.
+`build_lots_json` writes each key only when it is not `None`, so absent on the wire means absent in
+the feed. The web app keeps the same three states from `amenities.reported` through the card's tile
+(a `0` renders as "None" in words; an absent field draws no tile at all) to the filter's **two**
+hidden counts, which are never summed into one.
+
+**The deploy is ordered: collector first, then the web app.** Checked against production on
+2026-09-18, `GET https://parkcast.tpe-dev.workers.dev/artifacts/lots.json` returns 1,089 lots with
+**zero `m` and zero `e`** — the app shipped first would read every car park as "nobody said". So:
+rebuild and restart the collector, wait for one publish carrying the keys, then release the web app.
+The UI no longer *depends* on that ordering — a filter chip is not offered at all while no car park
+in the loaded roster reports its field (`amenities.answerable`), so the interim state is simply the
+app as it is today, with no chips — but the ordering is still what gets the feature in front of
+anyone.
+
+**Looking at the interim state in dev:** `PARKCAST_DEV_NO_AMENITIES=1 npm run dev` in `web/` serves
+the local roster with both keys stripped from all 1,089 rows. The dev roster carries both on every
+row, so without this neither production nor the dev loop ever reaches the "nobody said" branch.
+
+**The card's geometry is measured now, not declared.** `MAP_CARD_PX = 288` was a constant that had
+to track the card's rendered height, and the two extra tiles broke it silently: 289 px at 375 px
+wide, 385 px at 360 px where the fact tiles stacked into one column, against a band 428 px tall — so
+the dot the card describes was eased to rest *inside* the card. `App.tsx`'s `mapCardDepthPx` asks
+the rendered card instead, and `.map-card`'s `max-height` bounds it by the band it shares with its
+dot. See "the map's card" in `web/src/styles/components.css`.
+
+---
+
 ## What to do next
 
 1. ~~Deploy Plan 3e to the collector~~ — **done 2026-09-14 09:06**; see "Which machine is which".
@@ -462,6 +506,11 @@ basemap tiles or place index it verifies.
    a number produced before scoping it is about the wrong city.
 7. **Then** consider a trained model — against a persistence baseline that is strong on an
    autocorrelated series, and a blend that now beats it.
+8. **Ship 機車 / 充電 — collector first, then the web app.** `fix/map-card-and-amenities` is built and
+   reviewed; nothing of it is live. Rebuild and restart the collector, wait for one publish whose
+   `lots.json` carries `m` and `e` (check a row, not just the file), and only then release the web
+   app. See "Scooter and charging on the card" above for why the order matters and what the interim
+   state looks like.
 
 Also deferred: removing frozen lots from the climatology counts; retiring or recalibrating
 `find_frozen_lots`; compressing the daily metadata snapshots (2.17 MB a day, ~90% of the cold store).
