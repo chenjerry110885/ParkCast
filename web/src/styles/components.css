@@ -201,6 +201,11 @@
 /* Text-styled, not box-styled: this button wraps only the lot's name (see LotCard.tsx's header
    comment for why), so it must look like plain text, not a button-shaped button inside the card. */
 .lot-card__button { display: block; width: 100%; padding: 0; border: 0; background: none; text-align: left; color: inherit; font: inherit; }
+/* Both of these are `transform`, and they work only because `rise`
+   (motion.css) animates `translate` instead: a filled animation holds the
+   property it ends on at the animation origin, which outranks these rules, so
+   while `rise` ended at `transform: none` the lift and the press never took
+   effect at all. Pinned by cssTransformAnim.test.ts. */
 .lot-card:active { transform: scale(0.98); }
 @media (hover: hover) { .lot-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-2); } }
 .lot-card--selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow-2); }

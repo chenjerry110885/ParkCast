@@ -101,3 +101,23 @@ describe(".pill--best.anim-shine::after sweep", () => {
     expect(rule(".pill")).toMatch(/overflow\s*:\s*hidden/);
   });
 });
+
+describe(".lot-card's hover lift and press", () => {
+  it("survives `.anim-rise`, which no longer occupies `transform`", () => {
+    // The third instance of the same collision, and the one 4dfdc14's audit
+    // missed by reasoning about resting states only: `transform: none` does
+    // match a card's resting state, but a *filled* animation holds it there at
+    // the animation origin, above `:hover` and `:active`. Both rules were dead
+    // -- verified in a browser rather than argued: a real card whose `rise` had
+    // finished stayed at matrix(1,0,0,1,0,0) under a rule of the same weight as
+    // the hover rule, while an identical card with its animation cancelled took
+    // matrix(1,0,0,1,0,-2).
+    expect(rule(".lot-card:hover")).toMatch(/transform\s*:/);
+    expect(rule(".lot-card:active")).toMatch(/transform\s*:/);
+    expect(motionRule(".anim-rise")).toMatch(/animation\s*:[^;]*\brise\b[^;]*\bboth\b/);
+    // `translate` composes with `transform` rather than replacing it, so the
+    // entrance can move the card and the affordance can still answer a finger.
+    expect(keyframes("rise")).not.toMatch(/transform\s*:/);
+    expect(keyframes("rise")).toMatch(/translate\s*:/);
+  });
+});
