@@ -8,9 +8,9 @@
  * head -- how likely a space is, how far they then walk, and what it costs --
  * into one comparable number, in NT$.
  *
- *     cost = p * (walkMin * TIME_VALUE + fee)
- *          + (1 - p) * (CIRCLING_PENALTY_MIN * TIME_VALUE
- *                       + DRIVE_MIN_PER_KM * TIME_VALUE * km to the fallback lot
+ *     cost = p * (walkMin * WALK_VALUE + fee)
+ *          + (1 - p) * (CIRCLING_PENALTY_MIN * DELAY_VALUE
+ *                       + DRIVE_MIN_PER_KM * DELAY_VALUE * km to the fallback lot
  *                       + the fallback lot's own cost)
  *
  * The second line is the one that converts a probability into a decision: it
@@ -34,14 +34,31 @@ import type { Lot, Price } from "./types";
  * ------------------------------------------------------------------ */
 
 /**
- * NT$ a minute of the driver's own time is worth. NT$5/min is NT$300/hour,
- * about 1.5x Taiwan's minimum wage -- the usual multiplier for out-of-vehicle
- * time, which people dislike more than time spent sitting in the car.
+ * NT$ a minute of the driver's own time is worth while walking from the car
+ * park to the destination. NT$5/min is NT$300/hour, about 1.5x Taiwan's
+ * minimum wage -- the usual multiplier for out-of-vehicle time, which people
+ * dislike more than time spent sitting in the car.
  *
- * Only the *ratios* between these four constants change any ranking; scaling
+ * Split from what used to be one constant, `TIME_VALUE`, which priced the
+ * walk and a failed attempt at the same rate despite them being different
+ * quantities. `DELAY_VALUE` now prices the failure branch on its own, so a
+ * later preference can move what a driver's time is worth on foot without
+ * moving what a failed attempt costs. Both start at 5, so the split changes
+ * no ranking by itself -- only a future difference between the two will.
+ *
+ * Only the *ratios* between these five constants change any ranking; scaling
  * all of them together changes nothing.
  */
-export const TIME_VALUE = 5;
+export const WALK_VALUE = 5;
+
+/**
+ * NT$ a minute is worth when it is lost to a failed attempt: circling after
+ * arriving to find no space (`CIRCLING_PENALTY_MIN`), and the drive to
+ * wherever the trip actually ends up (`DRIVE_MIN_PER_KM`). Same NT$5/min
+ * out-of-vehicle rate as `WALK_VALUE`, and the same reasoning -- see there
+ * for why the two are priced separately instead of sharing one constant.
+ */
+export const DELAY_VALUE = 5;
 
 /**
  * How long we assume the visit lasts, in hours. Two hours is the shape of a
@@ -94,7 +111,7 @@ export const CIRCLING_PENALTY_MIN = 12;
  * 30 km/h on streets a fifth longer than the straight line, the quick end of
  * driving across Taipei, so close to the least this drive can cost. A straight
  * line because the ranker has no road network; the constant absorbs the detour.
- * The minutes are priced at `TIME_VALUE`, like circling. That rate is meant for
+ * The minutes are priced at `DELAY_VALUE`, like circling. That rate is meant for
  * time out of the car and overstates time behind the wheel, while fuel is not
  * counted at all; one time value keeps the exchange rate with circling where it
  * was set.
@@ -358,7 +375,7 @@ function fallbackCost(
   let anyForecast: { cost: number; at: LatLon | null } = { cost: Infinity, at: null };
   for (const s of scored) {
     if (s.probability === null) continue;
-    const simple = s.certain + (1 - s.probability) * CIRCLING_PENALTY_MIN * TIME_VALUE;
+    const simple = s.certain + (1 - s.probability) * CIRCLING_PENALTY_MIN * DELAY_VALUE;
     if (simple < anyForecast.cost) anyForecast = { cost: simple, at: s.position };
     if (s.probability >= RELIABLE_P && simple < reliable.cost) {
       reliable = { cost: simple, at: s.position };
@@ -427,7 +444,7 @@ export function rankLots(input: RankInput): Ranked[] {
     const probability = usableProbability(input.probability(index, input.horizonMin));
     // What parking *here* costs once you are in: the whole story for a lot whose
     // probability is unknown, and the sort key within that group.
-    const certain = walkMin * TIME_VALUE + money.fee;
+    const certain = walkMin * WALK_VALUE + money.fee;
     return { lot, index, position, meters, walkMin, money, probability, certain };
   });
 
@@ -437,7 +454,7 @@ export function rankLots(input: RankInput): Ranked[] {
   const drive = (from: LatLon): number =>
     fallback.at === null
       ? 0
-      : (DRIVE_MIN_PER_KM * TIME_VALUE * haversineMeters(from, fallback.at)) / 1000;
+      : (DRIVE_MIN_PER_KM * DELAY_VALUE * haversineMeters(from, fallback.at)) / 1000;
 
   const rows = scored.map((s) => {
     const row: Ranked = {
@@ -455,7 +472,7 @@ export function rankLots(input: RankInput): Ranked[] {
           ? null
           : s.probability * s.certain +
             (1 - s.probability) *
-              (CIRCLING_PENALTY_MIN * TIME_VALUE + drive(s.position) + fallback.cost),
+              (CIRCLING_PENALTY_MIN * DELAY_VALUE + drive(s.position) + fallback.cost),
     };
     return { row, certain: s.certain };
   });

@@ -205,7 +205,7 @@ You do not pay this car park's fare for a space it did not have, and a failed at
 for the trip it forces rather than for circling alone. `RELIABLE_P` (0.9) defines which lots can
 serve as that alternative; the fallback is one lot per ranking, derived from the roster rather than
 tuned, so failing in a dense district costs less than failing in a sparse one. The drive is
-`DRIVE_MIN_PER_KM` (2.4) x `TIME_VALUE` = **NT$12 per straight-line km** from the lot that failed to
+`DRIVE_MIN_PER_KM` (2.4) x `DELAY_VALUE` = **NT$12 per straight-line km** from the lot that failed to
 the fallback lot. At `p = 1` the failure branch vanishes and the score is simply walk plus fare.
 
 **What it replaced, and why.** The old score was `walk + fare + (1 - p) x circling`: it charged the

@@ -1,11 +1,15 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { haversineMeters } from "../src/geo";
 import {
   CIRCLING_PENALTY_MIN,
+  DELAY_VALUE,
   DRIVE_MIN_PER_KM,
   EXPECTED_HOURS,
-  TIME_VALUE,
   UNKNOWN_RESERVE,
+  WALK_VALUE,
   listRows,
   notUpdating,
   rankLots,
@@ -275,7 +279,7 @@ describe("listRows", () => {
  * one: it charged every lot its own fee whether or not you got in, and charged
  * a failed attempt only the time spent circling -- never the trip to wherever
  * you actually ended up. The probability term was therefore capped at
- * `CIRCLING_PENALTY_MIN * TIME_VALUE`, NT$60 at the shipped constants, which is
+ * `CIRCLING_PENALTY_MIN * DELAY_VALUE`, NT$60 at the shipped constants, which is
  * also 12 minutes of walking. Being a kilometre closer cancelled being
  * certainly full, and `scripts/probe-ranker.py` found 89 orderings that said so.
  */
@@ -310,8 +314,8 @@ describe("rankLots: the cost of arriving to find no space", () => {
     // gained nothing.
     const km = haversineMeters({ lat: 25.05, lon: 121.52 }, { lat: 25.0596, lon: 121.52 }) / 1000;
     expect(flip.cost).toBeCloseTo(
-      0.5 * (flip.walkMin * TIME_VALUE + 60) +
-        0.5 * (CIRCLING_PENALTY_MIN * TIME_VALUE + DRIVE_MIN_PER_KM * TIME_VALUE * km + far.cost!),
+      0.5 * (flip.walkMin * WALK_VALUE + 60) +
+        0.5 * (CIRCLING_PENALTY_MIN * DELAY_VALUE + DRIVE_MIN_PER_KM * DELAY_VALUE * km + far.cost!),
       6,
     );
   });
@@ -324,7 +328,7 @@ describe("rankLots: the cost of arriving to find no space", () => {
       lots: [lot("sure-thing", 25.0505, priced(45))],
       probability: () => 1,
     });
-    expect(out[0]!.cost).toBeCloseTo(out[0]!.walkMin * TIME_VALUE + 45 * EXPECTED_HOURS, 6);
+    expect(out[0]!.cost).toBeCloseTo(out[0]!.walkMin * WALK_VALUE + 45 * EXPECTED_HOURS, 6);
   });
 
   it("keeps working when nothing in the roster is reliable", () => {
@@ -406,11 +410,140 @@ describe("rankLots: the drive a failure forces", () => {
       probability: () => 0.95,
     });
     const only = out[0]!;
-    const certain = only.walkMin * TIME_VALUE + 30 * EXPECTED_HOURS;
-    const fallback = certain + (1 - 0.95) * CIRCLING_PENALTY_MIN * TIME_VALUE;
+    const certain = only.walkMin * WALK_VALUE + 30 * EXPECTED_HOURS;
+    const fallback = certain + (1 - 0.95) * CIRCLING_PENALTY_MIN * DELAY_VALUE;
     expect(only.cost).toBeCloseTo(
-      0.95 * certain + (1 - 0.95) * (CIRCLING_PENALTY_MIN * TIME_VALUE + fallback),
+      0.95 * certain + (1 - 0.95) * (CIRCLING_PENALTY_MIN * DELAY_VALUE + fallback),
       6,
     );
+  });
+});
+
+/**
+ * `WALK_VALUE` and `DELAY_VALUE` price different things -- the whole point of
+ * splitting them out of what used to be one constant, `TIME_VALUE`, is that a
+ * later preference can move one without moving the other.
+ *
+ * Every other test in this file, and `rank.ts` itself, ships both constants
+ * at 5. That is deliberate -- the split must not change today's ranking --
+ * but it also means no test that only reads the shipped values can tell
+ * `WALK_VALUE` and `DELAY_VALUE` apart: 5 and 5 produce the same arithmetic
+ * regardless of which name prices which term, so a bug that swapped them
+ * (the walk term charged at `DELAY_VALUE`, the failure branch at
+ * `WALK_VALUE`) would still pass every assertion elsewhere in this file.
+ *
+ * The only way to actually catch that is to run the real formula with the
+ * two constants pulled apart. This loads a byte-patched copy of `rank.ts` --
+ * identical except that `WALK_VALUE` and `DELAY_VALUE` are declared with two
+ * different numbers -- and checks that the walk term tracks the first and
+ * the failure branch tracks the second, and that neither term matches what
+ * the *other* constant would have produced.
+ */
+describe("rankLots: WALK_VALUE and DELAY_VALUE price independently", () => {
+  it("charges the walk term at WALK_VALUE and the failure branch at DELAY_VALUE, not swapped", async () => {
+    const testsDir = dirname(fileURLToPath(import.meta.url));
+    const srcPath = join(testsDir, "../src/rank.ts");
+    const source = readFileSync(srcPath, "utf8");
+
+    // Distinct, easy-to-tell-apart values -- nothing here matches the
+    // shipped 5, so any arithmetic that reads the wrong constant lands on a
+    // visibly wrong number instead of coincidentally the right one.
+    const WALK_VALUE_TEST = 3;
+    const DELAY_VALUE_TEST = 11;
+
+    const patchDeclaration = (text: string, name: string, value: number): string => {
+      const re = new RegExp(`export const ${name} = \\d+(?:\\.\\d+)?;`);
+      if (!re.test(text)) {
+        throw new Error(
+          `fixture is stale: "export const ${name} = <number>;" not found in rank.ts`,
+        );
+      }
+      return text.replace(re, `export const ${name} = ${value};`);
+    };
+
+    let patched = patchDeclaration(source, "WALK_VALUE", WALK_VALUE_TEST);
+    patched = patchDeclaration(patched, "DELAY_VALUE", DELAY_VALUE_TEST);
+    // The copy lives one directory further from `src/geo` and `src/types`
+    // than the original does.
+    patched = patched
+      .replace('from "./geo"', 'from "../src/geo"')
+      .replace('from "./types"', 'from "../src/types"');
+
+    const genDir = join(testsDir, "../.dev-artifacts");
+    mkdirSync(genDir, { recursive: true });
+    const genPath = join(genDir, "rank.swap-check.generated.ts");
+    writeFileSync(genPath, patched, "utf8");
+
+    try {
+      // A cache-busting query so a second run of this test (or a watch
+      // rebuild) does not get served a stale module from Vite's cache.
+      const variant = (await import(
+        /* @vite-ignore */ `../.dev-artifacts/rank.swap-check.generated.ts?t=${Date.now()}`
+      )) as { rankLots: typeof rankLots };
+
+      const destination = { lat: 25.05, lon: 121.52 };
+      // Close enough to have a short, unambiguous walk; far enough apart
+      // from each other that the drive between them is not a rounding error.
+      const reliablePos = { lat: destination.lat + 0.002, lon: destination.lon };
+      const failingPos = { lat: destination.lat + 0.02, lon: destination.lon };
+
+      const lots = [
+        {
+          i: 0, id: "reliable", n: "reliable", a: "中正區",
+          y: reliablePos.lat, x: reliablePos.lon, c: 50, t: "民營停車場",
+          p: { k: "exact", lo: 40, hi: 40 },
+        },
+        {
+          i: 1, id: "failing", n: "failing", a: "中正區",
+          y: failingPos.lat, x: failingPos.lon, c: 50, t: "民營停車場",
+          p: { k: "exact", lo: 40, hi: 40 },
+        },
+      ] as never;
+
+      const out = variant.rankLots({
+        destination,
+        horizonMin: 15,
+        // A certain space (p = 1, so it is also the only reliable lot and
+        // therefore the ranking's one fallback) and a certain failure (p = 0,
+        // so its own walk and fare are weighted away entirely).
+        lots,
+        probability: (i) => (i === 0 ? 1 : 0),
+      });
+
+      const reliableRow = out.find((r) => r.id === "reliable")!;
+      const failingRow = out.find((r) => r.id === "failing")!;
+      expect(reliableRow.cost).not.toBeNull();
+      expect(failingRow.cost).not.toBeNull();
+      expect(reliableRow.hourly).not.toBeNull();
+
+      // p = 1 removes the failure branch entirely, so `reliable`'s cost is
+      // exactly the walk term: walkMin * WALK_VALUE_TEST + fee. Computed from
+      // the row's own reported `walkMin`/`hourly` rather than from `.cost`
+      // itself, so this check cannot be fooled by a bug in the same formula.
+      const reliableCertain =
+        reliableRow.walkMin * WALK_VALUE_TEST + reliableRow.hourly! * EXPECTED_HOURS;
+      expect(reliableRow.cost).toBeCloseTo(reliableCertain, 6);
+      // Discriminating half: had the walk term instead read DELAY_VALUE, this
+      // wrong-constant reading is what it would have produced.
+      const reliableCertainIfSwapped =
+        reliableRow.walkMin * DELAY_VALUE_TEST + reliableRow.hourly! * EXPECTED_HOURS;
+      expect(reliableRow.cost).not.toBeCloseTo(reliableCertainIfSwapped, 6);
+
+      // p = 0 removes `failing`'s own walk and fare from its score entirely,
+      // leaving only the failure branch: circling and the drive to the
+      // fallback, both at DELAY_VALUE_TEST, plus the fallback's own (already
+      // independently checked) cost.
+      const km = haversineMeters(failingPos, reliablePos) / 1000;
+      const expectedFailing =
+        DELAY_VALUE_TEST * (CIRCLING_PENALTY_MIN + DRIVE_MIN_PER_KM * km) + reliableCertain;
+      expect(failingRow.cost).toBeCloseTo(expectedFailing, 6);
+      // Discriminating half: had the failure branch instead read WALK_VALUE,
+      // this wrong-constant reading is what it would have produced.
+      const expectedFailingIfSwapped =
+        WALK_VALUE_TEST * (CIRCLING_PENALTY_MIN + DRIVE_MIN_PER_KM * km) + reliableCertain;
+      expect(failingRow.cost).not.toBeCloseTo(expectedFailingIfSwapped, 6);
+    } finally {
+      rmSync(genPath, { force: true });
+    }
   });
 });
