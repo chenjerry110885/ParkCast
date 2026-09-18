@@ -76,7 +76,21 @@
 .sheet--dragging .sheet__grip::before { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
 .sheet__header { padding: 0 16px 8px; }
 .sheet__body { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: 0 12px 12px; touch-action: pan-y; }
-.sheet--full .sheet__body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+/* Scrollable at `half` as well as at `full`, because a card is taller than the
+   half sheet's body and always was: the chrome above it (grip, name, freshness,
+   arrival picker) takes 223 px of the 447 px sheet on an 812 px phone, leaving
+   224 px of body for a card measured at 227 px -- and a card carrying a tags row
+   is taller still. Before this, a driver at `half` could see the top of the
+   first card and had no way to reach the rest of it but to drag the whole sheet
+   to `full` -- which is the only state in which a tap on a dot on the map
+   underneath is no longer possible. `peek` stays clipped on purpose: at 53 px of
+   body it is a hint that there is a list, not a list.
+   The drag gestures are untouched -- `bodyDown` only ever starts a drag from
+   `full` at the top of the scroll, and the grip and header still drag from
+   anywhere. Both halves of this are pinned by `sheetBodyScroll.test.tsx`: the
+   selector list here, and the `data-snap` attribute it leans on. */
+.sheet--full .sheet__body,
+.sheet[data-snap="half"] .sheet__body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
 
 .panel {
   position: absolute; left: 0; top: 0; bottom: 0; z-index: 4; width: var(--panel-width);
