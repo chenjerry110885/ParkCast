@@ -24,9 +24,14 @@
   animation: shimmer 2.4s linear infinite;
 }
 .map-unavailable { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; margin: 0; text-align: center; color: var(--muted); }
+/* Centred with auto margins against a pinned inset-inline, not a
+   `transform: translateX(-50%)` -- `.anim-slide-down` (below) sets
+   `transform` in its own keyframes, and with `animation-fill-mode: both`
+   that end value (`none`) would permanently replace whatever transform this
+   rule set, uncentring the hint the instant its entrance finishes. */
 .map-hint {
-  position: absolute; left: 50%; top: calc(var(--safe-top) + var(--topbar-height) + 12px); transform: translateX(-50%);
-  max-width: min(92vw, 420px); margin: 0; padding: 8px 14px; border-radius: var(--radius-pill);
+  position: absolute; inset-inline: 0; top: calc(var(--safe-top) + var(--topbar-height) + 12px);
+  max-width: min(92vw, 420px); margin: 0 auto; padding: 8px 14px; border-radius: var(--radius-pill);
   font-size: 13px; color: var(--text); box-shadow: var(--shadow-2); z-index: 2; text-align: center;
 }
 
@@ -207,7 +212,12 @@
 /* ------------------------------------------------------------ pills and popover */
 .pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: var(--radius-pill); border: 0; font-size: 11px; font-weight: 700; line-height: 1.4; background: var(--unknown-soft); color: var(--muted); position: relative; overflow: hidden; }
 .pill--best { background: var(--gradient-best); color: #fff; }
-.pill--best.anim-shine::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent); animation: shine 800ms var(--ease-out) 1; }
+/* `forwards` (not `both`, and never `infinite`): the sweep must end
+   parked past the pill's right edge -- clipped by `.pill`'s own
+   `overflow: hidden` -- rather than reverting to its resting (untransformed)
+   layout position, which is what left it visibly frozen over the badge's
+   left 40% once the single iteration finished. */
+.pill--best.anim-shine::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 40%; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent); animation: shine 800ms var(--ease-out) 1 forwards; }
 .pill--high { background: var(--accent-soft); color: var(--accent); }
 .pill--medium { background: var(--warn-soft); color: var(--warn); }
 .pill--low { background: var(--unknown-soft); color: var(--muted); }
