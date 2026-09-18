@@ -1,28 +1,30 @@
-# ParkCast — Stage A: arrival at any time, confidence from evidence
+# ParkCast — ranking preferences: cheaper, balanced, closer
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-The nationwide-collector todo is archived at `docs/superpowers/plans/2026-09-16-nationwide-collector-archive.md`.
+The Stage A todo is archived at `docs/superpowers/plans/2026-09-17-stage-a-archive.md`.
 
-**Goal:** Let a driver ask about any arrival time within seven days, and make the confidence label mean "how much history is behind this" rather than "how far away is it".
+**Goal:** Let a driver say whether they would rather walk less or pay less, without ever letting that preference make the app recommend a car park it believes is full.
 
-**Architecture:** A new daily artifact, `week.bin`, carries the per-lot, per-half-hour-of-week climatology the forecaster already computes, plus the observation count behind each cell. The app keeps reading `grid.bin` inside its two-hour window and computes anything beyond it from `week.bin` using the server's own blend, so the two agree at the seam. `confidence.ts` gains support as a second input.
+**Architecture:** `rank.ts`'s `TIME_VALUE` splits into `WALK_VALUE` (the preset moves it) and `DELAY_VALUE` (floor-coupled: `max(5, WALK_VALUE)`). Three presets set the pair. The list's cap becomes distance-bounded with the tail behind an expander. `probe-ranker.py` gains a sweep that measures the safety invariant instead of asserting it.
 
-**Tech Stack:** Python 3.13+ (stdlib `struct`), TypeScript/React, Cloudflare Workers. No new dependency.
+**Tech Stack:** TypeScript/React, Python 3.13+ (stdlib only). No new dependency.
 
-**Spec:** [`docs/superpowers/specs/2026-09-16-stage-a-any-time-arrival-design.md`](../docs/superpowers/specs/2026-09-16-stage-a-any-time-arrival-design.md) — **read §0 first**; it records what the six-city rollout changed under this design.
+**Spec:** [`docs/superpowers/specs/2026-09-18-ranking-preferences-design.md`](../docs/superpowers/specs/2026-09-18-ranking-preferences-design.md) — **read §3 and §5 first**; they record two designs the measurement overturned.
 
 ## Global Constraints
 
-- **The honesty rules bind every task.** A `null` probability never renders as a number; a count of `0` is a real reading, never "not reporting"; the observed count `f` is never presented as a forecast; the ranker's expected-cost score is never shown.
-- **Taipei's existing published bytes must not change.** `grid.bin` and `lots.json` keep their format, their names and their contents. `week.bin` is additive. There is an existing byte-identity test; it must keep passing untouched.
-- **Shard naming follows `artifacts.grid_name`:** Taipei's file is `week.bin`; any other city's would be `week-{city}.bin` (`artifacts.UNSUFFIXED_CITY`). Published ids inside a shard are **bare**; `roster_id` hashes the bare ids.
-- **Stage A serves Taipei only** — that is what the Worker and app serve today. Write the builder per city; publish for the served city.
-- No new runtime dependency. Cloudflare Workers Free: no paid feature, **and no new KV write on the five-minute path**.
-- Both layouts stay first-class (phone bottom sheet < 768 px, desktop side panel ≥ 768 px); every tap target ≥ 44 px; `prefers-reduced-motion` honoured.
-- **Never read or write anything under `data/`** — a live collector owns it, six cities deep. Tests use `tmp_path` / fixtures.
-- Python tests: `cd D:/Projects/ParkCast && ./.venv/Scripts/python.exe -m pytest -q` (575 passed at the start of this plan). Web: `cd web && npx vitest run` (299). Worker: `cd worker && npm test` (66). Scripts: `node --test scripts/tests/*.test.mjs` (50).
-- **Never commit** unless a task's final step says to; the `git add` lines are a floor, not a fence.
+- **The honesty rules bind every task.** A `null` probability never renders as a number; `0` is a real reading, never "not reporting"; the observed count `f` is never presented as a forecast; a lot whose feed has stopped still says so; **the ranker's expected-cost score is never shown** — this plan adds a control that changes that score and must still never display it.
+- **The safety invariant, measured not asserted:** no preset may put an inversion at **#1**. "No inversions" is already false — the shipped ranker has 11, worst at #3 (88 on realistic destinations). The line is position, per `probe-ranker.py`'s own argument: a likely-full lot deep in a list is a trade-off the driver can see and reject; one at the top is the app recommending a car park it believes is full.
+- **`DELAY_VALUE = max(5, WALK_VALUE)`.** Never below 5, so a preference cannot erode the penalty for being sent away. Pinning it outright makes Closer unsafe (35 inversions, worst #2); coupling it symmetrically makes Cheaper unsafe (19 from 0). Both were measured; do not "simplify" this rule.
+- **Balanced must reproduce today's ordering exactly.** It is the shipped pair (5, 5). A driver who never opens the control sees no change. This is the regression that matters most.
+- Both layouts first-class (phone bottom sheet < 768 px, desktop side panel ≥ 768 px); every tap target ≥ 44 px; `prefers-reduced-motion` honoured; nothing animates at rest.
+- No new runtime dependency. Nothing leaves the device: the preference lives in `localStorage`, like the language toggle.
+- **Never read or write anything under `data/`** — a live collector owns it, six cities deep. Use `web/.dev-artifacts/` (git-ignored) for artifact-driven work.
+- **`git checkout --` is unsafe in this repo** (`core.autocrlf=true` rewrites LF→CRLF). Revert experiments with byte-exact backups verified by `cmp`.
+- Tests: `cd web && npx vitest run` (**440** at the start of this plan) · `./.venv/Scripts/python.exe -m pytest -q` (**616**, but see below) · `cd worker && npm test` (**121**) · `node --test scripts/tests/*.test.mjs` (**55**).
+- **Known flaky test, not yours:** `tests/test_artifacts_integration.py::test_end_to_end_over_real_observations` reads the **live** corpus and races the collector's writes — measured 2 failures in 4 consecutive runs on identical code. If it fails, re-run it; if it fails repeatedly *and* your change touches Python, investigate. Do not "fix" it by loosening its assertion.
+- **Never commit** unless a task's final step says to. No AI attribution of any kind in any commit message (`CLAUDE.md:18`).
 
 ---
 
@@ -30,375 +32,141 @@ The nationwide-collector todo is archived at `docs/superpowers/plans/2026-09-16-
 
 | Path | Responsibility |
 |---|---|
-| `src/parkcast/artifacts.py` | `encode_week`, the `PCW1` header, `week_name(city)`, `publish_week` |
-| `src/parkcast/scheduler.py` | building and publishing `week.bin` once a day, per served city |
-| `src/parkcast/upload.py` | `send_week` — its own request, off the five-minute path |
-| `worker/src/validate.ts`, `serve.ts` | accept, store and serve the week blob |
-| `web/src/week.ts` | parse `week.bin`; `weekBucket`; `probabilityAt`; the client half of the blend |
-| `web/src/confidence.ts` | rewritten: support, not horizon |
-| `web/src/arrival.ts` | the seven-day range and the day/hour/minute option lists |
-| `web/src/components/ArrivalPicker.tsx` | replaces `ArrivalStrip.tsx` |
-| `web/src/App.tsx` | wiring, and the lazy fetch of `week.bin` |
-| `web/public/sw.js` | `VERSION` → `v3`, and one cache-first exception |
+| `web/src/rank.ts` | `WALK_VALUE`/`DELAY_VALUE`, the `Preference` type, preset table, threading the pair through `rankLots` |
+| `web/src/preference.ts` | reading and writing the stored preference, guarded like `places.ts` does storage |
+| `web/src/components/PreferencePicker.tsx` | the three-option control |
+| `web/src/App.tsx` | holding the preference, passing it to `rankLots`, the distance-bounded list |
+| `web/src/i18n.ts` | the control's strings, both languages |
+| `scripts/probe-ranker.py` | the split constants, and the preference sweep that measures the invariant |
+| `CLAUDE.md`, `docs/state-of-play.md` | the split, the presets, the measured safety table |
 
 ---
 
-### Task 1: the `week.bin` encoder
+### Task 1: split the constant
 
 **Files:**
-- Modify: `src/parkcast/artifacts.py` (beside `encode_grid`), `src/parkcast/config.py`
-- Test: `tests/test_artifacts.py`
+- Modify: `web/src/rank.ts`
+- Test: `web/tests/rank.test.ts`
 
 **Interfaces:**
-- Produces: `artifacts.WEEK_MAGIC = b"PCW1"`, `artifacts.WEEK_HEADER_FORMAT`, `artifacts.WEEK_HEADER_SIZE`, `artifacts.week_name(city: str) -> str`, `artifacts.encode_week(lot_ids: Sequence[str], cells: Mapping[str, Sequence[tuple[int | None, int]]], *, built_ts: int) -> bytes`, `artifacts.decode_week_header(blob: bytes) -> dict`, `artifacts.publish_week(out_dir: Path, city: str, *, week_blob: bytes) -> None` (beside the existing `artifacts.publish`, which Task 3 monkeypatches). `config.WEEK_BUCKETS = 7 * 24 * 60 // CLIMATOLOGY_BUCKET_MIN` — a **derivation, not the literal 336** — and `forecast.BUCKETS_PER_WEEK` becomes an alias of it. Do **not** add `config.WEEK_BUCKET_MIN`: `config.CLIMATOLOGY_BUCKET_MIN` already is that number, and a second name for it would drift the moment anyone changed the bucket width.
+- Produces: `export const WALK_VALUE = 5`, `export const DELAY_VALUE = 5`. `TIME_VALUE` is **deleted**, not aliased.
 
-`cells` maps a **bare** lot id to exactly `WEEK_BUCKETS` `(probability, support)` pairs, probability a float in `[0, 1]` or `None`, support a non-negative int. The encoder rounds, clamps and caps; it does not compute.
-
-- [ ] **Step 1: Write the failing test**
-
-```python
-def test_encode_week_round_trips_a_known_cell():
-    cells = {"A": [(None, 0)] * 336, "B": [(None, 0)] * 336}
-    cells["A"][5] = (0.86, 12)
-    cells["B"][5] = (0.0, 300)          # a real zero, and support past the cap
-    blob = artifacts.encode_week(["A", "B"], cells, built_ts=1789600000)
-
-    header = artifacts.decode_week_header(blob)
-    assert header["magic"] == artifacts.WEEK_MAGIC
-    assert header["n_lots"] == 2
-    assert header["n_buckets"] == 336
-    assert header["bucket_min"] == 30
-    assert header["roster_id"] == artifacts.roster_id(["A", "B"])
-    body = blob[artifacts.WEEK_HEADER_SIZE:]
-    assert len(body) == 2 * 336 * 2
-
-    def cell(i, b):
-        off = (i * 336 + b) * 2
-        return body[off], body[off + 1]
-    assert cell(0, 5) == (86, 12)
-    # A real zero is a probability, not an absence: 0, never the unknown sentinel.
-    assert cell(1, 5) == (0, 255)
-    assert cell(0, 6) == (255, 0)        # unknown
-
-
-def test_encode_week_refuses_a_row_of_the_wrong_length():
-    with pytest.raises(ValueError):
-        artifacts.encode_week(["A"], {"A": [(None, 0)] * 335}, built_ts=1)
-
-
-def test_week_name_follows_the_shard_convention():
-    assert artifacts.week_name("taipei") == "week.bin"
-    assert artifacts.week_name("tainan") == "week-tainan.bin"
-```
-
-- [ ] **Step 2: Run it and watch it fail**
-
-Run: `./.venv/Scripts/python.exe -m pytest tests/test_artifacts.py -k week -v`
-Expected: FAIL — `module 'parkcast.artifacts' has no attribute 'encode_week'`
-
-- [ ] **Step 3: Implement**
-
-Mirror `encode_grid`'s discipline exactly: `n_lots` and `roster_id` are **derived** from `lot_ids`, never passed in beside them, so the header cannot describe a roster the body does not have. Use `255` as the unknown probability sentinel (a real `0` must survive as `0` — that is the honesty rule in byte form) and cap support at `255`.
-
-- [ ] **Step 4: Run the tests, then the whole suite**
-
-Run: `./.venv/Scripts/python.exe -m pytest -q`
-Expected: PASS, 575 + your new tests.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/parkcast/artifacts.py src/parkcast/config.py tests/test_artifacts.py
-git commit -m "feat(artifacts): encode the per-lot week table"
-```
-
----
-
-### Task 2: build the cells from the city's own climatology
-
-**Files:**
-- Modify: `src/parkcast/artifacts.py` or a new `src/parkcast/week.py` — your call, say which and why
-- Test: `tests/test_week.py`
-
-**Interfaces:**
-- Consumes: `forecast.by_city`, `forecast.Climatology`, `forecast.Counts`, `forecast.week_bucket`, `artifacts.encode_week`.
-- Produces: `build_week_cells(history: History, lot_ids: Sequence[str]) -> dict[str, list[tuple[float | None, int]]]`, keyed by the **namespaced** store id, each value `WEEK_BUCKETS` long.
-
-- [ ] **Step 1: Write the failing test.** For a history with one lot observed only in bucket `b`: that cell carries a probability and a support equal to the number of observations; every other cell carries the lot's shrunk fall-back with **support 0**. Assert that a bucket with no observations still gets a probability (climatology falls back through lot → citywide; that is the whole point of the shrinkage) but honestly reports `support == 0`.
+- [ ] **Step 1: Write the failing test.** Assert the walk term uses `WALK_VALUE` and the failure branch uses `DELAY_VALUE`, by giving them different values in a fixture and checking each side moves independently. A test that sets both to 5 proves nothing, because that is today's behaviour.
 - [ ] **Step 2: Run it and watch it fail.**
-- [ ] **Step 3: Implement.** The probability is `Climatology.predict(lot_id, ts_of_bucket, horizon_min=0)` — the same tier chain the live forecast uses, so the two can never drift. Support is that bucket's own raw observation count from `counts.bucket[(lot_id, bucket)]`, **before** shrinkage: it is the honest measure of what the cell rests on. Derive each bucket's representative timestamp from `forecast.week_bucket`'s own arithmetic rather than reimplementing it.
-- [ ] **Step 4: Run the suite.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(week): build the week table from a city's climatology"`.
+- [ ] **Step 3: Implement.** `certain = walkMin * WALK_VALUE + fee`; the circling penalty and the drive both take `DELAY_VALUE`. **Delete `TIME_VALUE`** rather than leaving an alias — `scripts/probe-ranker.py`'s `load_constants()` parses it by name out of the TypeScript, so its disappearance must break the probe loudly. That is the design working; Task 5 repairs it.
+- [ ] **Step 4: Run the web suite.** Every existing ranker test must pass unchanged — with both constants at 5 the arithmetic is identical.
+- [ ] **Step 5: Commit** — `git commit -m "refactor(rank): price the walk and the delay separately"`.
 
 ---
 
-### Task 3: publish and upload it, once a day
+### Task 2: the preference and its presets
 
 **Files:**
-- Modify: `src/parkcast/scheduler.py`, `src/parkcast/upload.py`
-- Test: `tests/test_scheduler.py`, `tests/test_upload.py`
+- Modify: `web/src/rank.ts`
+- Create: `web/src/preference.ts`, `web/tests/preference.test.ts`
+- Test: `web/tests/rank.test.ts`
 
 **Interfaces:**
-- Produces: `upload.send_week(url, secret, week: bytes, *, city: str, roster_id: int) -> SendResult`; scheduler publishes `week_name(city)` beside the city's other shards.
-
-**The id bridge lives here.** `build_week_cells` (Task 2) is keyed by the **namespaced** store id (`taipei:TPE0001`), because that is what history holds; `encode_week` (Task 1) takes **bare** ids, because that is what a shard publishes and what `roster_id` hashes. This task converts, with `ids.bare`, at the single point where the two meet — exactly as `publish_city` already does for `grid` and `lots`. Do not push the conversion into either neighbour.
-
-- [ ] **Step 1: Write the failing tests**
-
-```python
-def test_the_week_file_is_written_once_a_day_not_once_a_tick(tmp_path, monkeypatch):
-    """The five-minute path must stay the size it is. Climatology moves over
-    weeks; rewriting a ~700 KB table every tick would spend the whole budget
-    re-stating what it said five minutes ago."""
-    conn = _seeded_store(tmp_path)
-    out = tmp_path / "artifacts"
-    writes = []
-    monkeypatch.setattr(artifacts, "publish_week",
-                        lambda *a, **k: writes.append(k.get("city")))
-
-    day = date(2026, 9, 17)
-    for tick in range(12):                       # an hour of ticks, one day
-        scheduler.publish_artifacts(conn, LOTS, out_dir=out, today=day)
-    assert writes == ["taipei"], "one write on the first tick, none after"
-
-    scheduler.publish_artifacts(conn, LOTS, out_dir=out, today=date(2026, 9, 18))
-    assert writes == ["taipei", "taipei"], "and one more when the day rolls over"
-
-
-def test_a_week_publish_failure_never_stops_the_tick(tmp_path, monkeypatch):
-    """Publishing is downstream of collection. A week table that cannot be
-    written must not cost a reading that cannot be re-fetched."""
-    monkeypatch.setattr(artifacts, "publish_week", _raises(OSError("disk full")))
-    scheduler.publish_artifacts(conn, LOTS, out_dir=out)     # must not raise
-    assert (out / "grid.bin").exists(), "the five-minute pair still published"
-```
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** Publishing is downstream of collection and must never stop it: every refusal returns, none raises, exactly as `publish_city` already does. `send_week` is its own request with its own back-off, reusing the existing opener, user agent and skew check; it must not ride `send_pair`'s job.
-- [ ] **Step 4: Run the suite.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(scheduler): publish the week table daily"`.
-
----
-
-### Task 4: the Worker accepts and serves it
-
-**Files:**
-- Modify: `worker/src/validate.ts`, `worker/src/serve.ts`, and the upload handler
-- Test: `worker/tests/validate.test.ts`, `worker/tests/serve.test.ts`
-
-- [ ] **Step 1: Write the failing tests.** `validate` accepts a well-formed week blob and rejects: a wrong magic, an unknown schema version, a body length that is not `n_lots × 336 × 2`, and a header whose `roster_id` disagrees with the stored `lots.json`. `serve` returns it at `/artifacts/week.bin` with `Cache-Control: max-age=3600`.
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** A new KV key `week`; the five-minute pair's handling is untouched.
-- [ ] **Step 4: Run `npm test` in `worker/`.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(worker): accept and serve the week table"`.
-
----
-
-### Task 5: `web/src/week.ts` — parse, bucket, blend
-
-**Files:**
-- Create: `web/src/week.ts`, `web/tests/week.test.ts`
-- Modify: `web/src/types.ts`
-
-**Interfaces:**
-- Produces:
-
-```ts
-export interface WeekTable { nLots: number; rosterId: number; builtTs: number; cells: Uint8Array }
-export function parseWeek(buf: ArrayBuffer): WeekTable        // throws on a bad header, like parseGrid
-export function weekBucket(ts: number): number                 // 0..335
-export function probabilityAt(week: WeekTable, lotIndex: number, ts: number): { p: number | null; support: number }
-export function blend(observedFree: number | null, climatologyP: number, minutesFromReading: number): number
-export const BLEND_HALF_LIFE_MIN = 30;
-```
-
-`minutesFromReading` is measured from the shard's **`base_data_ts`**, never from `Date.now()`.
-The server's horizon is measured from `history.latest_ts`, which is what `base_data_ts` carries;
-measuring from the wall clock would pass every unit test and be wrong in the field by however
-long ago the last reading was.
+- Produces: `export type Preference = "cheaper" | "balanced" | "closer"`; `export const PREFERENCES: Record<Preference, { walk: number; delay: number }>`; `rankLots` takes `preference` in its input object, defaulting to `"balanced"`. `preference.ts` exports `readPreference(storage)` / `writePreference(storage, p)`.
 
 - [ ] **Step 1: Write the failing tests.**
 
 ```ts
-it("buckets a timestamp the way the Python side does", () => {
-  // ((ts + 8h) / 60 / 30) mod 336, matching forecast.week_bucket exactly.
-  //
-  // BUCKET 0 IS THURSDAY 00:00 TAIPEI, NOT MONDAY. `week_bucket` anchors on
-  // the Unix epoch and does no calendar arithmetic, and 1970-01-01 was a
-  // Thursday. An earlier draft of this plan asserted a Monday-anchored table;
-  // a `weekBucket` written to satisfy it would have disagreed with Python by
-  // 192 buckets -- four days -- passed its own test, and read the wrong time
-  // of week for every arrival beyond the grid window.
-  //
-  // These values are generated by `scripts/build-seam-fixture.py`, not typed
-  // by hand. Read them from the fixture; do not inline them.
-  expect(weekBucket(TAIPEI_THURSDAY_0000)).toBe(0);
-  expect(weekBucket(TAIPEI_MONDAY_0000)).toBe(192);
-  expect(weekBucket(TAIPEI_MONDAY_0029)).toBe(192);
-  expect(weekBucket(TAIPEI_MONDAY_0030)).toBe(193);
-  expect(weekBucket(TAIPEI_SUNDAY_2330)).toBe(191);
+it("prices the delay at the walk's value only when that is the higher of the two", () => {
+  // DELAY_VALUE = max(5, WALK_VALUE). Never below 5, so a preference cannot make
+  // being turned away cheap; above it when walking is dear, so making the walk
+  // expensive does not relatively cheapen failure. Both halves were measured:
+  // pinning breaks Closer, symmetric coupling breaks Cheaper. See the spec, section 5.
+  expect(PREFERENCES.cheaper).toEqual({ walk: 2, delay: 5 });
+  expect(PREFERENCES.balanced).toEqual({ walk: 5, delay: 5 });
+  expect(PREFERENCES.closer).toEqual({ walk: 12, delay: 12 });
 });
 
-it("reports a real zero as a probability and an unknown as null", () => {
-  // 255 is the unknown sentinel; 0 is a lot that is reliably full at this hour.
-  expect(probabilityAt(table, 0, ts).p).toBe(0);
-  expect(probabilityAt(table, 1, ts).p).toBeNull();
-});
-
-it("weights the reading by the blend's own half-life", () => {
-  // weight = 0.5 ** (minutes / 30): at the half-life the two contribute equally.
-  expect(blend(5, 0.2, 30)).toBeCloseTo(0.6, 5);
-  expect(blend(0, 0.2, 0)).toBe(0);      // a full lot now is a full lot now
+it("ranks identically to the shipped constants when balanced", () => {
+  // The regression that matters most: a driver who never opens the control
+  // must see no change whatsoever.
+  expect(rankLots({ ...input, preference: "balanced" })).toEqual(rankLots(input));
 });
 ```
 
 - [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** `parseWeek` validates its header the way `parseGrid` does and throws on a mismatch rather than returning something half-trusted.
-- [ ] **Step 4: Run `npx vitest run` in `web/`.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(web): read the week table"`.
+- [ ] **Step 3: Implement.** `preference.ts` guards storage the way `places.ts` does — a private window, blocked site data or a thrown accessor must leave the app working on the default. An unrecognised stored value reads as `"balanced"`, never as a crash.
+- [ ] **Step 4: Run the web suite.**
+- [ ] **Step 5: Commit** — `git commit -m "feat(rank): three preferences, and the floor that keeps them safe"`.
 
 ---
 
-### Task 6: the seam — prove the two sources agree
-
-The load-bearing test of this plan. A driver moving the arrival across the two-hour boundary must not see the number jump.
+### Task 3: the control
 
 **Files:**
-- Create: `scripts/build-seam-fixture.py`, `web/tests/seam.test.ts`, `tests/test_seam_fixture.py`
-- Fixtures: `web/tests/fixtures/seam-grid.bin`, `web/tests/fixtures/seam-week.bin`, `web/tests/fixtures/seam.json`
+- Create: `web/src/components/PreferencePicker.tsx`, `web/tests/preferencePicker.test.tsx`
+- Modify: `web/src/App.tsx`, `web/src/i18n.ts`, `web/src/styles/components.css`
 
-**The fixtures are built by Python and only read by JavaScript.** `scripts/build-seam-fixture.py`
-constructs a small synthetic history and runs it through the **real** `Climatology`, `Blend`,
-`build_grid`/`encode_grid` and `build_week_cells`/`encode_week` — no hand-written bytes, no
-JS-side construction of either blob. `tests/test_seam_fixture.py` regenerates and asserts the
-committed files are byte-identical, so they cannot rot silently. `seam.json` carries only what the
-JS test needs to index them: the lot's row, its `f`, and `base_data_ts`.
-
-Why so strict: a fixture that builds both sides of a comparison can only prove they agree with
-each other. This is the one test standing between a driver and a number that jumps as they cross
-the two-hour boundary; built in JS, it would be the client's arithmetic on both sides of the
-equals sign.
-
-- [ ] **Step 1: Write the failing test.** For the fixture lot, the client's `blend(f, probabilityAt(week, i, t).p, minutesFromReading)` at `+120 min` must equal that lot's **last column** in `grid.bin` within **1 percentage point**.
-
-  **The tolerance is arithmetic, not slack.** Worst case is **0.96875 pp**: the grid's own `round()`
-  (≤ 0.5 pp) plus the week cell's `round()` scaled by `1 − weight` — and `1 − weight = 0.9375`,
-  since `weight = 0.5 ** (120/30) = 0.0625`, so that term is `0.5 × 0.9375 = 0.46875 pp`.
-  **Headroom under the 1 pp gate is 0.03125 pp**, about a thirtieth of it. Any extra rounding
-  introduced anywhere in the client's path has more than enough room to break this test
-  legitimately. (An earlier draft of this plan said 0.9375 pp and 0.0625 pp of headroom — that used
-  0.4375 for the week term and was wrong. The gate itself has never moved.)
-
-  Pick a fixture lot with **real climatology**. When `Climatology` returns `None` but
-  `Persistence` does not, `Blend` returns pure persistence and the grid stores 0 or 100, while the
-  week cell stores 255 and the client honestly renders "no data". That divergence is intended and
-  is not what this test is for.
-- [ ] **Step 2: Run it and watch it fail.**
-- [ ] **Step 3: Make it pass.** If it does not, the bug is real and is in the client's arithmetic or in the encoder — **do not widen the tolerance to make it green**. Both sides compute `weight × persistence + (1 − weight) × climatology` from the same inputs; a disagreement means one of them is wrong. Say in your report which side you corrected.
-- [ ] **Step 4: Run the suite.**
-- [ ] **Step 5: Commit** — `git commit -m "test(web): pin the grid/week seam to one point"`.
+- [ ] **Step 1: Write the failing tests.** Each option sets the preference and re-ranks; the choice survives a reload; every control is keyboard-reachable and labelled; the group has an accessible name; changing it does **not** scroll the list, re-centre the map or move the arrival. Assert the rendered order actually changes between `cheaper` and `closer` for a fixture where it should — a test that only checks the button's state would pass against a control wired to nothing.
+- [ ] **Step 2: Run them and watch them fail.**
+- [ ] **Step 3: Implement.** It sits with `ArrivalPicker`: both answer "what am I asking for", against the list's "here is what we found". **The score is never shown** — the control names a preference, and no card gains a NT$ figure. Copy is comparative ("cheaper", not "cheapest") because the ranker will still put a likely space above an unlikely bargain; read `i18n.ts` for register and keep the Chinese natural Taiwanese usage rather than a gloss.
+- [ ] **Step 4: Run the web suite.**
+- [ ] **Step 5: Commit** — `git commit -m "feat(web): choose whether to walk less or pay less"`.
 
 ---
 
-### Task 7: confidence from evidence
+### Task 4: the distance-bounded list
 
 **Files:**
-- Modify: `web/src/confidence.ts`, `web/src/i18n.ts`
-- Test: `web/tests/confidence.test.ts`
+- Modify: `web/src/rank.ts` (`listRows`), `web/src/App.tsx`, `web/src/components/LotList.tsx`, `web/src/i18n.ts`
+- Test: `web/tests/rank.test.ts`, `web/tests/lotList.test.tsx`
 
 **Interfaces:**
-- Produces: `confidenceFor({ minutesFromReading, readingAgeMin, support, updating, probability }) -> { level: Confidence; reason: ConfidenceReason } | null`, where `reason` names the evidence so the pill can explain itself.
+- Produces: `export const NEARBY_RADIUS_M = 1500`; and `listRows` changes shape:
 
-- [ ] **Step 1: Write the failing tests** — one per row of the spec's §6 table, plus the null cases:
+```ts
+export interface ListRows { head: Ranked[]; nearby: Ranked[] }
+export function listRows(ranked: readonly Ranked[], limit: number): ListRows
+```
 
-| | Condition | Level |
-|---|---|---|
-| — | no forecast, or the lot is not updating | `null` |
-| High | arrival within 30 min of a reading ≤ 15 min old | `high`, reason `reading` |
-| High | `support ≥ 24` (≈ 4 weeks of this half-hour) | `high`, reason `weeks` |
-| Medium | `support ≥ 6` (≈ 1 week), or arrival within 75 min of a reading ≤ 30 min old | `medium` |
-| Low | otherwise | `low`, reason `thin` |
+`head` is what the list draws today (the cap, plus the existing `UNKNOWN_RESERVE` rescue).
+`nearby` is every remaining lot within `NEARBY_RADIUS_M`, in the ranker's order, disjoint from
+`head`. **This is a breaking change to a returned type, and `App.tsx:842`'s `listed` is its only
+caller** — move it in the same commit or the tree does not build.
 
-Include the case the whole change exists for: **21:20 tomorrow with four weeks of support reads `high`**, while **40 minutes from now at a lot first seen yesterday reads `medium`**. Assert `weeks === Math.floor(support / 6)`.
-
+- [ ] **Step 1: Write the failing tests.** Every lot within `NEARBY_RADIUS_M` is reachable; the tail keeps the ranker's order and is not re-sorted; the ranked head is unchanged with the expander closed; a lot already in the head never appears twice.
 - [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** Thresholds are named constants, not literals in branches. Keep `HIGH_MAX_MIN` / `MEDIUM_MAX_MIN` for the reading-led rows.
-
-  **This changes `confidenceFor`'s signature from four positional arguments to one object, so every caller moves with it.** `ConfidencePill.tsx` renders the level and must now also render the reason; `LotCard.tsx` passes the inputs and must now supply `support`, which it does not have yet — until Task 10 wires the week table through, pass `support: 0`, which reads as "no history behind this hour" and is true of a card that has not consulted the table. Say in your report which callers you touched.
-- [ ] **Step 4: Run the suite.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(web): grade confidence by evidence, not distance"`.
+- [ ] **Step 3: Implement.** **Measured, so size it honestly:** 1.5 km reaches a median of 64 Taipei lots and up to 157, which is why the tail sits behind a "show more nearby" expander rather than rendering with the head — 157 cards laid out at once is exactly the cost this project has already been told about once. Keep the existing `UNKNOWN_RESERVE` rescue working.
+- [ ] **Step 4: Run the web suite.**
+- [ ] **Step 5: Commit** — `git commit -m "feat(web): reach every car park worth walking to"`.
 
 ---
 
-### Task 8: the seven-day arrival range
+### Task 5: teach the probe the split, and measure the invariant
 
 **Files:**
-- Modify: `web/src/arrival.ts`
-- Test: `web/tests/arrival.test.ts`
+- Modify: `scripts/probe-ranker.py`
+- Test: `scripts/tests/` if a harness fits there; otherwise the probe's own output is the artifact
 
-**Interfaces:**
-- Produces: `MAX_LEAD_SEC = 7 * 24 * 3600`; `dayOptions(nowSec)`, `hourOptions()`, `minuteOptions()`; `composeArrival(daySec, hour, minute)`; `clampArrival` extended to the new range.
-
-- [ ] **Step 1: Write the failing tests.** The range runs from `ceilToStep(now + 5 min)` to `now + 7 days`; a time before now is clamped forward; the day list reads today, tomorrow, then weekday names in Taipei time; minutes step by 5. Cover a DST-free but month-crossing case (Taipei has no DST — say so in a comment so nobody adds one later).
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** `formatClock` and `relativeMinutes` keep working unchanged; a relative label beyond a day should read as a day and time, not "in 4,300 minutes".
-- [ ] **Step 4: Run the suite.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(web): offer any arrival within seven days"`.
+- [ ] **Step 1: Repair `load_constants()`.** It parses `TIME_VALUE` by name and Task 1 deleted it, so the probe is broken right now — that is deliberate. Parse `WALK_VALUE` and `DELAY_VALUE` instead. **Keep parsing out of the TypeScript; never copy the numbers**, which is why the probe can be trusted at all.
+- [ ] **Step 2: Add the preference sweep.** For each preset, over both samples — every lot's own position (adversarial: the risky lot sits at 0 m) and destinations drawn from the offline place index at least 50 m from any lot (realistic) — report inversion count, worst position, whether any reaches **#1**, and the LIST REACH columns.
+- [ ] **Step 3: Check it against the measurement already taken.** The figures in the spec's §5 came from a harness that reused this probe's own `Ranker` and `count_inversions`. Your sweep should reproduce them: Cheaper 0 / Balanced 11 / Closer 8 on lot positions, and no preset at #1 in either sample. **If your numbers disagree, say so loudly rather than adjusting anything** — one of the two is wrong and it matters which.
+- [ ] **Step 4: Run the probe and the Python suite.**
+- [ ] **Step 5: Commit** — `git commit -m "feat(probe): measure the safety of every preference"`.
 
 ---
 
-### Task 9: `ArrivalPicker`
+### Task 6: documentation
 
 **Files:**
-- Create: `web/src/components/ArrivalPicker.tsx`, `web/tests/arrivalPicker.test.tsx`
-- Delete: `web/src/components/ArrivalStrip.tsx`, `web/tests/arrivalStrip.test.tsx`
-- Modify: `web/src/i18n.ts`
+- Modify: `CLAUDE.md`, `docs/state-of-play.md`, `README.md`
 
-- [ ] **Step 1: Write the failing tests.** Quick chips (now, +15, +30, +1 h) each set the arrival; the three native `<select>`s compose a time; the 7-day bound holds at both ends; every control is keyboard-reachable and labelled; a drag across the chips changes nothing (the strip's old sweep is gone and must stay gone).
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** `App.tsx` imports `ArrivalStrip` today and must switch to `ArrivalPicker` in this task, not the next one — a deleted component with a live import is a broken build, and Task 10 assumes a green tree. Native `<select>` deliberately — it is the control every phone renders as a wheel, it is keyboard- and screen-reader-complete for free, and it holds the 44 px floor. The readout keeps its shape: the clock time, large, with the relative distance beside it.
-- [ ] **Step 4: Run the suite.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(web): pick an arrival day, hour and minute"`.
-
----
-
-### Task 10: wire it up, lazily
-
-**Files:**
-- Modify: `web/src/App.tsx`, `web/src/artifacts.ts`, `web/public/sw.js`, `scripts/smoke-live.mjs`
-- Test: `web/tests/app.test.tsx`, `web/tests/swRouting.test.ts`, `scripts/tests/smoke-live.test.mjs`
-
-- [ ] **Step 1: Write the failing tests.** `week.bin` is **not** fetched on load; it is fetched once when an arrival outside the grid window is first chosen; a failed fetch leaves the in-window app fully working and retries on the next attempt rather than remembering the failure forever. `sw.js` `VERSION` is `v3` and `routeFor` returns cache-first for `week.bin` while everything else under `artifacts/` stays network-first.
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** Follow `PlaceSearch`'s index fetch for the lazy-load shape, **including the lesson learned there**: the cleanup must reset the loading flag, or a blur mid-fetch strands it forever.
-- [ ] **Step 4: Run every suite** — web, then `node --test scripts/tests/*.test.mjs`.
-- [ ] **Step 5: Commit** — `git commit -m "feat(web): fetch the week table only when it is needed"`.
-
----
-
-### Task 11: documentation
-
-**Files:**
-- Modify: `docs/pwa.md`, `docs/state-of-play.md`, `CLAUDE.md`, `README.md`
-
-- [ ] **Step 1:** `docs/pwa.md` — the new artifact, its routing rule and why it is the one cache-first exception under `artifacts/`.
-- [ ] **Step 2:** `CLAUDE.md` — `week.bin`'s shape, that confidence now means evidence, and the seam rule (grid inside two hours, week beyond).
-- [ ] **Step 3:** `docs/state-of-play.md` — a Stage A section with the **measured** artifact size and gzip figure, and the test counts you actually ran.
-- [ ] **Step 4:** `README.md` — status line and the app paragraph.
-- [ ] **Step 5: Commit** — `git commit -m "docs: record Stage A"`.
+- [ ] **Step 1:** `CLAUDE.md` — the split constants and what each prices; the floor rule and why pinning and symmetric coupling were both rejected; that Balanced is the shipped pair. Correct the existing `TIME_VALUE` reference at `CLAUDE.md:208`. Record the spec's §9 boundary too, because it is the part most likely to be undone by accident: **the trained model must not learn preferences.** It predicts how likely a space is; the ranker decides what that probability is worth. That separation is what lets one `grid.bin` and one `week.bin` serve every driver — preferences inside the model would mean a model per combination, which the free tier cannot carry — and it keeps the Brier score a statement about calibration rather than about taste.
+- [ ] **Step 2:** `docs/state-of-play.md` — a section with the **measured** safety table from your own probe run, not copied from the spec, and the list-density figures.
+- [ ] **Step 3:** `README.md` — the app paragraph.
+- [ ] **Step 4: Commit** — `git commit -m "docs: record the ranking preferences"`.
 
 ---
 
 ## Verification before the branch is finished
 
-- Every suite green: Python, web, Worker, scripts.
-- **The Python suite must also be run in the main checkout, not only in the worktree.** Three tests
-  read the real collected corpus and *skip* wherever `data/` is absent:
-  `tests/test_artifacts_integration.py:36` and `tests/test_history_bounds.py:39,60`
-  ("no collected data on this machine"). A worktree run is therefore three tests weaker than
-  main's, and `test_artifacts_integration.py` is the very test that caught the id-convention
-  defect at merge on the collector branch. Stage A modifies `artifacts.py`. A green worktree run
-  is necessary and not sufficient. Do **not** close the gap by copying `data/` into the worktree:
-  the live collector owns it, and a mid-write snapshot would make a passing test meaningless.
-- `week.bin`'s real size and gzip measured against the spec's ≤ 600 KB gate — if it exceeds it, the fallback is a narrower support byte, **not** a wider gate.
-- A browser pass on both layouts, light and dark: pick a time tomorrow evening and confirm the probability, the confidence pill and its reason all change coherently, and that nothing animates at rest.
-- `npm run deploy:check --prefix worker` clean. The release itself is the user's.
+- Every suite green: web, Python, Worker, scripts. Re-run the known-flaky integration test rather than trusting one failure.
+- The probe's sweep run and its output recorded — **no preset at #1 in either sample**.
+- Balanced's ordering proven identical to the pre-branch ranker on a real roster, not only in a unit test.
+- A browser pass at 375 px and desktop, light and dark: switch presets and confirm the list reorders, nothing scrolls or re-centres, the expander works, and no NT$ score appears anywhere.
+- `npm run deploy:check --prefix worker` clean **from the repo root**. The release itself is the user's.
