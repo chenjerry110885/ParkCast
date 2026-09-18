@@ -26,6 +26,18 @@ the git-ignored `web/.dev-artifacts/` (not `public/artifacts/` — nothing under
 data, since everything there is copied into every build). Run the sync after a fresh clone or the
 fetch 404s.
 
+**Seeing the app as it looks before the collector publishes `m`/`e`:**
+
+```powershell
+$env:PARKCAST_DEV_NO_AMENITIES = "1"
+npm run dev
+```
+
+— the dev server serves the same 1,089-lot roster with both amenity keys stripped from every row,
+which is exactly what the live site serves until the rebuilt collector publishes. The dev roster
+carries both keys on all 1,089 rows, so this is the only way to look at the "the feed never
+mentioned it" branch over real car parks rather than a test fixture.
+
 **Testing against the live site instead**, once it exists (`docs/deploy.md`): set
 `PARKCAST_LIVE_ORIGIN` from PowerShell, not Git Bash, which rewrites path-like values —
 
