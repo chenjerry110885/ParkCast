@@ -29,7 +29,16 @@
 @keyframes sweep { to { transform: rotate(360deg); } }
 @keyframes ripple { from { transform: scale(0.4); opacity: 0.6; } to { transform: scale(2.2); opacity: 0; } }
 @keyframes flash { 0% { box-shadow: 0 0 0 0 rgba(15, 181, 165, 0.55); } 100% { box-shadow: 0 0 0 12px rgba(15, 181, 165, 0); } }
-@keyframes shine { from { transform: translateX(-120%) skewX(-20deg); } to { transform: translateX(220%) skewX(-20deg); } }
+/* Two steps, and the second one is a *hold*: the band crosses the badge in the
+   first 16% of the cycle and then sits parked past its right edge -- clipped by
+   `.pill`'s `overflow: hidden` -- for the remaining 84%. That is what makes the
+   repeat (components.css) a sweep every few seconds rather than a strobe: the
+   pause is in the keyframes, not in a second animation or a delay, so one
+   `animation-duration` sets both halves and they cannot drift apart. The end
+   state is still past the pill, which is the half of the original fix that has
+   not changed -- a hold at `translateX(0%)` would park the highlight over the
+   badge for four seconds out of every five. */
+@keyframes shine { from { transform: translateX(-120%) skewX(-20deg); } 16%, to { transform: translateX(220%) skewX(-20deg); } }
 @keyframes pop { from { opacity: 0; transform: translateY(4px) scale(0.98); } to { opacity: 1; transform: none; } }
 
 .anim-rise { animation: rise var(--dur-base) var(--ease-out) both; }
@@ -44,4 +53,12 @@
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
   .anim-rise, .anim-pop, .anim-slide-down { animation-name: fade-in; }
   .anim-stagger > * { animation-delay: 0ms; }
+  /* The badge's sweep is the one animation here that repeats, so it is the one
+     the blanket rules above do not actually switch off: they collapse it to a
+     single 0.01 ms iteration, which still *runs*. Removing the band removes it
+     -- there is no pseudo-element left to move, and none to leave parked over
+     the badge either. `forwards` in the declaration is the second belt on the
+     same braces: if this rule is ever lifted, the one clamped iteration still
+     ends past the pill's right edge instead of snapping back over it. */
+  .pill--best.anim-shine::after { display: none; }
 }
