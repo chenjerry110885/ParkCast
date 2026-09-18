@@ -151,7 +151,10 @@ at today's length and puts the remainder — out to `NEARBY_RADIUS_M`, in the sa
 a **"show more nearby" expander**. Full reach, and a phone pays only for what the driver opens.
 Distant lots sink to the tail under the ranking anyway, so nothing good is hidden by the fold.
 
-Lots beyond 1.5 km remain reachable by tapping their dot on the map, which shows the same card.
+Lots beyond 1.5 km remain reachable by tapping their dot on the map, which shows the same card —
+out to `COVERAGE_RADIUS_M` from the destination. Past that the dot answers with the map's own popup
+instead: the card's walk, price-vs-walk and arrival tiles would be describing a trip nobody is going
+to make.
 
 ## 7. The control
 

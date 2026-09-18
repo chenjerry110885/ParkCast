@@ -29,9 +29,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import type { FeatureCollection, Point } from "geojson";
 import type { MapLibreMap } from "maplibre-gl";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { LIST_LIMIT } from "../src/App";
+import App, { COVERAGE_RADIUS_M, LIST_LIMIT } from "../src/App";
 import { HEADER_SIZE, resetWeekCache } from "../src/artifacts";
 import { WEEKLY_OBSERVATIONS } from "../src/confidence";
+import { haversineMeters, walkMinutes } from "../src/geo";
 import { districtName, fillTemplate, t } from "../src/i18n";
 import MapView, { LOTS_SOURCE } from "../src/map/MapView";
 import { toMapLot, type LotProperties, type MapLot } from "../src/map/lotSource";
@@ -671,6 +672,14 @@ describe("a car park the ranked list does not show", () => {
   const SECOND_NAME = "洲美運動公園停車場";
   const SECOND_PERCENT = 12;
 
+  /** Either side of the edge the list stops at: ~9.5 km out, and ~16.7 km out. */
+  const EDGE_ID = "TPE_EDGE";
+  const EDGE_NAME = "關渡宮地下停車場";
+  const EDGE_PERCENT = 41;
+  const FAR_ID = "TPE_FAR";
+  const FAR_NAME = "淡水文化園區停車場";
+  const FAR_PERCENT = 23;
+
   /** Every listed lot shares these, so any of them on the pinned card is caught. */
   const LISTED_PERCENT = 70;
   const LISTED_PRICE = 30;
@@ -718,14 +727,44 @@ describe("a car park the ranked list does not show", () => {
         t: "民營停車場",
         p: { k: "exact", lo: OUTSIDER_PRICE, hi: OUTSIDER_PRICE },
       },
+      // Due north of the destination, so the distance is the latitude
+      // difference and nothing else. Both are asserted against
+      // `COVERAGE_RADIUS_M` where they are used rather than trusted here.
+      {
+        i: 24,
+        id: EDGE_ID,
+        n: EDGE_NAME,
+        a: "北投區",
+        y: DEST.lat + 0.085,
+        x: DEST.lon,
+        c: 120,
+        t: "市府委外停車場",
+        p: { k: "exact", lo: OUTSIDER_PRICE, hi: OUTSIDER_PRICE },
+      },
+      {
+        i: 25,
+        id: FAR_ID,
+        n: FAR_NAME,
+        a: "淡水區",
+        y: DEST.lat + 0.15,
+        x: DEST.lon,
+        c: 60,
+        t: "民營停車場",
+        p: { k: "exact", lo: OUTSIDER_PRICE, hi: OUTSIDER_PRICE },
+      },
     ];
     return [...near, ...outsiders];
   }
 
   const CROWD = crowd();
 
-  const percentOf = (lot: Lot): number =>
-    lot.id === OUTSIDER_ID ? OUTSIDER_PERCENT : lot.id === SECOND_ID ? SECOND_PERCENT : LISTED_PERCENT;
+  const OWN_PERCENT = new Map([
+    [OUTSIDER_ID, OUTSIDER_PERCENT],
+    [SECOND_ID, SECOND_PERCENT],
+    [EDGE_ID, EDGE_PERCENT],
+    [FAR_ID, FAR_PERCENT],
+  ]);
+  const percentOf = (lot: Lot): number => OWN_PERCENT.get(lot.id) ?? LISTED_PERCENT;
 
   function crowdedGrid(): ArrayBuffer {
     const body: number[] = [];
@@ -986,6 +1025,96 @@ describe("a car park the ranked list does not show", () => {
     expect(within(pinned).getByRole("note").textContent).toBe(
       fillTemplate(t("en").confidenceWeeksTemplate, { n: 5 }),
     );
+  });
+
+  /** A fixture lot by id, so a test names the car park it means. */
+  function lotById(id: string): Lot {
+    const found = CROWD.find((l) => l.id === id);
+    if (found === undefined) throw new Error(`no fixture lot ${id}`);
+    return found;
+  }
+
+  /**
+   * The card is bounded by the tapped lot's own distance, not the
+   * destination's.
+   *
+   * `ranked` has no distance cutoff, so every dot on the map has a row behind
+   * it however far away it is -- and the card's walk tile renders whatever
+   * that row's `meters` divides into. On the real roster, with the
+   * destination at Taipei 101 and a car park 55 m from it, 100 of the 1,090
+   * lots are still more than 10 km away and the farthest is 16,439 m: a
+   * 206-minute walk on a card, true to the metre and describing a trip
+   * nobody is going to make.
+   *
+   * A gate on the *destination* cannot see that case -- it asks whether
+   * anything is near where the driver is going, which is a different
+   * question. These two pin the per-row bound from both sides.
+   */
+  it("gives a card to a car park just inside the edge the list stops at", async () => {
+    const edge = lotById(EDGE_ID);
+    // The premise, measured rather than asserted into being.
+    expect(haversineMeters(DEST, { lat: edge.y, lon: edge.x })).toBeLessThan(COVERAGE_RADIUS_M);
+    await renderWithDestination();
+    expect(listedRows().map((row) => row.getAttribute("data-lot-id"))).not.toContain(EDGE_ID);
+
+    tapDot(edge);
+
+    const pinned = screen.getByTestId("pinned-lot");
+    expect(within(pinned).getByTestId("lot-name")).toHaveTextContent(EDGE_NAME);
+    expect(within(pinned).getByTestId("lot-probability")).toHaveTextContent(`${EDGE_PERCENT}%`);
+    // Nine and a half kilometres is a long walk and the card says so; what it
+    // does not do is refuse to answer a question the ranker can answer.
+    expect(within(pinned).getByTestId("lot-walk")).toBeInTheDocument();
+  });
+
+  it("answers a car park past that edge with the map's popup, not with a manufactured walk", async () => {
+    const far = lotById(FAR_ID);
+    const meters = haversineMeters(DEST, { lat: far.y, lon: far.x });
+    expect(meters).toBeGreaterThan(COVERAGE_RADIUS_M);
+    await renderWithDestination();
+    // The destination has a car park 22 m from it, so `outsideCoverage` is
+    // false and its notice is not on screen: this is the case a gate on the
+    // destination's own surroundings can never reach.
+    expect(screen.queryByTestId("outside-coverage")).toBeNull();
+
+    tapDot(far);
+
+    expect(screen.queryByTestId("pinned-lot")).toBeNull();
+    // Not merely "no card": the number the card would have carried is
+    // nowhere on the screen either.
+    const minutes = walkMinutes(meters);
+    expect(minutes).toBeGreaterThan(200);
+    expect(screen.queryByText(new RegExp(String(minutes)))).toBeNull();
+    // The tap is still answered, by the same fallback a tap with no
+    // destination gets: the lot's name and its chance, and nothing else.
+    const popup = popups.opened.at(-1);
+    expect(popup?.content?.textContent).toContain(FAR_NAME);
+    expect(popup?.content?.textContent).toContain(`${FAR_PERCENT}%`);
+    // ...and the list the driver already had is untouched by the tap.
+    expect(listedRows()).toHaveLength(LIST_LIMIT);
+  });
+
+  it("shows no card when the destination itself has nothing within reach", async () => {
+    render(<App />);
+    await screen.findByTestId("staleness");
+    await screen.findByRole("region", { name: t("en").mapLabel });
+    // Kaohsiung: ~290 km from every car park in this fixture, so nothing in
+    // `ranked` is inside the radius and the list stands down.
+    await act(async () => {
+      fire("click", null, { lngLat: { lat: 22.63, lng: 120.3 }, point: { x: 1, y: 1 } });
+    });
+    await screen.findByTestId("outside-coverage");
+
+    tapDot(lotById(OUTSIDER_ID));
+
+    // The per-row bound covers this direction too, which is why the render
+    // gate no longer repeats `outsideCoverage`: if no row is within the
+    // radius then the tapped row is not either.
+    expect(screen.queryByTestId("pinned-lot")).toBeNull();
+    expect(screen.queryByTestId("lot-list")).toBeNull();
+    // The notice says in words how far away everything is, and the popup
+    // still names the car park that was tapped.
+    expect(popups.opened.at(-1)?.content?.textContent).toContain(OUTSIDER_NAME);
   });
 
   it("shows no card before a destination is chosen, and does not go silent either", async () => {

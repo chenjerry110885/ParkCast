@@ -98,7 +98,10 @@
  *     find and no card: three of the card's four fact tiles measure a trip
  *     that does not exist yet, and inventing a walk of "0 min" from a
  *     destination nobody named would be the kind of manufactured number the
- *     rest of this file exists to refuse. The tap is still answered out
+ *     rest of this file exists to refuse -- and the same refusal bounds the
+ *     card by distance, because a lot 16 km from the destination would fill
+ *     that same tile with "206 min". `pinned` stops at `COVERAGE_RADIUS_M`,
+ *     the edge the list already stops at. The tap is still answered out
  *     there -- the map's own popup names the lot and its chance, on the same
  *     "never 0% for no data" rule -- and `startPromptMap` says how to get the
  *     rest.
@@ -878,11 +881,35 @@ export default function App() {
    *
    * `null` when no destination has been chosen, because `ranked` is empty
    * then and there is no row to find. See the module comment.
+   *
+   * `null` too when the tapped lot is further than `COVERAGE_RADIUS_M` from
+   * the destination, which is the same edge the list stops at. `ranked` has
+   * no distance cutoff, so it scores a car park 16 km away as readily as one
+   * 200 m away, and the card would fill its walk tile with "206 min" -- every
+   * number of it true, and none of it a trip anybody is going to make. That is
+   * the manufactured walk the no-destination case already refuses, reached
+   * here from *inside* coverage: 100 of the roster's 1,090 lots are more than
+   * 10 km from Taipei 101, and the map draws and answers every one of them.
+   *
+   * Per row, not per destination. `outsideCoverage` below asks whether the
+   * *destination* has any car park near it, which says nothing about how far
+   * the *tapped* one is, so gating this card on it left the case above wide
+   * open. The per-row bound subsumes it in the other direction -- if nothing
+   * in `ranked` is within the radius then this row is not either -- which is
+   * why the render gate below no longer repeats it.
+   *
+   * Out there the tap is answered the way the no-destination tap is: `MapView`
+   * opens its popup on every dot, with the lot's name and its chance on the
+   * same "never 0% for no data" rule, and `outsideCoverage`'s notice says in
+   * words how far away everything is. One rule either way -- a card needs a
+   * trip worth describing, and past that the popup answers instead.
    */
   const pinned = useMemo(() => {
     if (selectedLotId === null) return null;
     if (listed.some((row) => row.id === selectedLotId)) return null;
-    return ranked.find((row) => row.id === selectedLotId) ?? null;
+    const row = ranked.find((r) => r.id === selectedLotId) ?? null;
+    if (row === null || row.meters > COVERAGE_RADIUS_M) return null;
+    return row;
   }, [selectedLotId, listed, ranked]);
 
   /** The pinned card's own node, so the effect below can bring it into view. */
@@ -1172,11 +1199,13 @@ export default function App() {
           `false` rather than compared against `bestId` -- a lot outside
           `listed` can never *be* `bestId`, and spelling that out here is what
           keeps a later edit to either from quietly crowning a car park the
-          ranking never vouched for. Gated on the same three conditions as the
-          list itself: with no destination there is nothing to rank against,
-          and outside the covered area there is nothing worth ranking, which
-          `outsideCoverage` has already said in words. */}
-      {artifacts !== null && destination !== null && !outsideCoverage && pinned !== null && (
+          ranking never vouched for. One gate, not three: `pinned` is already
+          `null` without a destination (there is nothing to rank against), and
+          already `null` for a lot further out than `COVERAGE_RADIUS_M` --
+          which covers a destination with nothing near it too, since then no
+          row is inside the radius at all. Only `artifacts` is re-checked, and
+          only because the card reads `baseDataTs` off it below. */}
+      {artifacts !== null && pinned !== null && (
         <div className="pinned" data-testid="pinned-lot" ref={pinnedRef}>
           <h2 className="list-head">{s.selectedCarPark}</h2>
           <p className="pinned__note">{s.selectedCarParkNote}</p>
