@@ -204,31 +204,37 @@ function pricesFor(walk: number): { walk: number; delay: number } {
  *
  * `delay` is not a free parameter. It is `max(DELAY_VALUE, walk)` -- floor
  * coupled -- and that rule is **measured, not reasoned**. It looks arbitrary
- * next to the two obvious alternatives, and both of those were tried first,
- * against the live 1,090-lot roster with a harness that reproduced
- * `scripts/probe-ranker.py`'s shipped figures exactly. An "inversion" below is
- * a car park the model thinks is likely full ranked above one it thinks is
- * likely free:
+ * next to the two obvious alternatives, and both of those were tried first and
+ * found unsafe, at opposite ends, against the live roster:
  *
- * | Scheme | walk | delay | Inversions | Worst | Destinations, of 1,090, whose top 20 holds a lot both unlikely and over 1.5 km away |
- * |---|---|---|---|---|---|
- * | Cheaper, `delay` pinned at 5 | 2 | 5 | 0 | -- | 19 |
- * | Balanced (shipped) | 5 | 5 | 11 | #3 | 299 |
- * | Closer, `delay` pinned at 5 | 12 | 5 | **35** | **#2** | **963** |
- * | Cheaper, `delay` coupled symmetrically | 2 | 2 | **19** | **#2** | 618 |
- * | **Closer, floor-coupled** | **12** | **12** | **8** | **#6** | **173** |
+ *   - **Pinning `delay` at 5 regardless of the preference makes Closer
+ *     unsafe.** Every inversion this produces has the shape *near, cheap,
+ *     unlikely* beating *far, expensive, likely*: raising `walk` penalises
+ *     only the **far** lot -- which is the reliable one -- while the risky
+ *     lot, sitting at the destination, pays nothing extra.
+ *   - **Coupling the two symmetrically (`delay = walk`) repairs Closer and
+ *     breaks Cheaper instead.** A delay of NT$2/min makes being turned away
+ *     almost free, so the preset a price-conscious driver reaches for buys a
+ *     weaker availability signal along with it.
+ *   - **The floor is the only shape that holds both ends**, because it can
+ *     only rise: the delay price can never fall below today's value, so a
+ *     preference cannot erode the penalty for being sent away, and it rises
+ *     with `walk` so that making walking expensive does not *relatively*
+ *     cheapen being turned away.
  *
- *   - **Pinning the delay at 5 makes Closer unsafe.** Every inversion has the
- *     shape *near, cheap, unlikely* beating *far, expensive, likely*, so raising
- *     the price of walking penalises the **far** lot -- which is the reliable
- *     one -- while the risky lot sits at the destination paying nothing.
- *   - **Coupling the two symmetrically repairs Closer and breaks Cheaper.** A
- *     delay at NT$2 a minute makes being turned away cost almost nothing, and
- *     Cheaper goes from 0 inversions to 19.
- *   - **The floor satisfies both.** Closer at 12/12 measures *safer than the
- *     shipped ranker* -- 8 inversions against 11, worst #6 against #3 -- while
- *     still changing the top pick for 29.8% of destinations, so it loses none
- *     of its point.
+ * Do not quote an inversion count in this comment. `scripts/probe-ranker.py`'s
+ * own sweep found the counts swing by a factor of five on the same code and
+ * the same roster, purely from which snapshot was measured or which forecast
+ * column was read -- see the 2026-09-19 correction in the design spec's §5.
+ * What reproduced everywhere measured instead: Cheaper is the safest
+ * direction by a wide margin; floor-coupled Closer is safer than Balanced on
+ * inversion count in both samples measured, though not always on worst
+ * position -- that is a real trade for asking to walk less, visible to the
+ * driver on the card, not a defect to tune away; and, the one invariant this
+ * module actually depends on, **no preset has ever put an inversion at #1**.
+ * Run the probe for a current number with its provenance -- it parses these
+ * constants out of this file rather than copying them, precisely so it cannot
+ * report a stale sweep as the current one.
  *
  * The invariant this protects is the app's central claim: it ranks by how
  * likely you are to get a space. A preference is allowed to change what the

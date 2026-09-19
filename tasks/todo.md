@@ -51,11 +51,11 @@ The Stage A todo is archived at `docs/superpowers/plans/2026-09-17-stage-a-archi
 **Interfaces:**
 - Produces: `export const WALK_VALUE = 5`, `export const DELAY_VALUE = 5`. `TIME_VALUE` is **deleted**, not aliased.
 
-- [ ] **Step 1: Write the failing test.** Assert the walk term uses `WALK_VALUE` and the failure branch uses `DELAY_VALUE`, by giving them different values in a fixture and checking each side moves independently. A test that sets both to 5 proves nothing, because that is today's behaviour.
-- [ ] **Step 2: Run it and watch it fail.**
-- [ ] **Step 3: Implement.** `certain = walkMin * WALK_VALUE + fee`; the circling penalty and the drive both take `DELAY_VALUE`. **Delete `TIME_VALUE`** rather than leaving an alias — `scripts/probe-ranker.py`'s `load_constants()` parses it by name out of the TypeScript, so its disappearance must break the probe loudly. That is the design working; Task 5 repairs it.
-- [ ] **Step 4: Run the web suite.** Every existing ranker test must pass unchanged — with both constants at 5 the arithmetic is identical.
-- [ ] **Step 5: Commit** — `git commit -m "refactor(rank): price the walk and the delay separately"`.
+- [x] **Step 1: Write the failing test.** Assert the walk term uses `WALK_VALUE` and the failure branch uses `DELAY_VALUE`, by giving them different values in a fixture and checking each side moves independently. A test that sets both to 5 proves nothing, because that is today's behaviour.
+- [x] **Step 2: Run it and watch it fail.**
+- [x] **Step 3: Implement.** `certain = walkMin * WALK_VALUE + fee`; the circling penalty and the drive both take `DELAY_VALUE`. **Delete `TIME_VALUE`** rather than leaving an alias — `scripts/probe-ranker.py`'s `load_constants()` parses it by name out of the TypeScript, so its disappearance must break the probe loudly. That is the design working; Task 5 repairs it.
+- [x] **Step 4: Run the web suite.** Every existing ranker test must pass unchanged — with both constants at 5 the arithmetic is identical.
+- [x] **Step 5: Commit** — `git commit -m "refactor(rank): price the walk and the delay separately"`.
 
 ---
 
@@ -69,7 +69,7 @@ The Stage A todo is archived at `docs/superpowers/plans/2026-09-17-stage-a-archi
 **Interfaces:**
 - Produces: `export type Preference = "cheaper" | "balanced" | "closer"`; `export const PREFERENCES: Record<Preference, { walk: number; delay: number }>`; `rankLots` takes `preference` in its input object, defaulting to `"balanced"`. `preference.ts` exports `readPreference(storage)` / `writePreference(storage, p)`.
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
 
 ```ts
 it("prices the delay at the walk's value only when that is the higher of the two", () => {
@@ -89,10 +89,10 @@ it("ranks identically to the shipped constants when balanced", () => {
 });
 ```
 
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** `preference.ts` guards storage the way `places.ts` does — a private window, blocked site data or a thrown accessor must leave the app working on the default. An unrecognised stored value reads as `"balanced"`, never as a crash.
-- [ ] **Step 4: Run the web suite.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(rank): three preferences, and the floor that keeps them safe"`.
+- [x] **Step 2: Run them and watch them fail.**
+- [x] **Step 3: Implement.** `preference.ts` guards storage the way `places.ts` does — a private window, blocked site data or a thrown accessor must leave the app working on the default. An unrecognised stored value reads as `"balanced"`, never as a crash.
+- [x] **Step 4: Run the web suite.**
+- [x] **Step 5: Commit** — `git commit -m "feat(rank): three preferences, and the floor that keeps them safe"`.
 
 ---
 
@@ -102,11 +102,11 @@ it("ranks identically to the shipped constants when balanced", () => {
 - Create: `web/src/components/PreferencePicker.tsx`, `web/tests/preferencePicker.test.tsx`
 - Modify: `web/src/App.tsx`, `web/src/i18n.ts`, `web/src/styles/components.css`
 
-- [ ] **Step 1: Write the failing tests.** Each option sets the preference and re-ranks; the choice survives a reload; every control is keyboard-reachable and labelled; the group has an accessible name; changing it does **not** scroll the list, re-centre the map or move the arrival. Assert the rendered order actually changes between `cheaper` and `closer` for a fixture where it should — a test that only checks the button's state would pass against a control wired to nothing.
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** It sits with `ArrivalPicker`: both answer "what am I asking for", against the list's "here is what we found". **The score is never shown** — the control names a preference, and no card gains a NT$ figure. Copy is comparative ("cheaper", not "cheapest") because the ranker will still put a likely space above an unlikely bargain; read `i18n.ts` for register and keep the Chinese natural Taiwanese usage rather than a gloss.
-- [ ] **Step 4: Run the web suite.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(web): choose whether to walk less or pay less"`.
+- [x] **Step 1: Write the failing tests.** Each option sets the preference and re-ranks; the choice survives a reload; every control is keyboard-reachable and labelled; the group has an accessible name; changing it does **not** scroll the list, re-centre the map or move the arrival. Assert the rendered order actually changes between `cheaper` and `closer` for a fixture where it should — a test that only checks the button's state would pass against a control wired to nothing.
+- [x] **Step 2: Run them and watch them fail.**
+- [x] **Step 3: Implement.** It sits with `ArrivalPicker`: both answer "what am I asking for", against the list's "here is what we found". **The score is never shown** — the control names a preference, and no card gains a NT$ figure. Copy is comparative ("cheaper", not "cheapest") because the ranker will still put a likely space above an unlikely bargain; read `i18n.ts` for register and keep the Chinese natural Taiwanese usage rather than a gloss.
+- [x] **Step 4: Run the web suite.**
+- [x] **Step 5: Commit** — `git commit -m "feat(web): choose whether to walk less or pay less"`.
 
 ---
 
@@ -129,11 +129,11 @@ export function listRows(ranked: readonly Ranked[], limit: number): ListRows
 `head`. **This is a breaking change to a returned type, and `App.tsx:842`'s `listed` is its only
 caller** — move it in the same commit or the tree does not build.
 
-- [ ] **Step 1: Write the failing tests.** Every lot within `NEARBY_RADIUS_M` is reachable; the tail keeps the ranker's order and is not re-sorted; the ranked head is unchanged with the expander closed; a lot already in the head never appears twice.
-- [ ] **Step 2: Run them and watch them fail.**
-- [ ] **Step 3: Implement.** **Measured, so size it honestly:** 1.5 km reaches a median of 64 Taipei lots and up to 157, which is why the tail sits behind a "show more nearby" expander rather than rendering with the head — 157 cards laid out at once is exactly the cost this project has already been told about once. Keep the existing `UNKNOWN_RESERVE` rescue working.
-- [ ] **Step 4: Run the web suite.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(web): reach every car park worth walking to"`.
+- [x] **Step 1: Write the failing tests.** Every lot within `NEARBY_RADIUS_M` is reachable; the tail keeps the ranker's order and is not re-sorted; the ranked head is unchanged with the expander closed; a lot already in the head never appears twice.
+- [x] **Step 2: Run them and watch them fail.**
+- [x] **Step 3: Implement.** **Measured, so size it honestly:** 1.5 km reaches a median of 64 Taipei lots and up to 157, which is why the tail sits behind a "show more nearby" expander rather than rendering with the head — 157 cards laid out at once is exactly the cost this project has already been told about once. Keep the existing `UNKNOWN_RESERVE` rescue working.
+- [x] **Step 4: Run the web suite.**
+- [x] **Step 5: Commit** — `git commit -m "feat(web): reach every car park worth walking to"`.
 
 ---
 
@@ -143,11 +143,11 @@ caller** — move it in the same commit or the tree does not build.
 - Modify: `scripts/probe-ranker.py`
 - Test: `scripts/tests/` if a harness fits there; otherwise the probe's own output is the artifact
 
-- [ ] **Step 1: Repair `load_constants()`.** It parses `TIME_VALUE` by name and Task 1 deleted it, so the probe is broken right now — that is deliberate. Parse `WALK_VALUE` and `DELAY_VALUE` instead. **Keep parsing out of the TypeScript; never copy the numbers**, which is why the probe can be trusted at all.
-- [ ] **Step 2: Add the preference sweep.** For each preset, over both samples — every lot's own position (adversarial: the risky lot sits at 0 m) and destinations drawn from the offline place index at least 50 m from any lot (realistic) — report inversion count, worst position, whether any reaches **#1**, and the LIST REACH columns.
-- [ ] **Step 3: Check it against the measurement already taken.** The figures in the spec's §5 came from a harness that reused this probe's own `Ranker` and `count_inversions`. Your sweep should reproduce them: Cheaper 0 / Balanced 11 / Closer 8 on lot positions, and no preset at #1 in either sample. **If your numbers disagree, say so loudly rather than adjusting anything** — one of the two is wrong and it matters which.
-- [ ] **Step 4: Run the probe and the Python suite.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(probe): measure the safety of every preference"`.
+- [x] **Step 1: Repair `load_constants()`.** It parses `TIME_VALUE` by name and Task 1 deleted it, so the probe is broken right now — that is deliberate. Parse `WALK_VALUE` and `DELAY_VALUE` instead. **Keep parsing out of the TypeScript; never copy the numbers**, which is why the probe can be trusted at all.
+- [x] **Step 2: Add the preference sweep.** For each preset, over both samples — every lot's own position (adversarial: the risky lot sits at 0 m) and destinations drawn from the offline place index at least 50 m from any lot (realistic) — report inversion count, worst position, whether any reaches **#1**, and the LIST REACH columns.
+- [x] **Step 3: Check it against the measurement already taken.** The figures in the spec's §5 came from a harness that reused this probe's own `Ranker` and `count_inversions`. Your sweep should reproduce them: Cheaper 0 / Balanced 11 / Closer 8 on lot positions, and no preset at #1 in either sample. **If your numbers disagree, say so loudly rather than adjusting anything** — one of the two is wrong and it matters which.
+- [x] **Step 4: Run the probe and the Python suite.**
+- [x] **Step 5: Commit** — `git commit -m "feat(probe): measure the safety of every preference"`.
 
 ---
 
@@ -156,10 +156,10 @@ caller** — move it in the same commit or the tree does not build.
 **Files:**
 - Modify: `CLAUDE.md`, `docs/state-of-play.md`, `README.md`
 
-- [ ] **Step 1:** `CLAUDE.md` — the split constants and what each prices; the floor rule and why pinning and symmetric coupling were both rejected; that Balanced is the shipped pair. Correct the existing `TIME_VALUE` reference at `CLAUDE.md:208`. Record the spec's §9 boundary too, because it is the part most likely to be undone by accident: **the trained model must not learn preferences.** It predicts how likely a space is; the ranker decides what that probability is worth. That separation is what lets one `grid.bin` and one `week.bin` serve every driver — preferences inside the model would mean a model per combination, which the free tier cannot carry — and it keeps the Brier score a statement about calibration rather than about taste.
-- [ ] **Step 2:** `docs/state-of-play.md` — a section with the **measured** safety table from your own probe run, not copied from the spec, and the list-density figures.
-- [ ] **Step 3:** `README.md` — the app paragraph.
-- [ ] **Step 4: Commit** — `git commit -m "docs: record the ranking preferences"`.
+- [x] **Step 1:** `CLAUDE.md` — the split constants and what each prices; the floor rule and why pinning and symmetric coupling were both rejected; that Balanced is the shipped pair. Correct the existing `TIME_VALUE` reference at `CLAUDE.md:208`. Record the spec's §9 boundary too, because it is the part most likely to be undone by accident: **the trained model must not learn preferences.** It predicts how likely a space is; the ranker decides what that probability is worth. That separation is what lets one `grid.bin` and one `week.bin` serve every driver — preferences inside the model would mean a model per combination, which the free tier cannot carry — and it keeps the Brier score a statement about calibration rather than about taste.
+- [x] **Step 2:** `docs/state-of-play.md` — a section with the **measured** safety table from your own probe run, not copied from the spec, and the list-density figures.
+- [x] **Step 3:** `README.md` — the app paragraph.
+- [x] **Step 4: Commit** — `git commit -m "docs: record the ranking preferences"`.
 
 ---
 

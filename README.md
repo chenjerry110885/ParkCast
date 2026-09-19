@@ -62,7 +62,7 @@ Corpus figures below are at the time of writing (2026-09-14); test counts are re
 | Lots withheld as *not updating* | **112** at the first live publish (2026-09-14 09:11); 133 on a snapshot at 01:13 — the count moves as feeds freeze and recover (see the limitations) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **34.5 KB gzipped**, both files |
-| Tests | **626** Python (0 skipped) · **548** web · **114** Worker · **55** scripts |
+| Tests | **626** Python (0 skipped) · **548** web · **121** Worker · **55** scripts |
 
 Plans 1 through 3e are complete: the collector, the forecast grid, the ranked list, a map-first
 installable offline-capable app with place search, and — 3e — no forecast at all for a car park

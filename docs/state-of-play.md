@@ -514,11 +514,24 @@ hidden by the fold, since a distant lot sinks to the tail under the ranking anyw
 ### Test counts, real runs, 2026-09-19, in this checkout (the collector machine — `data/` present, untouched)
 
 `./.venv/Scripts/python.exe -m pytest -q` → **626 passed**, 0 skipped, matching the branch's stated
-baseline; the known-intermittent `test_artifacts_integration.py::test_end_to_end_over_real_observations`
-(unscoped over the live six-city store) passed on this run. `cd web && npx vitest run` → **548
-passed**, 38 files, matching the branch's stated baseline. The Worker and script suites are
-untouched by this branch — no `worker/` or `scripts/` source changed — so their last measured
-figures, **114 Worker · 55 scripts**, are carried forward rather than re-run here.
+baseline, including a pass this run from the known-intermittent
+`test_artifacts_integration.py::test_end_to_end_over_real_observations`. That test reads the live
+six-city store **unscoped**, and its result varies with that store's own state between runs — it has
+failed on identical code before — so a bare "passed" here is one run's result, not a settled figure;
+re-run it rather than trust either a single pass or a single failure. `cd web && npx vitest run` →
+**548 passed**, 38 files, matching the branch's stated baseline.
+
+**The Worker suite is genuinely untouched by this branch** — `git diff` against the branch point
+touches no file under `worker/` — but it is re-measured here rather than carried forward:
+`cd worker && npm test` → **121 passed**, 5 files, matching the plan's own Global Constraints
+baseline (`tasks/todo.md`), not the **114** this document carried before this branch. **`scripts/` is
+not untouched**: `scripts/probe-ranker.py` is **+371/−41** in this branch (commit `468c653`) — the
+branch's own safety instrument, and arguably its most important non-UI change. No file under
+`scripts/tests/` changed, so that suite's own count is unaffected by this branch and is re-measured
+here rather than assumed: `node --test scripts/tests/*.test.mjs` → **55 passed**. The two facts do
+not contradict — a directory can carry a real change while the one test suite that exercises a
+different part of it stays green — but "no `scripts/` source changed" was the wrong thing to have
+said.
 
 ---
 
