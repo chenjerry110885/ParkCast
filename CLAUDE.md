@@ -249,6 +249,73 @@ probability to flatter a metric. **Position is the point.** The probe exits non-
 likely-full lot reaches *first place*, i.e. when the app's own top recommendation is a car park it
 believes is full. Re-run it after any change to the ranker constants.
 
+### Ranking preferences — cheaper, balanced, closer (built 2026-09-18 → 09-19 on `feat/ranking-preferences`)
+
+The single `TIME_VALUE` above was doing two unrelated jobs: pricing the walk from a car park to the
+destination, and pricing the delay of being turned away — the circling, and the drive to the
+fallback. A driver's preference needed to move the first without moving the second, because a
+"cheaper" preset that simply lowered `TIME_VALUE` would have quietly weakened the availability
+signal for the driver least likely to notice. So the constant split: `WALK_VALUE` prices the walk
+and is what a preference moves; `DELAY_VALUE` prices the failure branch — the minutes
+`CIRCLING_PENALTY_MIN` and `DRIVE_MIN_PER_KM` compute, both unchanged — and cannot be set directly:
+it is derived, `DELAY_VALUE = max(5, WALK_VALUE)`.
+
+That floor looks arbitrary next to the two obvious alternatives, and both of those were built and
+measured first, against the live roster, before the floor was chosen — **do not simplify toward
+either of them; both are unsafe, at opposite ends:**
+
+- **Pinning `DELAY_VALUE` at 5 regardless of preference** makes *Closer* dangerous. Every inversion
+  it produces has the shape *near, cheap, unlikely* beating *far, expensive, likely*: raising
+  `WALK_VALUE` only penalises the lot that is actually reliable — the far one — while the risky lot,
+  sitting at the destination, pays nothing extra.
+- **Coupling the two symmetrically** (`delay = walk`) repairs *Closer* and breaks *Cheaper* instead:
+  a NT$2/min delay makes being turned away almost free, so the preset a price-conscious driver reaches
+  for buys a weaker availability signal along with it.
+
+The floor is the only shape that holds both ends, because it can only rise: the delay price can never
+fall below today's value, so a preference cannot erode the penalty for being sent away, and it rises
+with `WALK_VALUE` so that making walking expensive does not *relatively* cheapen being turned away.
+
+| Preset | `WALK_VALUE` | `DELAY_VALUE` |
+|---|---|---|
+| Cheaper | 2 | 5 |
+| **Balanced (default, shipped)** | **5** | **5** |
+| Closer | 12 | 12 |
+
+Only Closer's `DELAY_VALUE` actually moves — it is the one preset where the floor bites. **Balanced
+is the exact pair the app shipped with, unchanged**, so a driver who never opens the control ranks
+exactly as they did the day before this feature existed. That is what made this safe to ship, not a
+property proven after the fact.
+
+**The safety counts are a photograph of one roster snapshot, not a constant of the ranker — never
+quote one without its roster size, generation time and horizon column beside it.** `docs/superpowers/specs/2026-09-18-ranking-preferences-design.md`
+§5 carries a 2026-09-19 correction worth reading before touching any number here: the same probe, on
+the same code, gave a Balanced inversion count of 11 and then 57 on two roster snapshots three hours
+apart, and varying only which horizon column is read swings one roster's count from 22 to 84. What
+does hold across every run so far is the *direction* and the **`at #1` column**: Cheaper is
+consistently the safest preset, floor-coupled Closer is consistently safer than Balanced on inversion
+count (not always on worst position — that is a real trade, not a defect), and **no preset has ever
+put an inversion at #1**. Measured directly, 2026-09-19, `./.venv/Scripts/python.exe
+scripts/probe-ranker.py --artifacts web/.dev-artifacts` against 1,089 lots (roster `2564025264`,
+generated 2026-09-18 05:31 UTC, +15 min column): zero at #1 for all three presets, on both the
+130-lot adversarial sample and 700 real destinations — see "Ranking preferences" in
+[`docs/state-of-play.md`](docs/state-of-play.md) for the full table.
+
+**The score is still never shown.** A preference changes what a minute on foot and a minute of delay
+are worth against each other; `cost` stays a sort key, and no card gains a "NT$142". Alongside this,
+the list itself stopped being capped at a fixed count and now reaches every car park within
+`NEARBY_RADIUS_M` (1500 m) in the same cost order, with everything past the ranked head behind a
+"show more nearby" expander — see "Ranking preferences" in `docs/state-of-play.md` for the measured
+list density that size is based on.
+
+**What this means for Stage B, the trained model (spec §9) — the boundary most likely to be undone
+by accident: the trained model must not learn preferences.** It predicts one thing, how likely a
+space is; the ranker decides what that probability is worth. That separation is what lets one
+`grid.bin` and one `week.bin` serve every driver — preferences baked into the model would mean a
+model per combination, which the free tier cannot carry — and it keeps the Brier score a statement
+about calibration rather than about taste. Stage B should get better at `p`; this feature makes the
+ranker configurable about what `p` is worth. Do not let the two mix.
+
 ### The app is bilingual: English and 繁體中文
 
 Required, and it shapes the artifact format rather than being a later polish pass. The upstream feed
