@@ -413,6 +413,39 @@ export interface Strings {
    * ranking.
    */
   preferenceCloser: string;
+  /**
+   * The expander under the ranked list: how many more car parks are close
+   * enough to walk to but did not make the cap. Carries `{n}`.
+   *
+   * The count is the point of the sentence, not decoration. The control has to
+   * say whether pressing it reveals three rows or a hundred and forty, because
+   * that is the difference between a glance and a scroll -- and because a
+   * driver who can see a green dot on the map needs to know the list can reach
+   * it before they will believe it does.
+   *
+   * It says "nearby" rather than naming a radius. `NEARBY_RADIUS_M` is 1,500 m,
+   * which is a nineteen-minute walk, and a control that promised "within 1.5 km"
+   * would be making a claim about straight-line distance that the app's own
+   * walking figures already qualify -- `geo.ts` understates a real Taipei walk
+   * by 20-30%. "Nearby" is the honest size of what is being offered.
+   */
+  nearbyMoreTemplate: string;
+  /**
+   * The `n === 1` form of `nearbyMoreTemplate`. See `confidenceWeekTemplate`
+   * for the pattern: English needs the singular, zh's two are the same text.
+   */
+  nearbyMoreOneTemplate: string;
+  /** The same control once the tail is open, which collapses it again. */
+  nearbyFewer: string;
+  /**
+   * Accessible name for the tail's own list.
+   *
+   * The tail is a second `<ol>`, so it needs to say what it is: without a name
+   * a screen reader announces "list, 44 items" directly below another list and
+   * nothing distinguishes the two. It names the same thing the expander does,
+   * because it is the thing the expander opened.
+   */
+  nearbyListLabel: string;
   /** Accessible label for the bottom sheet's grip button when tapping it would open the sheet to `full`. */
   expandList: string;
   /** Accessible label for the bottom sheet's grip button when tapping it would collapse the sheet. */
@@ -520,6 +553,10 @@ const en: Strings = {
   preferenceCheaper: "Cheaper",
   preferenceBalanced: "Balanced",
   preferenceCloser: "Closer",
+  nearbyMoreTemplate: "Show {n} more car parks nearby",
+  nearbyMoreOneTemplate: "Show {n} more car park nearby",
+  nearbyFewer: "Show fewer car parks",
+  nearbyListLabel: "More car parks nearby",
   expandList: "Expand the list",
   collapseList: "Collapse the list",
 };
@@ -621,6 +658,10 @@ const zh: Strings = {
   preferenceCheaper: "較便宜",
   preferenceBalanced: "均衡",
   preferenceCloser: "較近",
+  nearbyMoreTemplate: "顯示附近其他 {n} 個停車場",
+  nearbyMoreOneTemplate: "顯示附近其他 {n} 個停車場",
+  nearbyFewer: "收合附近其他停車場",
+  nearbyListLabel: "附近其他停車場",
   expandList: "展開清單",
   collapseList: "收合清單",
 };

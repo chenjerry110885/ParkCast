@@ -192,8 +192,12 @@ const PLACES_URL = `${import.meta.env.BASE_URL.replace(/\/+$/, "")}/places/taipe
  * silently hide 98% of the city behind a map that looked like it was showing
  * all of it.
  *
- * It is also a *soft* limit: `listRows` grows the list rather than let a fixed
- * cap drop the no-forecast lots the ranker deliberately kept.
+ * It is also a *soft* limit, twice over. `listRows` grows it rather than let a
+ * fixed cap drop the no-forecast lots the ranker deliberately kept -- and it is
+ * no longer where the list *ends*: everything else within `NEARBY_RADIUS_M`
+ * comes back in `ListRows.nearby`, behind the expander below. What this number
+ * decides now is how much the page renders before the driver asks for more, not
+ * how far the list reaches.
  */
 export const LIST_LIMIT = 20;
 
@@ -1016,19 +1020,47 @@ export default function App() {
   );
 
   /**
-   * What the list draws: the head of the ranking, grown if the cap would
-   * otherwise drop a nearby lot the ranker kept on purpose. See `listRows`.
+   * What the list draws, in two parts: the head of the ranking -- grown if the
+   * cap would otherwise drop a nearby lot the ranker kept on purpose -- and
+   * every other car park within walking distance, for the expander. See
+   * `listRows`.
    */
   const listed = useMemo(() => listRows(matching, LIST_LIMIT), [matching]);
+
+  /**
+   * Whether the driver has asked for the rest of the neighbourhood.
+   *
+   * The whole reason the tail is behind a control rather than simply appended:
+   * at 1.5 km a Taipei destination has a median of 74 car parks around it and
+   * up to 156, and laying 156 cards out on a phone is a cost this project has
+   * already been told about once. Closed, the page renders exactly the twenty
+   * rows it rendered before; open, it renders what was asked for.
+   *
+   * **Not reset when the destination or the filters move.** It is a standing
+   * answer to "how much of the neighbourhood do you want to see?", not a fact
+   * about one search, and a driver who wants the wide view at every destination
+   * should not have to ask again at each one. The cost of the other choice is
+   * the more visible one: re-collapsing the list under a driver who opened it
+   * is the app taking a decision back. What a new destination *does* change is
+   * the count on the control, which is recomputed with everything else.
+   */
+  const [nearbyOpen, setNearbyOpen] = useState(false);
 
   /**
    * How many car parks the filter took out of the list, split by why.
    *
    * **The scope is the rows the list would have shown with no filter on** --
-   * `listRows(ranked, LIST_LIMIT)`, normally twenty. Not the whole roster: a
-   * tally of "1,050 hidden" is arithmetic about a city, and what a driver
+   * `listRows(ranked, LIST_LIMIT).head`, normally twenty. Not the whole roster:
+   * a tally of "1,050 hidden" is arithmetic about a city, and what a driver
    * needs explained is the list in front of them that just got shorter. Not
    * the filtered list either, which by construction has nothing hidden in it.
+   *
+   * **And not the nearby tail**, open or closed, for the same reason: at 1.5 km
+   * the tail is a neighbourhood of up to 156 car parks, so counting it here
+   * would turn a sentence about a list back into arithmetic about a city --
+   * which is the one thing this scope was chosen to avoid. The tail narrows
+   * with the same filter (it is cut from `matching`, like the head), and the
+   * expander's own count says how many rows survived it.
    *
    * **And it is two numbers, never one.** That is the whole reason this
    * exists. "No car park near here takes scooters" and "the data doesn't say"
@@ -1038,7 +1070,7 @@ export default function App() {
    * the notice below prints both.
    */
   const hidden = useMemo(
-    () => tallyHidden(listRows(ranked, LIST_LIMIT).map((row) => row.lot), filters),
+    () => tallyHidden(listRows(ranked, LIST_LIMIT).head.map((row) => row.lot), filters),
     [ranked, filters],
   );
 
@@ -1160,9 +1192,17 @@ export default function App() {
    * A map rather than a callback because `LotList` is memoised: a fresh closure
    * every render would defeat that memo on every mouse move across the list,
    * which is the exact cost the memo was added to avoid. Built over the rows
-   * that actually render a card -- `listed`, plus the pinned lot when there is
-   * one -- and not the whole 1,075-lot roster, because a card is the only
-   * thing that shows a confidence grade.
+   * that actually render a card -- the head, the nearby tail once it is open,
+   * plus the pinned lot when there is one -- and not the whole 1,075-lot
+   * roster, because a card is the only thing that shows a confidence grade.
+   *
+   * The tail is in here **only while it is open**, which is the same bargain
+   * the expander itself is: a closed tail draws no cards, so paying for up to
+   * 156 `supportForLot` lookups to describe them would be work for nothing. It
+   * has to be in here when it *is* open, though, for the reason the map card is
+   * below -- a tail card left to the `?? 0` default would read "Low - thin"
+   * beside a head card reading "High - 5 weeks" for the same arrival, which is
+   * the list quietly knowing less about a lot the further down it sits.
    *
    * The map card's row belongs in here rather than being left to the `?? 0`
    * default: `0` is `confidence.ts`'s thinnest evidence ("not watched at this
@@ -1174,9 +1214,13 @@ export default function App() {
    * nothing and the gate stays one line.
    */
   const supportById = useMemo(() => {
-    const carded = mapCard === null ? listed : [...listed, mapCard];
+    const carded = [
+      ...listed.head,
+      ...(nearbyOpen ? listed.nearby : []),
+      ...(mapCard === null ? [] : [mapCard]),
+    ];
     return new Map(carded.map((r) => [r.id, supportForLot(week, r.lot, arrivalTs)]));
-  }, [listed, mapCard, week, arrivalTs]);
+  }, [listed, nearbyOpen, mapCard, week, arrivalTs]);
 
   /**
    * The destination is somewhere this app cannot answer for.
@@ -1300,10 +1344,18 @@ export default function App() {
    * demotes the same rows in the ordering for the same reason and argues it at
    * length; this is the badge half of that, and `notUpdating` is shared so the
    * two can never disagree about which lots they mean.
+   *
+   * Read off the head alone, and not off the head plus the nearby tail. That is
+   * not a judgment call: `rankLots` sorts every row with a forecast above every
+   * row without one, and the tail is the ranking continued past the head, so a
+   * tail row can only carry a forecast if some head row already does. The two
+   * spellings pick the same lot in every reachable state, and the shorter one
+   * says what the badge means -- the crown belongs to the list, and cannot
+   * appear on a row that is off screen until the driver opens the expander.
    */
   const bestId = withheld
     ? null
-    : (listed.find((r) => r.probability !== null && !notUpdating(r.lot))?.id ?? null);
+    : (listed.head.find((r) => r.probability !== null && !notUpdating(r.lot))?.id ?? null);
 
   /**
    * A lot was chosen, in the list or on the map. One path for both, so the
@@ -1715,9 +1767,9 @@ export default function App() {
               `confidenceWeekTemplate` and `confidenceWeeksTemplate`; zh's two
               are the same text, so the branch is a no-op there. "1 car parks
               are hidden" is common on the unknown line especially. */}
-          {(listed.length === 0 || hidden.none > 0 || hidden.unknown > 0) && filters.length > 0 && (
+          {(listed.head.length === 0 || hidden.none > 0 || hidden.unknown > 0) && filters.length > 0 && (
             <Notice tone="info" testId="filter-hidden" role="status">
-              {listed.length === 0 && <>{s.filterNoMatch} </>}
+              {listed.head.length === 0 && <>{s.filterNoMatch} </>}
               {hidden.none > 0 && (
                 <span data-testid="filter-hidden-none">
                   {fillTemplate(
@@ -1737,7 +1789,7 @@ export default function App() {
             </Notice>
           )}
           <LotList
-            rows={listed}
+            rows={listed.head}
             lang={lang}
             baseDataTs={artifacts.grid.baseDataTs}
             ageMin={ageMin ?? 0}
@@ -1749,6 +1801,69 @@ export default function App() {
             onSelect={selectLot}
             onHover={setHoverLotId}
           />
+          {/* The car park the owner could see on the map and could not open.
+              The cap picks twenty rows by expected *cost*, so a lot two streets
+              away and visibly free loses that race on price alone and simply is
+              not there -- "I always see lots around that's green but didn't see
+              it in the list if I'd like to know the detail about it."
+
+              **In the body, under the list, and never in the header.** The
+              header is the "what am I asking for" surface and has 13 px of
+              slack at 375x667 (see `roomForPreference` and
+              `tests/preferencePicker.test.tsx`); this is part of the answer,
+              not part of the question, and it costs that budget nothing.
+
+              Between the two lists rather than below both, which is a decision
+              about the finger that opened it: expanded, the control stays where
+              it was tapped, so collapsing 140 rows is a scroll back to a known
+              place instead of a hunt past the bottom of them.
+
+              The APG disclosure pattern: `aria-expanded` on the button and the
+              revealed list immediately after it, with no `aria-controls` --
+              which would have to name an id that does not exist while the tail
+              is closed, and the tail is closed precisely so that nothing of it
+              is built. */}
+          {listed.nearby.length > 0 && (
+            <>
+              <button
+                type="button"
+                className="nearby-toggle"
+                aria-expanded={nearbyOpen}
+                data-testid="nearby-toggle"
+                onClick={() => setNearbyOpen((open) => !open)}
+              >
+                {nearbyOpen
+                  ? s.nearbyFewer
+                  : fillTemplate(
+                      listed.nearby.length === 1 ? s.nearbyMoreOneTemplate : s.nearbyMoreTemplate,
+                      { n: listed.nearby.length },
+                    )}
+              </button>
+              {/* Rendered only when open, which is the entire point: the tail
+                  runs to 156 rows at a dense Taipei destination, and a phone
+                  pays for what the driver opened and nothing else. Hiding it in
+                  CSS instead would lay every one of those cards out anyway, and
+                  leave a screen reader walking through a list the page says is
+                  collapsed. */}
+              {nearbyOpen && (
+                <LotList
+                  rows={listed.nearby}
+                  lang={lang}
+                  label={s.nearbyListLabel}
+                  testId="nearby-list"
+                  baseDataTs={artifacts.grid.baseDataTs}
+                  ageMin={ageMin ?? 0}
+                  horizonFromReadingMin={horizonFromReadingMin}
+                  supportById={supportById}
+                  fromHistory={fromHistory}
+                  bestId={bestId}
+                  selectedId={selectedLotId}
+                  onSelect={selectLot}
+                  onHover={setHoverLotId}
+                />
+              )}
+            </>
+          )}
         </>
       )}
     </Shell>

@@ -615,6 +615,70 @@ export function rankLots(input: RankInput): Ranked[] {
 export const UNKNOWN_RESERVE = 5;
 
 /**
+ * How far from the destination the list still reaches, in metres.
+ *
+ * The cap below is a rendering budget, not a judgment about where a driver
+ * would park -- but for as long as it was the list's only bound, it was being
+ * read as one. The owner reported the symptom: *"I always see lots around
+ * that's green but didn't see it in the list if I'd like to know the detail
+ * about it."* A car park drawn on the map a few hundred metres away, plainly
+ * free, with no row to open -- because twenty rows are chosen by expected
+ * *cost*, and a near lot can lose that race on price alone.
+ *
+ * So the list is bounded by distance, and the cap now only decides where the
+ * expander goes. 1,500 m is about a nineteen-minute walk at `WALK_METERS_PER_MIN`,
+ * and it is sized against the roster rather than picked. Sampling 120
+ * destinations drawn from lot positions in the 1,089-lot Taipei roster:
+ *
+ * | Radius | Walk | Median lots | 90th pct | Worst |
+ * |---|---|---|---|---|
+ * | 1.0 km | 12 min | 38 | 70 | 76 |
+ * | **1.5 km** | **19 min** | **74** | **148** | **156** |
+ * | 2.0 km | 25 min | 126 | 245 | 254 |
+ *
+ * The radius is therefore not the constraint; rendering is. Laying out 156
+ * cards at once is exactly the cost this project has already been told about,
+ * which is why everything past the cap sits in `ListRows.nearby` behind an
+ * expander, and a phone pays only for what the driver opens. Distant lots sink
+ * to the tail under the ranking anyway, so the order that budget is spent in is
+ * already the right one.
+ *
+ * Well inside `App`'s `COVERAGE_RADIUS_M`, which is the distance past which a
+ * tapped lot gets no card at all -- so every row this radius admits is one
+ * whose detail the app can actually show.
+ */
+export const NEARBY_RADIUS_M = 1500;
+
+/**
+ * What the list draws, and what it can reach from there.
+ *
+ * Two arrays rather than one, because they are bounded by different things and
+ * cost different amounts to render. `head` is the ranked list as it has always
+ * been -- the cap, plus the rescue -- and is drawn unconditionally. `nearby` is
+ * the rest of the neighbourhood, up to a hundred and fifty rows of it, and is
+ * drawn only when the driver asks.
+ */
+export interface ListRows {
+  /**
+   * The ranked head: the first `limit` rows, plus any nearer no-forecast lots
+   * the cap would otherwise have dropped. Exactly what the list drew before
+   * `nearby` existed, which is the promise this split has to keep.
+   */
+  head: Ranked[];
+  /**
+   * Every other car park within `NEARBY_RADIUS_M`, **in the ranker's order** --
+   * the same ordering `head` is in, continued, not a second sort. Disjoint from
+   * `head` by construction.
+   *
+   * Sorting this by distance instead would be the easy mistake and a quiet
+   * contradiction: the twenty rows above it are ordered by expected cost, and a
+   * tail that changed the rule halfway down would be two rankings stacked on
+   * top of each other with nothing saying so.
+   */
+  nearby: Ranked[];
+}
+
+/**
  * The head of the ranking, plus any nearer no-forecast lots the cap would drop.
  *
  * `rankLots` keeps a lot with no forecast and sorts it behind every lot that has
@@ -634,7 +698,7 @@ export const UNKNOWN_RESERVE = 5;
  * the city and everything about one on the same street. At most
  * `UNKNOWN_RESERVE` of them, nearest first.
  */
-export function listRows(ranked: readonly Ranked[], limit: number): Ranked[] {
+function rankedHead(ranked: readonly Ranked[], limit: number): Ranked[] {
   const head = ranked.slice(0, limit);
   // Nothing was cut, or the cap already reached the unknown group -- and when
   // no lot has a forecast at all, the head *is* that group and needs no rescue.
@@ -649,4 +713,33 @@ export function listRows(ranked: readonly Ranked[], limit: number): Ranked[] {
     .slice(0, UNKNOWN_RESERVE);
 
   return rescued.length === 0 ? head : [...head, ...rescued];
+}
+
+/**
+ * Split the ranking into the rows the list draws and the rows it can reach.
+ *
+ * The cap stays where it is and keeps doing what it did -- `head` is
+ * `rankedHead` unchanged, so a driver who never opens the expander sees the
+ * list they already had, down to the row. What changes is that the cap is no
+ * longer the *end* of the list: everything else within `NEARBY_RADIUS_M` comes
+ * back in `nearby`, so a car park the driver can see on the map and could walk
+ * to always has a row to open, whatever the cost model made of its price.
+ *
+ * `Array#filter` preserves order, so `nearby` is the ranker's own ordering with
+ * `head`'s rows lifted out of it -- a continuation, never a re-sort. See
+ * `ListRows.nearby`.
+ *
+ * Disjointness is by **row identity**, not by index. `rankedHead` can reach
+ * past `limit` for a no-forecast lot near the destination, so the rows it
+ * returns are not always `ranked`'s first `head.length`; a tail sliced from
+ * either offset would list every rescued lot twice, and those are precisely the
+ * nearby lots the rescue exists to show once.
+ */
+export function listRows(ranked: readonly Ranked[], limit: number): ListRows {
+  const head = rankedHead(ranked, limit);
+  const inHead = new Set<Ranked>(head);
+  return {
+    head,
+    nearby: ranked.filter((row) => !inHead.has(row) && row.meters <= NEARBY_RADIUS_M),
+  };
 }

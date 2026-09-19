@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { districtName, lotTypeName, t } from "../src/i18n";
+import { districtName, fillTemplate, lotTypeName, t } from "../src/i18n";
 
 describe("translation", () => {
   it("has both languages for every key", () => {
@@ -75,6 +75,41 @@ describe("translation", () => {
     // The distinction the two lines exist to draw survives the rewording.
     expect(en.filterHiddenUnknownTemplate).toContain("not the same as having none");
     expect(zh.filterHiddenUnknownTemplate).toContain("這與「回報沒有」並不一樣");
+  });
+
+  /**
+   * The nearby expander says how many rows it opens, and does not say how far.
+   *
+   * The count is the substance of the control, not decoration: "show more" is
+   * the difference between three rows and a hundred and forty, which is the
+   * difference between a glance and a scroll, and a driver looking at a green
+   * dot on the map needs to know the list can reach it before they will
+   * believe that it does.
+   *
+   * The distance stays out of the copy. `NEARBY_RADIUS_M` is a *straight-line*
+   * 1.5 km, and `geo.ts` says in as many words that a straight line understates
+   * a real Taipei walk by 20-30% -- so "within 1.5 km" would be a promise made
+   * in a unit the app already qualifies everywhere else it shows one.
+   */
+  it("counts the rows the expander opens, in both languages, and names no radius", () => {
+    const en = t("en"), zh = t("zh");
+    for (const template of [
+      en.nearbyMoreTemplate,
+      en.nearbyMoreOneTemplate,
+      zh.nearbyMoreTemplate,
+      zh.nearbyMoreOneTemplate,
+    ]) {
+      expect(template).toContain("{n}");
+      expect(template).not.toMatch(/1\.5|1,?500|公里|km/);
+    }
+    // English needs the singular: without it the `n === 1` case, which any
+    // filtered list can reach, reads "Show 1 more car parks nearby".
+    expect(en.nearbyMoreOneTemplate).not.toBe(en.nearbyMoreTemplate);
+    expect(fillTemplate(en.nearbyMoreOneTemplate, { n: 1 })).toBe("Show 1 more car park nearby");
+    expect(fillTemplate(en.nearbyMoreTemplate, { n: 3 })).toBe("Show 3 more car parks nearby");
+    // Chinese draws no singular/plural distinction, so its two are deliberately
+    // the same text -- `confidenceWeekTemplate`'s precedent exactly.
+    expect(zh.nearbyMoreOneTemplate).toBe(zh.nearbyMoreTemplate);
   });
 });
 

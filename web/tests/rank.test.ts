@@ -2,12 +2,13 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { haversineMeters } from "../src/geo";
+import { EARTH_RADIUS_M, haversineMeters } from "../src/geo";
 import {
   CIRCLING_PENALTY_MIN,
   DELAY_VALUE,
   DRIVE_MIN_PER_KM,
   EXPECTED_HOURS,
+  NEARBY_RADIUS_M,
   PREFERENCES,
   UNKNOWN_RESERVE,
   WALK_VALUE,
@@ -176,7 +177,30 @@ describe("notUpdating", () => {
  * time-correlated (see CLAUDE.md), and thin climatology buckets are what
  * produces them.
  */
-describe("listRows", () => {
+/**
+ * Metres per degree of latitude, so a fixture can say how far away a car park
+ * is rather than in what direction.
+ *
+ * Every lot in this file shares one longitude, so `haversineMeters` reduces to
+ * `EARTH_RADIUS_M * dLat` exactly and this factor is not an approximation --
+ * which matters, because `NEARBY_RADIUS_M` is a boundary the cases below sit a
+ * few metres either side of on purpose.
+ */
+const M_PER_DEG_LAT = (Math.PI / 180) * EARTH_RADIUS_M;
+
+/** A lot `meters` due north of the destination, charging `hourly` NT$ an hour. */
+const away = (id: string, meters: number, hourly: number) =>
+  lot(id, at.lat + meters / M_PER_DEG_LAT, { k: "exact", lo: hourly, hi: hourly });
+
+/**
+ * The head of the list: the cap, and the rescue that bends it.
+ *
+ * `listRows` returns two arrays now; everything here is about the first, which
+ * is what the list draws with the expander closed. It has to be exactly what
+ * the list drew before the second one existed -- the regression risk for every
+ * driver already using the app.
+ */
+describe("listRows: the ranked head", () => {
   /** `n` lots, all at the destination, `unknownFrom` onwards having no forecast. */
   function ranking(n: number, unknownFrom: number, spacing = 0.0001) {
     return rankLots({
@@ -191,11 +215,14 @@ describe("listRows", () => {
   }
 
   it("caps a list of known lots at the limit", () => {
-    expect(listRows(ranking(50, 50), 20)).toHaveLength(20);
+    expect(listRows(ranking(50, 50), 20).head).toHaveLength(20);
   });
 
   it("returns everything when the ranking is shorter than the limit", () => {
-    expect(listRows(ranking(3, 3), 20)).toHaveLength(3);
+    const { head, nearby } = listRows(ranking(3, 3), 20);
+    expect(head).toHaveLength(3);
+    // Nothing was cut, so there is nothing for the expander to offer either.
+    expect(nearby).toEqual([]);
   });
 
   it("makes a nearby lot with no forecast reachable past the cap", () => {
@@ -214,10 +241,10 @@ describe("listRows", () => {
     });
     expect(ranked.at(-1)!.id).toBe("nearest-unknown");
 
-    const listed = listRows(ranked, 20);
-    expect(listed.map((r) => r.id)).toContain("nearest-unknown");
+    const { head } = listRows(ranked, 20);
+    expect(head.map((r) => r.id)).toContain("nearest-unknown");
     // Grown, not reordered: the 20 scored lots keep their places and their sort.
-    expect(listed.slice(0, 20)).toEqual(ranked.slice(0, 20));
+    expect(head.slice(0, 20)).toEqual(ranked.slice(0, 20));
   });
 
   it("does not reach past the cap for a lot further than anything on screen", () => {
@@ -234,7 +261,10 @@ describe("listRows", () => {
       ],
       probability: (i) => (i === 0 ? null : 0.9),
     });
-    expect(listRows(ranked, 20)).toHaveLength(20);
+    const { head, nearby } = listRows(ranked, 20);
+    expect(head).toHaveLength(20);
+    // 55 km out, so the tail does not owe it a row either. See `NEARBY_RADIUS_M`.
+    expect(nearby.map((r) => r.id)).not.toContain("far-unknown");
   });
 
   it("rescues at most UNKNOWN_RESERVE of them, so the list stays a list", () => {
@@ -252,25 +282,148 @@ describe("listRows", () => {
       ],
       probability: (i) => (i < 20 ? 0.9 : null),
     });
-    const listed = listRows(ranked, 20);
-    expect(listed).toHaveLength(20 + UNKNOWN_RESERVE);
+    const { head } = listRows(ranked, 20);
+    expect(head).toHaveLength(20 + UNKNOWN_RESERVE);
     // Nearest first among the rescued, which is the only order they have.
-    const rescued = listed.slice(20);
+    const rescued = head.slice(20);
     expect(rescued.map((r) => r.id)).toEqual(["unknown-0", "unknown-1", "unknown-2", "unknown-3", "unknown-4"]);
   });
 
   it("adds nothing when the cap already reached the no-forecast group", () => {
     // 21 lots, the last two unknown: one is already visible at row 20, so the
     // promise is kept and there is nothing to rescue.
-    const listed = listRows(ranking(21, 19), 20);
-    expect(listed).toHaveLength(20);
-    expect(listed.some((r) => r.probability === null)).toBe(true);
+    const { head } = listRows(ranking(21, 19), 20);
+    expect(head).toHaveLength(20);
+    expect(head.some((r) => r.probability === null)).toBe(true);
   });
 
   it("adds nothing when no lot has a forecast at all", () => {
     // The expired-artifact case: every row is unknown, the head *is* the group,
     // and growing the list by five arbitrary extras would help nobody.
-    expect(listRows(ranking(50, 0), 20)).toHaveLength(20);
+    expect(listRows(ranking(50, 0), 20).head).toHaveLength(20);
+  });
+});
+
+/**
+ * The tail: every other car park within `NEARBY_RADIUS_M`, in the ranker's
+ * order.
+ *
+ * The bug this closes was reported by the owner: *"I always see lots around
+ * that's green but didn't see it in the list if I'd like to know the detail
+ * about it."* Twenty rows are chosen by expected *cost*, so a car park two
+ * streets away and visibly free can lose that race on price alone and have no
+ * row to open at all. The list is bounded by distance now; the cap only decides
+ * where the expander goes.
+ *
+ * Every case below asserts **which rows and in what order**, never how many.
+ * A length assertion here would pass against a tail sorted by distance, and
+ * against one that listed a rescued lot the head is already showing -- the two
+ * ways this can be wrong while looking right.
+ */
+describe("listRows: the nearby tail", () => {
+  it("reaches every car park inside the radius, and stops there", () => {
+    // Forty lots from 40 m to 1,600 m out, so the last three fall outside.
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: Array.from({ length: 40 }, (_unused, k) => away(`lot-${k}`, 40 * (k + 1), 30)),
+      probability: () => 0.9,
+    });
+    const { head, nearby } = listRows(ranked, 20);
+
+    const shown = new Set([...head, ...nearby].map((r) => r.id));
+    // One assertion, both directions: inside the radius a row exists, outside
+    // it none does. A wider radius fails on the far three, a narrower one on
+    // the rows between, and an unbounded tail on the far three again.
+    for (const row of ranked) {
+      expect(shown.has(row.id), `${row.id} at ${Math.round(row.meters)} m`).toBe(
+        row.meters <= NEARBY_RADIUS_M,
+      );
+    }
+    // ...and the bound really is exercised: the fixture straddles it.
+    expect(ranked.some((r) => r.meters > NEARBY_RADIUS_M)).toBe(true);
+  });
+
+  it("leaves the ranked head exactly as the cap drew it", () => {
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: Array.from({ length: 40 }, (_unused, k) => away(`lot-${k}`, 40 * (k + 1), 30)),
+      probability: () => 0.9,
+    });
+    // Same rows, same order, same objects -- the expander adds a second array
+    // and moves nothing out of the first.
+    expect(listRows(ranked, 20).head).toEqual(ranked.slice(0, 20));
+  });
+
+  it("continues the ranker's order rather than sorting the tail by distance", () => {
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: [
+        // Twenty cheap car parks at the destination: the head under any rule.
+        ...Array.from({ length: 20 }, (_unused, k) => away(`head-${k}`, 10 + k, 5)),
+        // Two more inside the radius, where cost and distance disagree about
+        // which comes first. That disagreement is the only thing that can tell
+        // a continued ranking from a re-sorted one.
+        away("near-and-dear", 600, 200),
+        away("far-and-cheap", 1400, 10),
+      ],
+      probability: () => 0.9,
+    });
+    const { head, nearby } = listRows(ranked, 20);
+
+    expect(head.map((r) => r.id)).toEqual(Array.from({ length: 20 }, (_u, k) => `head-${k}`));
+    expect(nearby.map((r) => r.id)).toEqual(["far-and-cheap", "near-and-dear"]);
+    // ...and that is the ranker's order and not distance's, which is the other
+    // way round. Without this line the assertion above would pass against a
+    // tail that had quietly changed the rule halfway down the list.
+    expect([...nearby].sort((a, b) => a.meters - b.meters).map((r) => r.id)).toEqual([
+      "near-and-dear",
+      "far-and-cheap",
+    ]);
+  });
+
+  it("never lists a car park twice, not even one the head reached past the cap for", () => {
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: [
+        // Twenty scored lots ~1.2 km out. Inside the radius, so a tail that
+        // forgot about the head would have plenty to duplicate.
+        ...Array.from({ length: 20 }, (_unused, k) => away(`known-${k}`, 1200 + k, 30)),
+        // Six with no forecast, all nearer than those and all inside the head's
+        // envelope. The nearest is the dearest, so the rescue (which takes the
+        // five *nearest*) and the ranking (which takes the cheapest first)
+        // disagree about which five they are -- and the tail has to follow the
+        // head's answer, not its own.
+        ...[100, 200, 300, 400, 500, 600].map((m, k) => away(`unknown-${k}`, m, 100 - k * 18)),
+      ],
+      probability: (i) => (i < 20 ? 0.9 : null),
+    });
+    const { head, nearby } = listRows(ranked, 20);
+
+    expect(head.slice(20).map((r) => r.id)).toEqual([
+      "unknown-0",
+      "unknown-1",
+      "unknown-2",
+      "unknown-3",
+      "unknown-4",
+    ]);
+    // The ranker puts `unknown-5` *first* of the six, so a tail sliced at the
+    // cap would open with it and then repeat all five the head already shows.
+    expect(ranked.slice(20).map((r) => r.id)).toEqual([
+      "unknown-5",
+      "unknown-4",
+      "unknown-3",
+      "unknown-2",
+      "unknown-1",
+      "unknown-0",
+    ]);
+    expect(nearby.map((r) => r.id)).toEqual(["unknown-5"]);
+
+    const ids = [...head, ...nearby].map((r) => r.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
 

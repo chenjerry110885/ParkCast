@@ -459,6 +459,102 @@ describe("a roster that has never heard of either field", () => {
   });
 });
 
+/**
+ * The filters and the nearby expander, composed.
+ *
+ * Two features that both narrow a list, and the question is which of them acts
+ * on what. The answer is that neither acts on the other's output: the filter
+ * cuts the *ranking* once (`App`'s `matching`), and the list then takes both
+ * its head and its tail from that one cut. So a car park the driver filtered
+ * out cannot come back through the expander, and a car park past the cap is
+ * still filterable -- the failure this would otherwise have is a tail that
+ * quietly re-admits the rows the chips just removed.
+ *
+ * The hidden-count notice deliberately does **not** widen to cover the tail.
+ * Its scope is the rows the list would have shown unfiltered -- twenty -- and
+ * at 1.5 km the tail runs to a hundred and fifty, so counting it there would
+ * turn a sentence about a list back into arithmetic about a city, which is
+ * exactly what that scope was chosen to avoid. The tail reports itself
+ * instead: the expander's own count is always the number of rows pressing it
+ * reveals, under whatever filter is in force.
+ *
+ * This fixture's 25 car parks all sit within 556 m of the destination, so five
+ * of them are past the cap and inside `NEARBY_RADIUS_M` -- which is what makes
+ * the expander exist here at all.
+ */
+describe("the filters and the nearby expander", () => {
+  const TAIL_IDS = LOTS.slice(LIST_LIMIT).map((lot) => lot.id);
+
+  function tailIds(): string[] {
+    return within(screen.getByTestId("nearby-list"))
+      .queryAllByTestId("lot-row")
+      .map((row) => row.getAttribute("data-lot-id") ?? "");
+  }
+
+  /**
+   * A roster where every car park has scooter bays except two, and both of
+   * those are past the cap.
+   *
+   * The main fixture cannot ask this question: its six matching lots are
+   * indexes 2 and 20-24, so pressing the chip pulls the *whole* tail into the
+   * head and there is nothing left to check. Here the chip has to reach into
+   * the tail and remove two rows from it while leaving the head alone.
+   */
+  const EXCLUDED = new Set([20, 22]);
+  const TAIL_FILTER_DOC: LotsDoc = {
+    ...DOC,
+    lots: LOTS.map((lot) => ({ ...lot, m: EXCLUDED.has(lot.i) ? 0 : 40 })),
+  };
+
+  it("reaches the rows past the cap, which is why a filter can still be asked about them", async () => {
+    await renderRanked();
+    expect(screen.getByTestId("nearby-toggle")).toHaveTextContent(
+      fillTemplate(t("en").nearbyMoreTemplate, { n: TAIL_IDS.length }),
+    );
+    fireEvent.click(screen.getByTestId("nearby-toggle"));
+    expect(tailIds()).toEqual(TAIL_IDS);
+  });
+
+  it("cuts the head and the tail from the same filtered ranking", async () => {
+    served = TAIL_FILTER_DOC;
+    await renderRanked();
+    fireEvent.click(screen.getByTestId("nearby-toggle"));
+    expect(tailIds()).toEqual(TAIL_IDS);
+
+    press("scooter");
+    const kept = LOTS.slice(LIST_LIMIT)
+      .filter((lot) => !EXCLUDED.has(lot.i))
+      .map((lot) => lot.id);
+    // Named rows, not a count: the two the chip removed are gone from the
+    // tail, and the three that remain are still in the ranker's order.
+    expect(kept).not.toEqual(TAIL_IDS);
+    expect(tailIds()).toEqual(kept);
+    // ...the head is untouched, because nothing in it was filtered out...
+    expect(rowIds()).toEqual(LOTS.slice(0, LIST_LIMIT).map((lot) => lot.id));
+    // ...and closed again, the control's count is the tail's own report of
+    // what the chip took out of it. That count is the whole of what the driver
+    // is told about the tail: the hidden-count notice above is scoped to the
+    // twenty rows of the head and deliberately stays there.
+    fireEvent.click(screen.getByTestId("nearby-toggle"));
+    expect(screen.getByTestId("nearby-toggle")).toHaveTextContent(
+      fillTemplate(t("en").nearbyMoreTemplate, { n: kept.length }),
+    );
+    expect(kept.length).toBe(3);
+  });
+
+  it("withdraws the control when the filter leaves nothing past the cap", async () => {
+    await renderRanked();
+    fireEvent.click(screen.getByTestId("nearby-toggle"));
+    press("scooter");
+    // This fixture's six matching lots include all five that were past the
+    // cap, so the filter promotes them into a six-row head: the list is
+    // complete as it stands and there is nothing left to expand.
+    expect(rowIds()).toEqual(SHOWN_IDS);
+    expect(screen.queryByTestId("nearby-toggle")).toBeNull();
+    expect(screen.queryByTestId("nearby-list")).toBeNull();
+  });
+});
+
 describe("the filter chips' own geometry", () => {
   const css = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "..", "src", "styles", "components.css"),

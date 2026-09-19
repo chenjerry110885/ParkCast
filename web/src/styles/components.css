@@ -241,6 +241,42 @@
 .fchip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 @media (hover: hover) { .fchip:hover { border-color: var(--accent); } }
 
+/* ------------------------------------------------------ nearby expander */
+/*
+ * "Show 44 more car parks nearby", sitting between the ranked head and the
+ * tail it opens.
+ *
+ * Full width and flat rather than chip-shaped: it is one control spanning the
+ * list, not another option beside something, and the two chip rows above it
+ * already own that shape. Dashed, and in `--muted` until it is hovered, so it
+ * reads as the edge of the list rather than as a twenty-first car park.
+ *
+ * Same 44 px floor and the same press nudge as every other tap target in this
+ * file. Nothing animates at rest: only the press, the hover colour and the
+ * caret turning over, and `motion.css` zeroes all three durations under
+ * `prefers-reduced-motion`.
+ *
+ * The caret is two borders rotated rather than an icon -- no new asset, and it
+ * inherits `currentColor` so it follows the hover. It is decoration:
+ * `aria-expanded` is what actually tells anyone which way this points.
+ */
+.nearby-toggle {
+  width: 100%; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 44px; margin: 10px 0; padding: 0 14px;
+  border: 1px dashed var(--border); border-radius: 12px;
+  background: transparent; color: var(--muted); font-weight: 700; font-size: 13px; cursor: pointer;
+  transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast), transform var(--dur-fast);
+}
+.nearby-toggle::after {
+  content: ""; flex: 0 0 auto; width: 7px; height: 7px;
+  border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform var(--dur-fast);
+}
+.nearby-toggle[aria-expanded="true"]::after { transform: translateY(2px) rotate(225deg); }
+.nearby-toggle:active { transform: scale(0.99); }
+@media (hover: hover) { .nearby-toggle:hover { border-color: var(--accent); color: var(--accent); } }
+
 /* ------------------------------------------------------------ cards */
 .lots { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .lot-card {
