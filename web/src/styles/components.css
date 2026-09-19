@@ -181,6 +181,43 @@
   background: var(--surface); color: var(--text); font-weight: 700; font-size: 14px;
 }
 
+/* ------------------------------------------------- ranking preference */
+/*
+ * "Prefer · 較便宜 | 均衡 | 較近", on one row with the label, directly under the
+ * arrival picker it belongs with.
+ *
+ * One row and not two because this lives in the sheet's *header*, which does
+ * not scroll: at `peek` the header is nearly all a phone shows, so every pixel
+ * spent here is a pixel of list the driver loses. The label therefore sits
+ * beside the options rather than above them, and the row wraps only when the
+ * text is too big for it to fit -- which is the case a large system font
+ * creates and a second line is the right answer to.
+ *
+ * The three chips share the row equally (`flex: 1 1 0`) so the group reads as
+ * one segmented control rather than three loose chips, and each keeps
+ * `.fchip`'s 44 px floor and press nudge. Nothing animates at rest: only the
+ * colour change on a choice and the same scale nudge every other chip uses.
+ */
+.preference { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 10px; }
+.preference__label { flex: 0 0 auto; font-size: 12px; font-weight: 600; color: var(--muted); }
+.preference__options { flex: 1 1 200px; display: flex; gap: 6px; }
+.pchip {
+  flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center;
+  min-height: 44px; padding: 0 8px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); color: var(--text); font-weight: 700; font-size: 13px; text-align: center; cursor: pointer;
+  transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast), transform var(--dur-fast);
+}
+.pchip:active { transform: scale(0.96); }
+/* Keyed on the input's own checkedness, exactly as `.fchip` is keyed on
+   `aria-pressed`: what a driver sees and what a screen reader is told are then
+   the same fact, and cannot drift apart. */
+.pchip:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+/* The radio itself is visually hidden, so `base.css`'s global focus ring has
+   nothing to draw on -- without this a keyboard user has no idea where they
+   are in the group. */
+.pchip:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (hover: hover) { .pchip:hover { border-color: var(--accent); } }
+
 /* ------------------------------------------------------------ list filters */
 /*
  * The 機車 / 充電 chips over the ranked list. Same shape and the same 44 px

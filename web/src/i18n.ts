@@ -382,6 +382,37 @@ export interface Strings {
   quickPlus30: string;
   /** Quick chip: one hour from now. */
   quickPlus1h: string;
+  /**
+   * Visible label in front of the three ranking-preference options, and the
+   * accessible name of the group they form -- "Prefer · Cheaper | Balanced |
+   * Closer", beside the arrival picker's own "Arrive at · 18:35".
+   *
+   * Names a preference rather than a result. The ranking still puts a likely
+   * space above an unlikely bargain under every one of the three, so nothing in
+   * this group may read as a promise about the car park at the top of the list.
+   */
+  preferenceLabel: string;
+  /**
+   * Ranking option: lean towards the cheaper car park.
+   *
+   * **Comparative, never superlative** -- "cheaper", not "cheapest"; 較便宜, not
+   * 最便宜. The difference is the whole honesty of this control: availability
+   * still leads, so the top row under this option is routinely not the cheapest
+   * car park on the list, and copy that claimed otherwise would be a promise
+   * `rankLots` deliberately does not keep. See `Preference` in `rank.ts`.
+   */
+  preferenceCheaper: string;
+  /** Ranking option: the shipped weighting, which trades the walk against the fare the way the app always has. */
+  preferenceBalanced: string;
+  /**
+   * Ranking option: lean towards the nearer car park.
+   *
+   * Comparative for the same reason as `preferenceCheaper`, and in Chinese 較近
+   * rather than 就近 -- the latter reads as "just take whichever is nearby",
+   * which is an instruction about the outcome rather than a lean in the
+   * ranking.
+   */
+  preferenceCloser: string;
   /** Accessible label for the bottom sheet's grip button when tapping it would open the sheet to `full`. */
   expandList: string;
   /** Accessible label for the bottom sheet's grip button when tapping it would collapse the sheet. */
@@ -485,6 +516,10 @@ const en: Strings = {
   quickPlus15: "+15 min",
   quickPlus30: "+30 min",
   quickPlus1h: "+1 h",
+  preferenceLabel: "Prefer",
+  preferenceCheaper: "Cheaper",
+  preferenceBalanced: "Balanced",
+  preferenceCloser: "Closer",
   expandList: "Expand the list",
   collapseList: "Collapse the list",
 };
@@ -582,6 +617,10 @@ const zh: Strings = {
   quickPlus15: "+15 分鐘",
   quickPlus30: "+30 分鐘",
   quickPlus1h: "+1 小時",
+  preferenceLabel: "排序偏好",
+  preferenceCheaper: "較便宜",
+  preferenceBalanced: "均衡",
+  preferenceCloser: "較近",
   expandList: "展開清單",
   collapseList: "收合清單",
 };

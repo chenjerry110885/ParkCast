@@ -130,6 +130,7 @@ import { LotCard } from "./components/LotCard";
 import { LotList } from "./components/LotList";
 import { Notice } from "./components/Notice";
 import { PlaceSearch } from "./components/PlaceSearch";
+import { PreferencePicker } from "./components/PreferencePicker";
 import { Skeleton } from "./components/Skeleton";
 import { TopBar } from "./components/TopBar";
 import type { LatLon } from "./geo";
@@ -139,7 +140,8 @@ import { Shell, useIsDesktop } from "./layout/Shell";
 import { snapHeights, type Snap } from "./layout/sheet";
 import { toMapLot } from "./map/lotSource";
 import type { Place } from "./places";
-import { listRows, notUpdating, rankLots, type Ranked } from "./rank";
+import { readPreference, writePreference } from "./preference";
+import { listRows, notUpdating, rankLots, type Preference, type Ranked } from "./rank";
 import type { Grid, Lot, LotsDoc, WeekTable } from "./types";
 import { useGeolocation } from "./useGeolocation";
 import { blend, probabilityAt as weekProbabilityAt } from "./week";
@@ -460,6 +462,24 @@ function MapPlaceholder({ lang }: { lang: Lang }) {
   );
 }
 
+/**
+ * `window.localStorage`, or `null` when there is none or asking for it throws.
+ *
+ * The twin of `PlaceSearch`'s own `defaultStorage`, and deliberately a twin
+ * rather than a shared import: `preference.ts` takes a `Storage` precisely so
+ * that *the caller* owns the decision about where it comes from, which is what
+ * makes the SSR case and the test case a `null` instead of a special case. The
+ * getter itself is what throws when site data is blocked -- before any
+ * `getItem` runs -- so the guard has to be here, on the way in.
+ */
+function deviceStorage(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 export default function App() {
   const [lang, setLang] = useState<Lang>(detectLang);
   const [artifacts, setArtifacts] = useState<Artifacts | null>(null);
@@ -502,6 +522,22 @@ export default function App() {
    * for a reason nothing on screen explains.
    */
   const [pressedFilters, setPressedFilters] = useState<readonly Amenity[]>([]);
+  /**
+   * Which way the driver asked the ranking to lean, and the one piece of state
+   * on this screen that outlives the visit.
+   *
+   * Storage on purpose, where `pressedFilters` above is deliberately not: "I
+   * would rather walk less" is a standing preference about how this person
+   * drives, not a fact about today's trip, and restoring it explains itself --
+   * the control is on screen showing the choice that produced the order. A
+   * filter restored from a previous session would instead be a shorter list
+   * with nothing on screen to account for it.
+   *
+   * Read once, in the initialiser, so a reload is the only thing that consults
+   * storage and a tab whose storage is blocked still ranks by
+   * `DEFAULT_PREFERENCE` rather than failing to start. See `preference.ts`.
+   */
+  const [preference, setPreference] = useState<Preference>(() => readPreference(deviceStorage()));
   /**
    * The card the pointer is over, which the map answers with a faint ring on
    * that lot's dot (spec §5.6) -- the link between a row in the list and a point
@@ -934,7 +970,9 @@ export default function App() {
    * Every lot, ranked. Not sliced: `listRows` decides what the list shows.
    *
    * Recomputed when the arrival time moves: a new column out of a grid already
-   * in memory, no request, no refetch.
+   * in memory, no request, no refetch. The same is true of the preference,
+   * which changes two prices inside `rankLots` and nothing else -- so choosing
+   * one re-orders the cards already on screen and asks the network for nothing.
    */
   const ranked = useMemo(() => {
     if (artifacts === null || destination === null) return [];
@@ -947,8 +985,9 @@ export default function App() {
       // `rows[i]`, resolved through `Lot.i` inside: `rankLots` reports the array
       // position it scored, and the grid row is the lot's own business.
       probability: (i, h) => (withheld ? null : probabilityForLot(g, week, rows[i], h, arrivalTs)),
+      preference,
     });
-  }, [artifacts, week, destination, horizonFromReadingMin, arrivalTs, withheld]);
+  }, [artifacts, week, destination, horizonFromReadingMin, arrivalTs, withheld, preference]);
 
   /**
    * The ranking, narrowed to the lots that have what the driver asked for.
@@ -999,6 +1038,26 @@ export default function App() {
   /** Turn one filter chip on or off. Stable, so `AmenityFilters` never re-renders for a hover. */
   const toggleFilter = useCallback((amenity: Amenity) => {
     setPressedFilters((active) => toggleAmenity(active, amenity));
+  }, []);
+
+  /**
+   * The driver chose a way for the ranking to lean.
+   *
+   * Two effects and no third: the ranking re-runs (`ranked` below reads
+   * `preference`), and the choice is written down for next time. Nothing here
+   * scrolls the list, moves the map or touches the arrival -- the same
+   * restraint `ArrivalPicker`'s own `onChange` observes, and the reason this is
+   * two lines rather than a handler with opinions. Re-ranking is visible on its
+   * own: the cards slide to their new places (`LotList`'s FLIP) and the map's
+   * best-pick halo follows `bestId`.
+   *
+   * Written on the change rather than in an effect on `preference`, so the one
+   * thing that reaches storage is a choice the driver actually made -- never a
+   * default echoed back over a value some other tab has just written.
+   */
+  const choosePreference = useCallback((next: Preference) => {
+    setPreference(next);
+    writePreference(deviceStorage(), next);
   }, []);
 
   /**
@@ -1369,13 +1428,21 @@ export default function App() {
         <FreshnessBadge ageMin={ageMin} expired={forecastExpired} lang={lang} />
       </div>
       {desktop && search}
+      {/* The two halves of "what am I asking for", in the order a driver asks
+          them: when I get there, and what I would rather trade. Both sit in the
+          header, above the list, because the list is the answer to them --
+          which is also why they share the arrival picker's own guard. With no
+          forecast in hand there is nothing to rank and nothing to lean. */}
       {grid !== null && (
-        <ArrivalPicker
-          value={arrivalTs}
-          nowSec={nowSec}
-          onChange={setArrivalTs}
-          lang={lang}
-        />
+        <>
+          <ArrivalPicker
+            value={arrivalTs}
+            nowSec={nowSec}
+            onChange={setArrivalTs}
+            lang={lang}
+          />
+          <PreferencePicker value={preference} onChange={choosePreference} lang={lang} />
+        </>
       )}
       {/* The locate button is an icon, so its state has to be said somewhere a
           screen reader will announce it. The visible copy is the notice below. */}
@@ -1572,7 +1639,17 @@ export default function App() {
               week-sourced probability *is* a forecast for the chosen arrival,
               and the ranking really was computed from it, so the same test
               governs both -- the heading and the sentence above it can never
-              disagree about whether anything was ranked. */}
+              disagree about whether anything was ranked.
+
+              **It does not name the preference, now that the ordering has a
+              second input.** The two say different things: this heading is the
+              honesty guard over whether a *forecast* stands behind the order at
+              all (against `nearbyCarParks`, which is what the list is when the
+              reading has expired), while the preference is a lean, and the
+              control naming it is a few lines above in the same surface. Adding
+              it here would put the same word in two places, need a variant for
+              each branch, and blunt the one distinction the heading exists to
+              draw. */}
           <h2 className="list-head">
             {forecastExpired && !fromHistory ? s.nearbyCarParks : s.rankedForArrival}
           </h2>
