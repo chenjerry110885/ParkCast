@@ -72,6 +72,20 @@ opens the control sees exactly what they see today** — the property that makes
 
 **A preference must never make the app recommend a car park it believes is full.**
 
+> **Correction, 2026-09-19 — read this before quoting any number below.** The inversion *counts* in
+> this section are a property of the **roster snapshot they were measured on**, not of the ranker.
+> Task 5's sweep did not reproduce them, and established that the code is not the reason: the
+> pre-split probe run against the pre-split `rank.ts` gives numerically identical output to the
+> repaired probe on today's artifacts. The input moved. On a snapshot taken ~3 h later (1,089 lots
+> against 1,090), **the shipped probe's own Balanced baseline went from 11 to 57 on code nobody
+> touched**, and varying only the horizon column swings the same roster's count 22 → 84.
+>
+> So: **the counts are not settled figures and must never be quoted as though they were.** Any
+> figure recorded here needs its roster size, generation time and horizon column beside it. What is
+> durable is the **direction** of each comparison and the **`at #1` column**, which reproduced in
+> all six cells across both samples. The tables below are kept with their provenance attached,
+> because the decisions they drove were the right ones — but they are a photograph, not a constant.
+
 The first draft of this spec said "must never reorder past probability", which is a stronger claim
 and **already false before this feature exists**. `scripts/probe-ranker.py` finds **11 inversions at
 the shipped constants**, the worst reaching position #3 — a lot at P=14% and 0 m outranking one at
@@ -104,9 +118,17 @@ Three findings, none of which survived being guessed at:
    which is the reliable one — while the risky lot sits at the destination paying nothing.
 2. **Symmetric coupling fixes Closer and breaks Cheaper.** Dropping `DELAY_VALUE` to 2 makes being
    turned away cheap, and Cheaper goes from 0 inversions to 19.
-3. **Floor-coupling fixes both.** Closer at 12/12 is safer than the *shipped* ranker on every
-   column — 8 inversions against 11, worst #6 against #3 — while still changing the top pick for
-   **29.8%** of destinations against the unsafe version's 30.3%. It loses none of its point.
+3. **Floor-coupling fixes both.** Closer at 12/12 is safer than the *shipped* ranker on inversion
+   count and on nearly every reach column, while still changing the top pick for **29.8%** of
+   destinations against the unsafe version's 30.3%. It loses none of its point.
+
+   **Amended 2026-09-19:** "safer on every column" was too strong, and the re-measurement withdraws
+   it. On the realistic sample Closer reaches **worst position #2** against Balanced's #3 — better
+   on count, *worse* on position, one place from the gate. That is a real trade rather than a
+   defect, and it is the honest description of what "prioritise closeness" costs: a driver asking to
+   walk less is accepting a higher chance of being turned away, and the card still shows them the
+   probability, so the trade is visible rather than hidden. The values are **not** re-tuned against
+   this — tuning a constant against a single snapshot is chasing noise. See the correction above.
 
 **Realistic destinations sharpen this rather than softening it.** Re-run over 700 points from the
 offline place index (POIs only, ≥ 50 m from every lot), the effect is larger, not smaller: Balanced
@@ -115,7 +137,11 @@ exaggerating anything. **No scheme, in either sample, ever reaches #1.**
 
 ### What ships as a check
 
-`probe-ranker.py` gains a preference sweep asserting the invariant above across both samples. It
+`probe-ranker.py` gains a preference sweep **measuring** the invariant above across both samples —
+and it gates on **`at #1` alone**. An earlier draft added "and no preset is materially worse than
+Balanced on inversion count or worst position"; that clause is **withdrawn**. It was invented rather
+than measured, and the 2026-09-19 sweep shows why: the quantity it constrains moves by a factor of
+five without the ranker changing at all. It
 already **parses the constants out of the TypeScript rather than copying them**, precisely so a probe
 cannot report stale numbers as current — and renaming `TIME_VALUE` will break `load_constants()`,
 which is the design working: it fails loudly rather than silently scoring the old world.
