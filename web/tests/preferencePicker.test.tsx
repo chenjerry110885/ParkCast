@@ -37,10 +37,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "../src/App";
+import App, { TOP_BAR_PX } from "../src/App";
 import { HEADER_SIZE } from "../src/artifacts";
 import { EARTH_RADIUS_M } from "../src/geo";
 import { t } from "../src/i18n";
+import { snapHeights } from "../src/layout/sheet";
 import { PREFERENCE_KEY } from "../src/preference";
 import { PREFERENCES, type Preference } from "../src/rank";
 import type { Lot, LotsDoc } from "../src/types";
@@ -197,11 +198,26 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** A loaded app with a destination, so the ranked list is on screen. */
+/**
+ * A loaded app with a destination, so the ranked list is on screen.
+ *
+ * Leaves the phone's sheet at `peek`, where it opens -- and where the
+ * preference row is deliberately not rendered, because the header has no room
+ * for it there (see "the sheet header's height budget" below). Tests about the
+ * control itself use `renderWithControl`.
+ */
 async function renderRanked(): Promise<void> {
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: t("en").useMyLocation }));
   await screen.findByTestId("lot-list");
+}
+
+/** ...and with the sheet opened, which is where the driver meets the control. The desktop panel has no sheet to open. */
+async function renderWithControl(): Promise<void> {
+  await renderRanked();
+  const grip = screen.queryByRole("button", { name: t("en").expandList });
+  if (grip !== null) fireEvent.click(grip);
+  await screen.findByTestId("preference-picker");
 }
 
 function rowIds(): string[] {
@@ -228,7 +244,7 @@ function choose(preference: Preference): void {
 
 describe("the ranking preference", () => {
   it("opens on Balanced, which is the ordering the app shipped with", async () => {
-    await renderRanked();
+    await renderWithControl();
     // A driver who never touches the control must see exactly what they saw
     // before it existed. This is a regression guard and nothing else: Balanced
     // is (5, 5), the ranker's own constants, so it would pass against a control
@@ -240,7 +256,7 @@ describe("the ranking preference", () => {
   });
 
   it("re-ranks the rendered list -- a different order for Cheaper than for Closer", async () => {
-    await renderRanked();
+    await renderWithControl();
 
     choose("cheaper");
     expect(rowIds()).toEqual(ORDERS.cheaper);
@@ -260,7 +276,7 @@ describe("the ranking preference", () => {
   });
 
   it("survives a reload, in the ordering and not just in the control", async () => {
-    await renderRanked();
+    await renderWithControl();
     choose("cheaper");
     expect(rowIds()).toEqual(ORDERS.cheaper);
 
@@ -270,7 +286,7 @@ describe("the ranking preference", () => {
     map.renders.length = 0;
     expect(window.localStorage.getItem(PREFERENCE_KEY)).toBe("cheaper");
 
-    await renderRanked();
+    await renderWithControl();
     // The order first, because it is the half that cannot be faked: a fresh app
     // that ticked the box but ranked by Balanced fails on this line and passes
     // on the next.
@@ -280,13 +296,13 @@ describe("the ranking preference", () => {
 
   it("ranks by Balanced when storage holds something it does not recognise", async () => {
     window.localStorage.setItem(PREFERENCE_KEY, "closest");
-    await renderRanked();
+    await renderWithControl();
     expect(option("balanced")).toBeChecked();
     expect(rowIds()).toEqual(ORDERS.balanced);
   });
 
   it("re-ranks in place: nothing scrolls, the map is not re-centred, the arrival does not move", async () => {
-    await renderRanked();
+    await renderWithControl();
     const body = document.querySelector(".sheet__body");
     expect(body).not.toBeNull();
     // A driver part-way down the list is the case this protects: a re-rank that
@@ -312,7 +328,7 @@ describe("the ranking preference", () => {
   });
 
   it("never puts the score on the screen", async () => {
-    await renderRanked();
+    await renderWithControl();
     for (const preference of Object.keys(ORDERS) as Preference[]) {
       choose(preference);
       expect(rowIds()).toEqual(ORDERS[preference]);
@@ -331,7 +347,7 @@ describe("the ranking preference", () => {
   });
 
   it("is a labelled group of keyboard-reachable radios, one of them selected", async () => {
-    await renderRanked();
+    await renderWithControl();
     const group = screen.getByRole("radiogroup", { name: t("en").preferenceLabel });
     const radios = within(group).getAllByRole("radio") as HTMLInputElement[];
     expect(radios).toHaveLength(3);
@@ -366,7 +382,7 @@ describe("the ranking preference", () => {
   it("offers the control, and re-ranks, on the desktop layout too", async () => {
     cleanup();
     stubMatchMedia(true);
-    await renderRanked();
+    await renderWithControl();
     expect(within(screen.getByTestId("panel")).getByTestId("preference-picker")).toBeInTheDocument();
     expect(document.querySelector(".sheet")).toBeNull();
 
@@ -377,7 +393,7 @@ describe("the ranking preference", () => {
   });
 
   it("offers one option for every preset the ranker has prices for", async () => {
-    await renderRanked();
+    await renderWithControl();
     // Driven off `PREFERENCES` rather than a list repeated here, so a fourth
     // preset cannot be added to the ranker and silently have no control.
     const group = screen.getByRole("radiogroup", { name: t("en").preferenceLabel });
@@ -417,6 +433,141 @@ describe("the copy", () => {
         expect(word).not.toContain("NT$");
       }
     }
+  });
+});
+
+/**
+ * What each block in the phone's sheet header costs, as an outer height in
+ * pixels including its margins. Measured in Chrome at 375 px (Task 3 report).
+ *
+ * A budget rather than a measurement because jsdom lays nothing out: there is
+ * no `getBoundingClientRect` here worth reading. What makes it a real test and
+ * not a restatement is that `headerCost` reads the blocks that are *actually
+ * in the header* out of the rendered DOM and looks each one up here -- so a
+ * block added to the header fails as an unbudgeted class, and a block rendered
+ * in a state that has no room for it fails on the arithmetic below.
+ *
+ * `status visually-hidden` measures -1 px (a 1 px box with -1 px margins) and
+ * is budgeted at 0: rounding a cost *up* keeps the budget conservative.
+ */
+const HEADER_BUDGET_PX: Record<string, number> = {
+  "head-row": 33,
+  "arrival-picker": 142,
+  "preference": 54,
+  "status visually-hidden": 0,
+};
+/** `.sheet__header`'s own `padding: 0 16px 8px`. */
+const HEADER_PADDING_PX = 8;
+/** `.sheet__grip`'s `min-height`, which sits above the header inside the same sheet. */
+const GRIP_PX = 44;
+
+/**
+ * The phones this geometry is asserted at, and the bottom safe-area inset each
+ * one spends.
+ *
+ * The inset matters and is easy to miss: `.sheet` pays `--safe-bottom` as
+ * *padding* and `box-sizing` is `border-box`, so on a notched phone the sheet's
+ * usable box is `snapHeights(...)` minus the inset. 375x812 and 390x844 are
+ * notched; 375x667 is not.
+ */
+const PHONES = [
+  { name: "375x667, iPhone SE/8", height: 667, safeBottom: 0 },
+  { name: "375x812, iPhone X/13 mini", height: 812, safeBottom: 34 },
+  { name: "390x844, iPhone 13/14", height: 844, safeBottom: 34 },
+];
+
+/** What the sheet header in the document costs, from the blocks actually rendered into it. */
+function headerCost(): number {
+  const header = document.querySelector(".sheet__header");
+  expect(header).not.toBeNull();
+  let total = GRIP_PX + HEADER_PADDING_PX;
+  for (const child of Array.from(header!.children)) {
+    const cost = HEADER_BUDGET_PX[child.className];
+    expect(
+      cost,
+      `the sheet header has a block this budget does not account for: "${child.className}". ` +
+        "Measure its outer height in a browser at 375 px and add it to HEADER_BUDGET_PX.",
+    ).toBeTypeOf("number");
+    total += cost ?? 0;
+  }
+  return total;
+}
+
+/**
+ * The sheet header fits inside the sheet, at the sizes real phones come in.
+ *
+ * This is the test that would have caught the regression this control
+ * introduced, and it is deliberately not "the preference row is absent at
+ * peek" -- that assertion would go on passing against a header that overflowed
+ * for some other reason. It asserts the geometry instead: whatever is in the
+ * header has to fit in the snap that is showing it.
+ *
+ * `peek` is the state with no slack. `sheet.ts` calls it "just the search bar
+ * and a hint of the list" and derives it from the viewport so "a short phone in
+ * landscape still gets a usable peek instead of a sheet that swallows the map".
+ * With the grip, a 179 px header left 17-64 px of list there. Adding the
+ * preference row took the header to 233 and the list to 8-12 px -- and past the
+ * bottom of the screen at 375x667 and on every notched phone, because the
+ * safe-area inset comes out of the sheet's own height. Hence
+ * `App`'s `roomForPreference`, and hence this.
+ */
+describe("the sheet header's height budget", () => {
+  it("fits inside `peek` on every phone, with the preference row left out", async () => {
+    await renderRanked();
+    expect(screen.getByTestId("sheet")).toHaveAttribute("data-snap", "peek");
+    const cost = headerCost();
+    for (const phone of PHONES) {
+      const room = snapHeights(phone.height, TOP_BAR_PX).peek - phone.safeBottom;
+      expect(
+        cost,
+        `${phone.name}: the sheet header needs ${cost} px and peek has ${room} px`,
+      ).toBeLessThanOrEqual(room);
+    }
+  });
+
+  it("fits inside `half` and `full`, with the preference row in it", async () => {
+    await renderRanked();
+    // The grip toggles peek <-> full; `half` is only reachable by a drag, so it
+    // is asserted arithmetically off the same cost -- the row is rendered from
+    // `half` upward, and `half` is never smaller than `full`'s header need.
+    fireEvent.click(screen.getByRole("button", { name: t("en").expandList }));
+    expect(screen.getByTestId("sheet")).toHaveAttribute("data-snap", "full");
+    expect(screen.getByTestId("preference-picker")).toBeInTheDocument();
+
+    const cost = headerCost();
+    // The row really is what the two states differ by -- otherwise the peek test
+    // above is asserting the same header twice and neither one is about the row.
+    expect(cost).toBe(GRIP_PX + HEADER_PADDING_PX + 33 + 142 + 54);
+    for (const phone of PHONES) {
+      const heights = snapHeights(phone.height, TOP_BAR_PX);
+      expect(cost, `${phone.name}: half`).toBeLessThanOrEqual(heights.half - phone.safeBottom);
+      expect(cost, `${phone.name}: full`).toBeLessThanOrEqual(heights.full - phone.safeBottom);
+    }
+  });
+
+  it("keeps the row out of the peek header and puts it back when the sheet opens", async () => {
+    // The behaviour behind the arithmetic, and the accessibility half of it:
+    // rendered rather than hidden in CSS, so at `peek` the control is absent
+    // from the accessibility tree too, rather than being a radio group a screen
+    // reader can reach and a sighted user cannot see.
+    await renderRanked();
+    expect(screen.queryByTestId("preference-picker")).toBeNull();
+    expect(screen.queryByRole("radiogroup", { name: t("en").preferenceLabel })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: t("en").expandList }));
+    expect(screen.getByRole("radiogroup", { name: t("en").preferenceLabel })).toBeInTheDocument();
+    // ...and the preference it shows is still the one the ranking used while it
+    // was off screen: `peek` hides the control, never the choice.
+    expect(option("balanced")).toBeChecked();
+    expect(rowIds()).toEqual(ORDERS.balanced);
+  });
+
+  it("always offers the row on the desktop panel, which has no `peek`", async () => {
+    cleanup();
+    stubMatchMedia(true);
+    await renderRanked();
+    expect(document.querySelector(".sheet")).toBeNull();
+    expect(within(screen.getByTestId("panel")).getByTestId("preference-picker")).toBeInTheDocument();
   });
 });
 

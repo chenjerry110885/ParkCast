@@ -267,8 +267,15 @@ export const MIN_REFETCH_MS = 30_000;
  */
 export const FUTURE_TOLERANCE_SEC = 600;
 
-/** The top bar's height, mirroring `--topbar-height`: the map's padding at the top. */
-const TOP_BAR_PX = 60;
+/**
+ * The top bar's height, mirroring `--topbar-height`: the map's padding at the top.
+ *
+ * Exported because it is half of `snapHeights`'s input, and the sheet header's
+ * own height budget is asserted against the result -- see
+ * `tests/preferencePicker.test.tsx`. A test that hardcoded 60 beside this would
+ * go on passing through the one change it exists to notice.
+ */
+export const TOP_BAR_PX = 60;
 
 /** The side panel's width, mirroring `--panel-width`: the map's padding at the left. */
 const PANEL_PX = 420;
@@ -1419,6 +1426,42 @@ export default function App() {
   const locate = <LocateButton geo={geo} onClick={request} lang={lang} />;
   const langToggle = <LangToggle lang={lang} onChange={setLang} />;
 
+  /**
+   * Whether the sheet header has room for the preference row -- everywhere
+   * except the phone's `peek`.
+   *
+   * `peek` is the glance state: `sheet.ts` calls it "just the search bar and a
+   * hint of the list", and derives it from the viewport so that "a short phone
+   * in landscape still gets a usable peek instead of a sheet that swallows the
+   * map". The arithmetic is unforgiving. The grip is 44 px and the rest of this
+   * header is 178, which left about 64 px of list at `peek` -- the hint. A
+   * fourth row takes the header to 232 and the body to 8-12 px, which is a hint
+   * of nothing; at 375x812 it fits exactly, and at 375x667 and on notched
+   * phones (where `--safe-bottom` is padding inside the sheet's own height) the
+   * row falls off the bottom of the screen.
+   *
+   * The two obvious fixes both defeat something. Growing `peek` to fit spends
+   * the map's share, which is the one thing that constant exists to protect.
+   * Moving the row into the body puts an "what am I asking for" control on the
+   * "here is what we found" side of a line this app draws deliberately -- it
+   * belongs beside the arrival picker, which is where it is.
+   *
+   * So the row keeps its place and skips the one state with no room for it. The
+   * cost is real and accepted: at `peek` a driver cannot see which preference
+   * is in force. `peek` is a glance at the map, and changing what you are
+   * asking for is a deliberate act that can fairly require opening the sheet.
+   * **Not** compensated for by naming the preference in the list heading --
+   * that would re-spend the pixels this saves, and put a lean into the one line
+   * whose job is saying whether a forecast stands behind the order at all.
+   *
+   * Rendered rather than hidden in CSS, so at `peek` the control is absent from
+   * the accessibility tree as well as from the layout -- and so the header's
+   * budget can be asserted against `snapHeights` from the rows actually in it.
+   * See `tests/preferencePicker.test.tsx`, which pins the geometry at 375x667,
+   * 375x812 and 390x844 rather than pinning which component rendered.
+   */
+  const roomForPreference = desktop || snap !== "peek";
+
   const header = (
     <>
       <div className="head-row">
@@ -1432,7 +1475,10 @@ export default function App() {
           them: when I get there, and what I would rather trade. Both sit in the
           header, above the list, because the list is the answer to them --
           which is also why they share the arrival picker's own guard. With no
-          forecast in hand there is nothing to rank and nothing to lean. */}
+          forecast in hand there is nothing to rank and nothing to lean.
+          The second one also waits for the sheet to be open past `peek`, which
+          is a question of pixels rather than of meaning -- see
+          `roomForPreference`. */}
       {grid !== null && (
         <>
           <ArrivalPicker
@@ -1441,7 +1487,9 @@ export default function App() {
             onChange={setArrivalTs}
             lang={lang}
           />
-          <PreferencePicker value={preference} onChange={choosePreference} lang={lang} />
+          {roomForPreference && (
+            <PreferencePicker value={preference} onChange={choosePreference} lang={lang} />
+          )}
         </>
       )}
       {/* The locate button is an icon, so its state has to be said somewhere a
