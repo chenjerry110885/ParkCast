@@ -289,9 +289,9 @@ npm run dev --prefix web
 **Tests:**
 
 ```bash
-python -m pytest                       # 613, 3 skipped (or in a docker-collector container; see docker/README.md)
-npm test --prefix web                  # 414
-npm test --prefix worker               # 114
+python -m pytest                       # 626 (or in a docker-collector container; see docker/README.md)
+npm test --prefix web                  # 548
+npm test --prefix worker               # 121
 node --test scripts/tests/*.test.mjs   # 55
 ```
 
