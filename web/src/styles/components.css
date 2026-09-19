@@ -235,6 +235,16 @@
 .fact__icon--info { color: var(--muted); }
 .fact__value { display: block; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .fact__label { display: block; font-size: 11px; color: var(--muted); }
+/* The combined 機車/充電 tile (`LotCard.tsx`'s `AmenityTile`): still one
+   `.fact` cell -- same padding, background and radius -- but stacked rather
+   than centred on one row, because it may hold one amenity's row or two.
+   `.fact__amenity` is what a lone amenity tile used to be: icon, value and
+   label on one line. Overriding `align-items` here (not just `flex-direction`)
+   matters -- `.fact`'s own `center` is a cross-axis value, and on the row axis
+   it would centre a single short row inside the taller two-row cell instead of
+   letting each row take the full width it needs. */
+.fact--amenities { flex-direction: column; align-items: stretch; gap: 6px; }
+.fact__amenity { display: flex; align-items: center; gap: 8px; min-width: 0; }
 
 /* ------------------------------------------------------------ ring */
 /* `align-content` as well as `place-items`: without it the two rows stretch to
@@ -364,6 +374,19 @@
    ordinary case -- a card well short of the bound, no scrollbar, nothing
    clipped -- changes. */
 .map-card .lot-card { box-shadow: var(--shadow-2); max-height: var(--map-card-max); overflow-y: auto; }
+/* `.lot-card:hover`'s lift (above) is the list's affordance -- it says "this
+   row is tappable". This card is not a row to tap into; it is already open
+   and already the thing being read, and its own top offset was computed by
+   `mapCardDepthPx` for exactly the box this rule renders (see the big comment
+   on `.map-card`) -- so a hover here does not read as an invitation, it reads
+   as the card sliding off the geometry that was just measured for it. Scoped
+   to the map card only: `.lot-card:hover` itself is untouched, on purpose --
+   it was dead for a long time (`cssTransformAnim.test.ts`'s `.lot-card`
+   describe block) and stays revived for the list. `.lot-card:active`'s press
+   scale is left alone here too -- it is momentary, gone the instant the
+   finger or button lifts, so it never sits there wobbling while the card is
+   read the way a hover would. */
+@media (hover: hover) { .map-card .lot-card:hover { transform: none; } }
 /* The dismiss target: 44 px square (spec §2), but transparent rather than a
    button-shaped button on top of the card -- the same treatment
    `.search__clear` gets inside the search pill, for the same reason. */

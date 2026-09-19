@@ -237,3 +237,17 @@ describe(".lot-card's hover lift and press", () => {
     expect(keyframes("rise")).toMatch(/translate\s*:/);
   });
 });
+
+describe(".map-card .lot-card:hover", () => {
+  it("cancels the list's lift, because this card's own top offset was already measured for it", () => {
+    // The owner's report: the card MapView draws for a tapped dot must not
+    // move when the mouse sits over it. `.lot-card:hover` above stays exactly
+    // as it was -- it is the list's own tap affordance, and this assertion
+    // does not touch it -- but the map card is not a row to tap into, it is
+    // already open, and `App.tsx`'s `mapCardDepthPx` measured its offset off
+    // this exact rendered box, so a hover-lift here is the card drifting off
+    // geometry that was just computed for it.
+    expect(rule(".lot-card:hover")).toMatch(/transform\s*:/);
+    expect(rule(".map-card .lot-card:hover")).toMatch(/transform\s*:\s*none\s*;?\s*$/);
+  });
+});

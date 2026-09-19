@@ -37,7 +37,7 @@
  * tapping the confidence pill opens its popover without also selecting the
  * card out from under it.
  */
-import { reported, type Amenity } from "../amenities";
+import { reported } from "../amenities";
 import { confidenceFor } from "../confidence";
 import { formatDistance, formatPrice, notUpdatingHours } from "../format";
 import { Charging, Price, Scooter, Spaces, Walk } from "../icons";
@@ -100,36 +100,48 @@ function splitPrice(text: string): [string, string] {
 }
 
 /**
- * One amenity fact tile -- 機車 or 充電 -- or `null` when the feed said nothing.
+ * The one 機車-and-充電 fact tile -- both amenities, one grid cell -- or
+ * `null` when the feed said nothing about either.
  *
- * Three states in, three renderings out, and the third one is the reason this
- * function exists rather than a `?? 0` at the call site:
+ * They used to be two separate tiles, each its own grid cell, and that was
+ * the bug: `.facts` is a fixed two-column grid, so a lot that answered only
+ * one of the pair left the other cell empty and the row half-blank beside it
+ * (the owner's report). Folding both into a single cell removes the pairing
+ * `.facts` was never told about -- this tile now occupies exactly one cell,
+ * the same as `walk` or `price`, whether it has one row inside or two.
  *
- *   - **a count** -- the number, exactly as it was published;
- *   - **a reported `0`** -- the tile still appears, and says `amenityNone` in
- *     words. The car park was asked and answered, and "no scooter bays" is
- *     something a scooter rider needs to be told;
- *   - **absent** -- `null`, so *no tile is drawn at all*. The card has no
- *     fixed number of tiles (the observed count already comes and goes with
- *     `f`), so there is no slot begging to be filled with a zero, and an
- *     omitted tile is the only rendering that claims nothing.
- *
- * Returning the element rather than a string keeps the "no tile" case a thing
- * the caller cannot accidentally render: there is no empty string to fall
- * through into a `<b>`.
+ * The honesty rule (`../amenities`) is still a *per-field* fact, though, and
+ * folding the layout together must not fold that: each amenity keeps its own
+ * `reported()` read and its own conditional render *inside* the shared cell,
+ * so `m: 0` beside an absent `e` still renders as one row reading
+ * `amenityNone` and no second row at all -- never a padded-out pair, and
+ * never two zeroes standing in for one real answer and one silence. Neither
+ * known is the only case with no tile at all, exactly as before.
  */
-function AmenityTile({ lot, amenity, s }: { lot: Lot; amenity: Amenity; s: Strings }) {
-  const value = reported(lot, amenity);
-  if (!value.known) return null;
-  const scooter = amenity === "scooter";
-  const Glyph = scooter ? Scooter : Charging;
+function AmenityTile({ lot, s }: { lot: Lot; s: Strings }) {
+  const scooter = reported(lot, "scooter");
+  const charging = reported(lot, "charging");
+  if (!scooter.known && !charging.known) return null;
   return (
-    <div className="fact" data-testid={scooter ? "lot-scooter" : "lot-charging"}>
-      <Glyph className="fact__icon" />
-      <span>
-        <b className="fact__value">{value.count === 0 ? s.amenityNone : value.count}</b>
-        <span className="fact__label">{scooter ? s.scooterTile : s.chargingTile}</span>
-      </span>
+    <div className="fact fact--amenities">
+      {scooter.known && (
+        <div className="fact__amenity" data-testid="lot-scooter">
+          <Scooter className="fact__icon" />
+          <span>
+            <b className="fact__value">{scooter.count === 0 ? s.amenityNone : scooter.count}</b>
+            <span className="fact__label">{s.scooterTile}</span>
+          </span>
+        </div>
+      )}
+      {charging.known && (
+        <div className="fact__amenity" data-testid="lot-charging">
+          <Charging className="fact__icon" />
+          <span>
+            <b className="fact__value">{charging.count === 0 ? s.amenityNone : charging.count}</b>
+            <span className="fact__label">{s.chargingTile}</span>
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -277,12 +289,11 @@ export function LotCard({
             </span>
           </div>
         )}
-        {/* Only for the lots that actually reported them: a car park whose
-            feed says nothing about scooters draws no scooter tile, rather
-            than a tile reading "0" for a number nobody published. See
-            `AmenityTile`. */}
-        <AmenityTile lot={row.lot} amenity="scooter" s={s} />
-        <AmenityTile lot={row.lot} amenity="charging" s={s} />
+        {/* One cell for both, only for a lot that reported at least one of
+            them: a car park whose feed says nothing about either draws no
+            tile, rather than a tile reading "0" for a number nobody
+            published. See `AmenityTile`. */}
+        <AmenityTile lot={row.lot} s={s} />
       </div>
     </li>
   );
