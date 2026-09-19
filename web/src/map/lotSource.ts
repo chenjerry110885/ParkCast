@@ -42,6 +42,18 @@ export interface MapLot {
   lon: number;
   /** P(at least one space) at the arrival time, or `null` for no forecast. */
   probability: number | null;
+  /**
+   * The list's amenity filter left this lot out, so the dot is drawn dimmed.
+   *
+   * A statement about the *list*, never about the car park: the filter drops
+   * a lot both when it reported none of what was asked for and when its feed
+   * said nothing, and those are different facts that the card -- not a dot --
+   * is the place to tell apart. The dot is dimmed rather than removed because
+   * the map is the whole city and always has been (see `App.tsx`), and
+   * deleting a car park from a map of car parks is the "silently absent lot"
+   * failure this project exists to refuse.
+   */
+  filteredOut: boolean;
 }
 
 /** Feature properties. A `type` alias, not an interface, so it satisfies GeoJSON's index signature. */
@@ -59,6 +71,8 @@ export type LotProperties = {
   selected: boolean;
   /** The lot the ranking put first. Independent of `selected`: usually a different dot. */
   best: boolean;
+  /** Dimmed by the list's amenity filter. See `MapLot.filteredOut`. */
+  filteredOut: boolean;
 };
 
 /**
@@ -78,7 +92,7 @@ export interface LotMarks {
  * array position -- and this module stays a pure reshape with no opinion about
  * where the number came from.
  */
-export function toMapLot(lot: Lot, probability: number | null): MapLot {
+export function toMapLot(lot: Lot, probability: number | null, filteredOut = false): MapLot {
   return {
     id: lot.id,
     name: lot.n,
@@ -86,6 +100,9 @@ export function toMapLot(lot: Lot, probability: number | null): MapLot {
     lat: lot.y,
     lon: lot.x,
     probability,
+    // Defaulted, because the unfiltered screen is the one this app opens in
+    // and every caller that predates the filter means exactly that.
+    filteredOut,
   };
 }
 
@@ -116,6 +133,7 @@ export function toFeatureCollection(
       // `?? null` so an absent mark can never match an absent id.
       selected: row.id === (marks.selectedId ?? null),
       best: row.id === (marks.bestId ?? null),
+      filteredOut: row.filteredOut,
     },
   }));
   return { type: "FeatureCollection", features };

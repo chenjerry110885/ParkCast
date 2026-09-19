@@ -1,6 +1,13 @@
 /**
  * One car park, as a driver reads it: chance of a space, name, walk, price,
- * an observed count when we have one, and the arrival time it was ranked for.
+ * an observed count when we have one, and what it says about 機車 and 充電.
+ *
+ * **The arrival time is deliberately not here.** It was a fact tile until the
+ * owner's colleague pointed out that it is the one number on the card the
+ * driver already chose: it is set in `ArrivalPicker` and read back above the
+ * list, and a card cannot tell you anything you did not already know by
+ * repeating it twenty times down the page. The tile slot it occupied now
+ * carries the amenity tiles below, which say something new per car park.
  *
  * The card carries forward the same three arguments `LotRow` used to make,
  * because none of them stopped being true when the row became a card:
@@ -30,12 +37,13 @@
  * tapping the confidence pill opens its popover without also selecting the
  * card out from under it.
  */
+import { reported } from "../amenities";
 import { confidenceFor } from "../confidence";
-import { formatClock } from "../arrival";
 import { formatDistance, formatPrice, notUpdatingHours } from "../format";
-import { Clock, Price, Spaces, Walk } from "../icons";
-import { districtName, fillTemplate, lotTypeName, t, type Lang } from "../i18n";
+import { Charging, Price, Scooter, Spaces, Walk } from "../icons";
+import { districtName, fillTemplate, lotTypeName, t, type Lang, type Strings } from "../i18n";
 import type { Ranked } from "../rank";
+import type { Lot } from "../types";
 import { ConfidencePill } from "./ConfidencePill";
 import { ProbabilityRing } from "./ProbabilityRing";
 
@@ -46,9 +54,7 @@ export interface LotCardProps {
   baseDataTs: number;
   /** Minutes since `baseDataTs`, for the observed-count tile's age. */
   ageMin: number;
-  /** The clock time this card was ranked for. */
-  arrivalTs: number;
-  /** Minutes from the reading to `arrivalTs`, for the confidence pill. */
+  /** Minutes from the reading to the chosen arrival, for the confidence pill. */
   horizonFromReadingMin: number;
   /**
    * Observations behind this lot's half-hour-of-week cell in `week.bin`
@@ -93,12 +99,58 @@ function splitPrice(text: string): [string, string] {
   return [text.slice(0, at), text.slice(at + 1)];
 }
 
+/**
+ * The one 機車-and-充電 fact tile -- both amenities, one grid cell -- or
+ * `null` when the feed said nothing about either.
+ *
+ * They used to be two separate tiles, each its own grid cell, and that was
+ * the bug: `.facts` is a fixed two-column grid, so a lot that answered only
+ * one of the pair left the other cell empty and the row half-blank beside it
+ * (the owner's report). Folding both into a single cell removes the pairing
+ * `.facts` was never told about -- this tile now occupies exactly one cell,
+ * the same as `walk` or `price`, whether it has one row inside or two.
+ *
+ * The honesty rule (`../amenities`) is still a *per-field* fact, though, and
+ * folding the layout together must not fold that: each amenity keeps its own
+ * `reported()` read and its own conditional render *inside* the shared cell,
+ * so `m: 0` beside an absent `e` still renders as one row reading
+ * `amenityNone` and no second row at all -- never a padded-out pair, and
+ * never two zeroes standing in for one real answer and one silence. Neither
+ * known is the only case with no tile at all, exactly as before.
+ */
+function AmenityTile({ lot, s }: { lot: Lot; s: Strings }) {
+  const scooter = reported(lot, "scooter");
+  const charging = reported(lot, "charging");
+  if (!scooter.known && !charging.known) return null;
+  return (
+    <div className="fact fact--amenities">
+      {scooter.known && (
+        <div className="fact__amenity" data-testid="lot-scooter">
+          <Scooter className="fact__icon" />
+          <span>
+            <b className="fact__value">{scooter.count === 0 ? s.amenityNone : scooter.count}</b>
+            <span className="fact__label">{s.scooterTile}</span>
+          </span>
+        </div>
+      )}
+      {charging.known && (
+        <div className="fact__amenity" data-testid="lot-charging">
+          <Charging className="fact__icon" />
+          <span>
+            <b className="fact__value">{charging.count === 0 ? s.amenityNone : charging.count}</b>
+            <span className="fact__label">{s.chargingTile}</span>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function LotCard({
   row,
   lang,
   baseDataTs,
   ageMin,
-  arrivalTs,
   horizonFromReadingMin,
   support,
   fromHistory,
@@ -237,13 +289,11 @@ export function LotCard({
             </span>
           </div>
         )}
-        <div className="fact" data-testid="lot-arrival">
-          <Clock className="fact__icon fact__icon--info" />
-          <span>
-            <b className="fact__value">{formatClock(arrivalTs)}</b>
-            <span className="fact__label">{s.arrivalTile}</span>
-          </span>
-        </div>
+        {/* One cell for both, only for a lot that reported at least one of
+            them: a car park whose feed says nothing about either draws no
+            tile, rather than a tile reading "0" for a number nobody
+            published. See `AmenityTile`. */}
+        <AmenityTile lot={row.lot} s={s} />
       </div>
     </li>
   );

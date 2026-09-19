@@ -31,6 +31,23 @@ class Lot:
     # True so the only way to drop a lot from the roster is to have measured
     # that it takes no cars -- an unset field can never quietly hide a car park.
     serves_cars: bool = True
+    # Scooter/motorcycle capacity (`totalmotor`) and EV charging points
+    # (`ChargingStation`) -- both live only in Taipei's own metadata feed
+    # today. Unlike `capacity_car`, `0` here needs no `serves_cars`-style
+    # escape hatch: a car park with zero motorcycle spaces, or zero charging
+    # points, is still a car park, so `0` is never forced to None. It stays a
+    # plain, real `0` -- "we checked and there are none" -- and only a
+    # missing, negative or unparseable field becomes `None`, "not reported".
+    # Both default to None and only `parse_metadata` (Taipei) ever sets them:
+    # Kaohsiung, Tainan and Hsinchu report a *live* motorcycle count under
+    # different field names (a different fact -- occupancy, not capacity),
+    # New Taipei and Taoyuan have no motorcycle field at all, and none of the
+    # five has anything resembling `ChargingStation`. Every other adapter's
+    # `Lot(...)` call leaves both at this default deliberately -- see
+    # `docs/sources.md` -- rather than inventing a shared schema for cities
+    # nothing reads yet.
+    capacity_motor: int | None = None
+    charging: int | None = None
 
 
 def _serves_cars(raw: object) -> bool:
@@ -81,6 +98,14 @@ def parse_metadata(payload: dict, city: str = "taipei") -> tuple[Lot, ...]:
         # already gone. `serves_cars` has to be computed before both.
         raw_capacity = entry.get("totalcar")
         capacity = clean_count(raw_capacity)
+        # `totalmotor` and `ChargingStation` need none of the above trickery:
+        # unlike `totalcar`, a `0` here carries no second meaning about the
+        # lot's own type, so `clean_count` alone is the whole conversion --
+        # its real 0/None split (negative or unparseable -> None, everything
+        # else survives including 0) is exactly the distinction these two
+        # fields need, with nothing to collapse afterwards.
+        capacity_motor = clean_count(entry.get("totalmotor"))
+        charging = clean_count(entry.get("ChargingStation"))
         lots.append(
             Lot(
                 id=ids.qualify(city, raw_id),
@@ -94,6 +119,8 @@ def parse_metadata(payload: dict, city: str = "taipei") -> tuple[Lot, ...]:
                 service_time=entry.get("serviceTime", ""),
                 fare_text=entry.get("payex", ""),
                 serves_cars=_serves_cars(raw_capacity),
+                capacity_motor=capacity_motor,
+                charging=charging,
             )
         )
 

@@ -86,6 +86,21 @@ parses to *some* integer (frequently a legitimate `0`), not that every lot has s
 - **Roster/metadata is separate:** `config.METADATA_URL` (`TCMSV_alldesc.json`), parsed by
   `metadata.parse_metadata`, not by `sources/taipei.py` — `SourceTick.lots` is always `None` for
   Taipei, unlike every other city.
+- **Metadata capacity fields (also `TCMSV_alldesc.json`, 1,773 lots, 30 fields each, live-surveyed
+  2026-09-18):** `totalmotor` → `Lot.capacity_motor` (scooter/motorcycle capacity; **395 of 1,773**
+  lots non-zero) and `ChargingStation` → `Lot.charging` (EV charging points; **662 of 1,773**
+  non-zero). Both arrive as strings (`'0'`, `'30'`, `'2'`, …) and go through the same shared
+  `quality.clean_count` rule as every live count in this file: a real `0` survives ("we checked and
+  there are none"), only a missing/negative/unparseable value becomes `None` ("not reported"). Unlike
+  `totalcar`, neither field gets the `capacity_car`-style `0 → None` collapse — a `0` here carries no
+  second meaning about the lot's own type, so there is nothing to discard. Six neighbouring fields
+  (`Accessibility_Elevator`, `Child_Pickup_Area`, `Taxi_OneHR_Free`, `AED_Equipment`, `Phone_Charge`,
+  `CellSignal_Enhancement`) are uniformly `'0'` across all 1,773 lots and were deliberately **not**
+  added — no discriminating signal today — and `Handicap_Discount` (`依現場公告`, "per on-site notice",
+  on 1,641 of 1,773) was excluded for the same reason. **Taipei-only**: `parse_metadata` is the only
+  place either field is populated; every other adapter's `Lot(...)` call leaves both at their `None`
+  default deliberately (see `metadata.Lot`) rather than inventing a shared schema for cities nothing
+  reads yet.
 - **Fields:** `data.UPDATETIME` (one stamp for the whole payload, e.g.
   `"Wed Sep 16 14:53:00 CST 2026"`) → every observation's `data_ts`; `park[].id` (e.g. `"TPE0001"`)
   → `lot_id`; `availablecar` → `free_car`; `availablemotor` → `free_motor`.

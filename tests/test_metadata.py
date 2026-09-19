@@ -109,6 +109,59 @@ def test_zero_car_lots_are_still_parsed_collected_and_stored(tmp_path):
     assert stored == (27,), "stored unclamped; publishing must not reach back into storage"
 
 
+# --- capacity_motor / charging: Taipei-only, and 0 must not collapse -------
+
+
+def test_motor_capacity_and_charging_parse_from_the_feed():
+    lots = parse_metadata(_one(totalmotor="30", ChargingStation="2"))
+    assert lots[0].capacity_motor == 30
+    assert lots[0].charging == 2
+
+
+def test_zero_motor_capacity_and_charging_stay_zero_unlike_car_capacity():
+    """Unlike totalcar, 0 here carries no second meaning about the lot's own
+    type -- it is a plain known fact ('we checked, there are none'), not a
+    signal to discard. It must stay a real 0, not collapse to None the way
+    a 0 totalcar does."""
+    lots = parse_metadata(_one(totalmotor="0", ChargingStation="0"))
+    assert lots[0].capacity_motor == 0
+    assert lots[0].charging == 0
+
+
+def test_missing_motor_and_charging_fields_are_none_not_zero():
+    """The other half of the pin above: a field the feed never sent must not
+    collapse onto 0 -- 'not reported' and 'reported zero' are different
+    facts. A parser that mapped a missing key to 0 would pass the zero-stays
+    test above but fail here, which is the whole point of pinning both."""
+    lots = parse_metadata(_one())
+    assert lots[0].capacity_motor is None
+    assert lots[0].charging is None
+
+
+def test_unparseable_motor_and_charging_fields_are_none():
+    lots = parse_metadata(_one(totalmotor="n/a", ChargingStation="n/a"))
+    assert lots[0].capacity_motor is None
+    assert lots[0].charging is None
+
+
+def test_negative_motor_and_charging_fields_are_none():
+    lots = parse_metadata(_one(totalmotor="-9", ChargingStation="-9"))
+    assert lots[0].capacity_motor is None
+    assert lots[0].charging is None
+
+
+def test_other_city_lots_leave_motor_and_charging_absent_by_default():
+    """Only Taipei's parse_metadata ever sets these; every other adapter's
+    Lot(...) call (hsinchu.py, kaohsiung.py, newtaipei.py, tainan.py,
+    taoyuan.py) leaves them at the dataclass default -- deliberately, per
+    docs/sources.md, not because nobody thought about it."""
+    lot = Lot(id="kaohsiung:PL_1", name="n", area="a", lot_type="t",
+              capacity_car=10, lat=22.6, lon=120.3,
+              service_time="", fare_text="")
+    assert lot.capacity_motor is None
+    assert lot.charging is None
+
+
 def test_capacity_map_covers_all_lots():
     lots = parse_metadata(_payload())
     caps = capacity_map(lots)
