@@ -19,6 +19,21 @@ import { LotCard } from "./LotCard";
 export interface LotListProps {
   rows: readonly Ranked[];
   lang: Lang;
+  /**
+   * Accessible name for the list, when there is more than one on the page.
+   *
+   * The ranked head needs none -- it sits under the `<h2>` that names it. The
+   * nearby tail is a second `<ol>` opened by a button, so without a name a
+   * screen reader announces "list, 44 items" under another list and nothing
+   * says which is which. See `i18n`'s `nearbyListLabel`.
+   */
+  label?: string;
+  /**
+   * Test hook, defaulting to the ranked head's own. A second list needs its own
+   * handle or `getByTestId("lot-list")` starts matching two elements and every
+   * existing assertion about "the list" becomes ambiguous.
+   */
+  testId?: string;
   /** `grid.baseDataTs`, which each card measures a stalled feed to. */
   baseDataTs: number;
   /** Minutes since `baseDataTs`, for each card's observed-count tile. */
@@ -53,6 +68,8 @@ export interface LotListProps {
 function LotListInner({
   rows,
   lang,
+  label,
+  testId = "lot-list",
   baseDataTs,
   ageMin,
   horizonFromReadingMin,
@@ -113,7 +130,7 @@ function LotListInner({
   });
 
   return (
-    <ol className="lots anim-stagger" data-testid="lot-list" ref={listRef}>
+    <ol className="lots anim-stagger" aria-label={label} data-testid={testId} ref={listRef}>
       {rows.map((row, index) => (
         <LotCard
           key={row.id}

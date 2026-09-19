@@ -1,14 +1,21 @@
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { haversineMeters } from "../src/geo";
+import { EARTH_RADIUS_M, haversineMeters } from "../src/geo";
 import {
   CIRCLING_PENALTY_MIN,
+  DELAY_VALUE,
   DRIVE_MIN_PER_KM,
   EXPECTED_HOURS,
-  TIME_VALUE,
+  NEARBY_RADIUS_M,
+  PREFERENCES,
   UNKNOWN_RESERVE,
+  WALK_VALUE,
   listRows,
   notUpdating,
   rankLots,
+  type Preference,
 } from "../src/rank";
 
 const lot = (id: string, lat: number, p: unknown) =>
@@ -170,7 +177,30 @@ describe("notUpdating", () => {
  * time-correlated (see CLAUDE.md), and thin climatology buckets are what
  * produces them.
  */
-describe("listRows", () => {
+/**
+ * Metres per degree of latitude, so a fixture can say how far away a car park
+ * is rather than in what direction.
+ *
+ * Every lot in this file shares one longitude, so `haversineMeters` reduces to
+ * `EARTH_RADIUS_M * dLat` exactly and this factor is not an approximation --
+ * which matters, because `NEARBY_RADIUS_M` is a boundary the cases below sit a
+ * few metres either side of on purpose.
+ */
+const M_PER_DEG_LAT = (Math.PI / 180) * EARTH_RADIUS_M;
+
+/** A lot `meters` due north of the destination, charging `hourly` NT$ an hour. */
+const away = (id: string, meters: number, hourly: number) =>
+  lot(id, at.lat + meters / M_PER_DEG_LAT, { k: "exact", lo: hourly, hi: hourly });
+
+/**
+ * The head of the list: the cap, and the rescue that bends it.
+ *
+ * `listRows` returns two arrays now; everything here is about the first, which
+ * is what the list draws with the expander closed. It has to be exactly what
+ * the list drew before the second one existed -- the regression risk for every
+ * driver already using the app.
+ */
+describe("listRows: the ranked head", () => {
   /** `n` lots, all at the destination, `unknownFrom` onwards having no forecast. */
   function ranking(n: number, unknownFrom: number, spacing = 0.0001) {
     return rankLots({
@@ -185,11 +215,14 @@ describe("listRows", () => {
   }
 
   it("caps a list of known lots at the limit", () => {
-    expect(listRows(ranking(50, 50), 20)).toHaveLength(20);
+    expect(listRows(ranking(50, 50), 20).head).toHaveLength(20);
   });
 
   it("returns everything when the ranking is shorter than the limit", () => {
-    expect(listRows(ranking(3, 3), 20)).toHaveLength(3);
+    const { head, nearby } = listRows(ranking(3, 3), 20);
+    expect(head).toHaveLength(3);
+    // Nothing was cut, so there is nothing for the expander to offer either.
+    expect(nearby).toEqual([]);
   });
 
   it("makes a nearby lot with no forecast reachable past the cap", () => {
@@ -208,10 +241,10 @@ describe("listRows", () => {
     });
     expect(ranked.at(-1)!.id).toBe("nearest-unknown");
 
-    const listed = listRows(ranked, 20);
-    expect(listed.map((r) => r.id)).toContain("nearest-unknown");
+    const { head } = listRows(ranked, 20);
+    expect(head.map((r) => r.id)).toContain("nearest-unknown");
     // Grown, not reordered: the 20 scored lots keep their places and their sort.
-    expect(listed.slice(0, 20)).toEqual(ranked.slice(0, 20));
+    expect(head.slice(0, 20)).toEqual(ranked.slice(0, 20));
   });
 
   it("does not reach past the cap for a lot further than anything on screen", () => {
@@ -228,7 +261,10 @@ describe("listRows", () => {
       ],
       probability: (i) => (i === 0 ? null : 0.9),
     });
-    expect(listRows(ranked, 20)).toHaveLength(20);
+    const { head, nearby } = listRows(ranked, 20);
+    expect(head).toHaveLength(20);
+    // 55 km out, so the tail does not owe it a row either. See `NEARBY_RADIUS_M`.
+    expect(nearby.map((r) => r.id)).not.toContain("far-unknown");
   });
 
   it("rescues at most UNKNOWN_RESERVE of them, so the list stays a list", () => {
@@ -246,25 +282,148 @@ describe("listRows", () => {
       ],
       probability: (i) => (i < 20 ? 0.9 : null),
     });
-    const listed = listRows(ranked, 20);
-    expect(listed).toHaveLength(20 + UNKNOWN_RESERVE);
+    const { head } = listRows(ranked, 20);
+    expect(head).toHaveLength(20 + UNKNOWN_RESERVE);
     // Nearest first among the rescued, which is the only order they have.
-    const rescued = listed.slice(20);
+    const rescued = head.slice(20);
     expect(rescued.map((r) => r.id)).toEqual(["unknown-0", "unknown-1", "unknown-2", "unknown-3", "unknown-4"]);
   });
 
   it("adds nothing when the cap already reached the no-forecast group", () => {
     // 21 lots, the last two unknown: one is already visible at row 20, so the
     // promise is kept and there is nothing to rescue.
-    const listed = listRows(ranking(21, 19), 20);
-    expect(listed).toHaveLength(20);
-    expect(listed.some((r) => r.probability === null)).toBe(true);
+    const { head } = listRows(ranking(21, 19), 20);
+    expect(head).toHaveLength(20);
+    expect(head.some((r) => r.probability === null)).toBe(true);
   });
 
   it("adds nothing when no lot has a forecast at all", () => {
     // The expired-artifact case: every row is unknown, the head *is* the group,
     // and growing the list by five arbitrary extras would help nobody.
-    expect(listRows(ranking(50, 0), 20)).toHaveLength(20);
+    expect(listRows(ranking(50, 0), 20).head).toHaveLength(20);
+  });
+});
+
+/**
+ * The tail: every other car park within `NEARBY_RADIUS_M`, in the ranker's
+ * order.
+ *
+ * The bug this closes was reported by the owner: *"I always see lots around
+ * that's green but didn't see it in the list if I'd like to know the detail
+ * about it."* Twenty rows are chosen by expected *cost*, so a car park two
+ * streets away and visibly free can lose that race on price alone and have no
+ * row to open at all. The list is bounded by distance now; the cap only decides
+ * where the expander goes.
+ *
+ * Every case below asserts **which rows and in what order**, never how many.
+ * A length assertion here would pass against a tail sorted by distance, and
+ * against one that listed a rescued lot the head is already showing -- the two
+ * ways this can be wrong while looking right.
+ */
+describe("listRows: the nearby tail", () => {
+  it("reaches every car park inside the radius, and stops there", () => {
+    // Forty lots from 40 m to 1,600 m out, so the last three fall outside.
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: Array.from({ length: 40 }, (_unused, k) => away(`lot-${k}`, 40 * (k + 1), 30)),
+      probability: () => 0.9,
+    });
+    const { head, nearby } = listRows(ranked, 20);
+
+    const shown = new Set([...head, ...nearby].map((r) => r.id));
+    // One assertion, both directions: inside the radius a row exists, outside
+    // it none does. A wider radius fails on the far three, a narrower one on
+    // the rows between, and an unbounded tail on the far three again.
+    for (const row of ranked) {
+      expect(shown.has(row.id), `${row.id} at ${Math.round(row.meters)} m`).toBe(
+        row.meters <= NEARBY_RADIUS_M,
+      );
+    }
+    // ...and the bound really is exercised: the fixture straddles it.
+    expect(ranked.some((r) => r.meters > NEARBY_RADIUS_M)).toBe(true);
+  });
+
+  it("leaves the ranked head exactly as the cap drew it", () => {
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: Array.from({ length: 40 }, (_unused, k) => away(`lot-${k}`, 40 * (k + 1), 30)),
+      probability: () => 0.9,
+    });
+    // Same rows, same order, same objects -- the expander adds a second array
+    // and moves nothing out of the first.
+    expect(listRows(ranked, 20).head).toEqual(ranked.slice(0, 20));
+  });
+
+  it("continues the ranker's order rather than sorting the tail by distance", () => {
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: [
+        // Twenty cheap car parks at the destination: the head under any rule.
+        ...Array.from({ length: 20 }, (_unused, k) => away(`head-${k}`, 10 + k, 5)),
+        // Two more inside the radius, where cost and distance disagree about
+        // which comes first. That disagreement is the only thing that can tell
+        // a continued ranking from a re-sorted one.
+        away("near-and-dear", 600, 200),
+        away("far-and-cheap", 1400, 10),
+      ],
+      probability: () => 0.9,
+    });
+    const { head, nearby } = listRows(ranked, 20);
+
+    expect(head.map((r) => r.id)).toEqual(Array.from({ length: 20 }, (_u, k) => `head-${k}`));
+    expect(nearby.map((r) => r.id)).toEqual(["far-and-cheap", "near-and-dear"]);
+    // ...and that is the ranker's order and not distance's, which is the other
+    // way round. Without this line the assertion above would pass against a
+    // tail that had quietly changed the rule halfway down the list.
+    expect([...nearby].sort((a, b) => a.meters - b.meters).map((r) => r.id)).toEqual([
+      "near-and-dear",
+      "far-and-cheap",
+    ]);
+  });
+
+  it("never lists a car park twice, not even one the head reached past the cap for", () => {
+    const ranked = rankLots({
+      destination: at,
+      horizonMin: 15,
+      lots: [
+        // Twenty scored lots ~1.2 km out. Inside the radius, so a tail that
+        // forgot about the head would have plenty to duplicate.
+        ...Array.from({ length: 20 }, (_unused, k) => away(`known-${k}`, 1200 + k, 30)),
+        // Six with no forecast, all nearer than those and all inside the head's
+        // envelope. The nearest is the dearest, so the rescue (which takes the
+        // five *nearest*) and the ranking (which takes the cheapest first)
+        // disagree about which five they are -- and the tail has to follow the
+        // head's answer, not its own.
+        ...[100, 200, 300, 400, 500, 600].map((m, k) => away(`unknown-${k}`, m, 100 - k * 18)),
+      ],
+      probability: (i) => (i < 20 ? 0.9 : null),
+    });
+    const { head, nearby } = listRows(ranked, 20);
+
+    expect(head.slice(20).map((r) => r.id)).toEqual([
+      "unknown-0",
+      "unknown-1",
+      "unknown-2",
+      "unknown-3",
+      "unknown-4",
+    ]);
+    // The ranker puts `unknown-5` *first* of the six, so a tail sliced at the
+    // cap would open with it and then repeat all five the head already shows.
+    expect(ranked.slice(20).map((r) => r.id)).toEqual([
+      "unknown-5",
+      "unknown-4",
+      "unknown-3",
+      "unknown-2",
+      "unknown-1",
+      "unknown-0",
+    ]);
+    expect(nearby.map((r) => r.id)).toEqual(["unknown-5"]);
+
+    const ids = [...head, ...nearby].map((r) => r.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });
 
@@ -275,7 +434,7 @@ describe("listRows", () => {
  * one: it charged every lot its own fee whether or not you got in, and charged
  * a failed attempt only the time spent circling -- never the trip to wherever
  * you actually ended up. The probability term was therefore capped at
- * `CIRCLING_PENALTY_MIN * TIME_VALUE`, NT$60 at the shipped constants, which is
+ * `CIRCLING_PENALTY_MIN * DELAY_VALUE`, NT$60 at the shipped constants, which is
  * also 12 minutes of walking. Being a kilometre closer cancelled being
  * certainly full, and `scripts/probe-ranker.py` found 89 orderings that said so.
  */
@@ -310,8 +469,8 @@ describe("rankLots: the cost of arriving to find no space", () => {
     // gained nothing.
     const km = haversineMeters({ lat: 25.05, lon: 121.52 }, { lat: 25.0596, lon: 121.52 }) / 1000;
     expect(flip.cost).toBeCloseTo(
-      0.5 * (flip.walkMin * TIME_VALUE + 60) +
-        0.5 * (CIRCLING_PENALTY_MIN * TIME_VALUE + DRIVE_MIN_PER_KM * TIME_VALUE * km + far.cost!),
+      0.5 * (flip.walkMin * WALK_VALUE + 60) +
+        0.5 * (CIRCLING_PENALTY_MIN * DELAY_VALUE + DRIVE_MIN_PER_KM * DELAY_VALUE * km + far.cost!),
       6,
     );
   });
@@ -324,7 +483,7 @@ describe("rankLots: the cost of arriving to find no space", () => {
       lots: [lot("sure-thing", 25.0505, priced(45))],
       probability: () => 1,
     });
-    expect(out[0]!.cost).toBeCloseTo(out[0]!.walkMin * TIME_VALUE + 45 * EXPECTED_HOURS, 6);
+    expect(out[0]!.cost).toBeCloseTo(out[0]!.walkMin * WALK_VALUE + 45 * EXPECTED_HOURS, 6);
   });
 
   it("keeps working when nothing in the roster is reliable", () => {
@@ -406,11 +565,295 @@ describe("rankLots: the drive a failure forces", () => {
       probability: () => 0.95,
     });
     const only = out[0]!;
-    const certain = only.walkMin * TIME_VALUE + 30 * EXPECTED_HOURS;
-    const fallback = certain + (1 - 0.95) * CIRCLING_PENALTY_MIN * TIME_VALUE;
+    const certain = only.walkMin * WALK_VALUE + 30 * EXPECTED_HOURS;
+    const fallback = certain + (1 - 0.95) * CIRCLING_PENALTY_MIN * DELAY_VALUE;
     expect(only.cost).toBeCloseTo(
-      0.95 * certain + (1 - 0.95) * (CIRCLING_PENALTY_MIN * TIME_VALUE + fallback),
+      0.95 * certain + (1 - 0.95) * (CIRCLING_PENALTY_MIN * DELAY_VALUE + fallback),
       6,
     );
+  });
+});
+
+/**
+ * `WALK_VALUE` and `DELAY_VALUE` price different things -- the whole point of
+ * splitting them out of what used to be one constant, `TIME_VALUE`, is that a
+ * later preference can move one without moving the other.
+ *
+ * Every other test in this file, and `rank.ts` itself, ships both constants
+ * at 5. That is deliberate -- the split must not change today's ranking --
+ * but it also means no test that only reads the shipped values can tell
+ * `WALK_VALUE` and `DELAY_VALUE` apart: 5 and 5 produce the same arithmetic
+ * regardless of which name prices which term, so a bug that swapped them
+ * (the walk term charged at `DELAY_VALUE`, the failure branch at
+ * `WALK_VALUE`) would still pass every assertion elsewhere in this file.
+ *
+ * The only way to actually catch that is to run the real formula with the
+ * two constants pulled apart. This loads a byte-patched copy of `rank.ts` --
+ * identical except that `WALK_VALUE` and `DELAY_VALUE` are declared with two
+ * different numbers -- and checks that the walk term tracks the first and
+ * the failure branch tracks the second, and that neither term matches what
+ * the *other* constant would have produced.
+ */
+describe("rankLots: WALK_VALUE and DELAY_VALUE price independently", () => {
+  it("charges the walk term at WALK_VALUE and the failure branch at DELAY_VALUE, not swapped", async () => {
+    const testsDir = dirname(fileURLToPath(import.meta.url));
+    const srcPath = join(testsDir, "../src/rank.ts");
+    const source = readFileSync(srcPath, "utf8");
+
+    // Distinct, easy-to-tell-apart values -- nothing here matches the
+    // shipped 5, so any arithmetic that reads the wrong constant lands on a
+    // visibly wrong number instead of coincidentally the right one.
+    const WALK_VALUE_TEST = 3;
+    const DELAY_VALUE_TEST = 11;
+
+    const patchDeclaration = (text: string, name: string, value: number): string => {
+      const re = new RegExp(`export const ${name} = \\d+(?:\\.\\d+)?;`);
+      if (!re.test(text)) {
+        throw new Error(
+          `fixture is stale: "export const ${name} = <number>;" not found in rank.ts`,
+        );
+      }
+      return text.replace(re, `export const ${name} = ${value};`);
+    };
+
+    let patched = patchDeclaration(source, "WALK_VALUE", WALK_VALUE_TEST);
+    patched = patchDeclaration(patched, "DELAY_VALUE", DELAY_VALUE_TEST);
+    // The copy lives one directory further from `src/geo` and `src/types`
+    // than the original does.
+    patched = patched
+      .replace('from "./geo"', 'from "../src/geo"')
+      .replace('from "./types"', 'from "../src/types"');
+
+    const genDir = join(testsDir, "../.dev-artifacts");
+    mkdirSync(genDir, { recursive: true });
+    const genPath = join(genDir, "rank.swap-check.generated.ts");
+    writeFileSync(genPath, patched, "utf8");
+
+    try {
+      // A cache-busting query so a second run of this test (or a watch
+      // rebuild) does not get served a stale module from Vite's cache.
+      const variant = (await import(
+        /* @vite-ignore */ `../.dev-artifacts/rank.swap-check.generated.ts?t=${Date.now()}`
+      )) as { rankLots: typeof rankLots };
+
+      const destination = { lat: 25.05, lon: 121.52 };
+      // Close enough to have a short, unambiguous walk; far enough apart
+      // from each other that the drive between them is not a rounding error.
+      const reliablePos = { lat: destination.lat + 0.002, lon: destination.lon };
+      const failingPos = { lat: destination.lat + 0.02, lon: destination.lon };
+
+      const lots = [
+        {
+          i: 0, id: "reliable", n: "reliable", a: "中正區",
+          y: reliablePos.lat, x: reliablePos.lon, c: 50, t: "民營停車場",
+          p: { k: "exact", lo: 40, hi: 40 },
+        },
+        {
+          i: 1, id: "failing", n: "failing", a: "中正區",
+          y: failingPos.lat, x: failingPos.lon, c: 50, t: "民營停車場",
+          p: { k: "exact", lo: 40, hi: 40 },
+        },
+      ] as never;
+
+      const out = variant.rankLots({
+        destination,
+        horizonMin: 15,
+        // A certain space (p = 1, so it is also the only reliable lot and
+        // therefore the ranking's one fallback) and a certain failure (p = 0,
+        // so its own walk and fare are weighted away entirely).
+        lots,
+        probability: (i) => (i === 0 ? 1 : 0),
+      });
+
+      const reliableRow = out.find((r) => r.id === "reliable")!;
+      const failingRow = out.find((r) => r.id === "failing")!;
+      expect(reliableRow.cost).not.toBeNull();
+      expect(failingRow.cost).not.toBeNull();
+      expect(reliableRow.hourly).not.toBeNull();
+
+      // p = 1 removes the failure branch entirely, so `reliable`'s cost is
+      // exactly the walk term: walkMin * WALK_VALUE_TEST + fee. Computed from
+      // the row's own reported `walkMin`/`hourly` rather than from `.cost`
+      // itself, so this check cannot be fooled by a bug in the same formula.
+      const reliableCertain =
+        reliableRow.walkMin * WALK_VALUE_TEST + reliableRow.hourly! * EXPECTED_HOURS;
+      expect(reliableRow.cost).toBeCloseTo(reliableCertain, 6);
+      // Discriminating half: had the walk term instead read DELAY_VALUE, this
+      // wrong-constant reading is what it would have produced.
+      const reliableCertainIfSwapped =
+        reliableRow.walkMin * DELAY_VALUE_TEST + reliableRow.hourly! * EXPECTED_HOURS;
+      expect(reliableRow.cost).not.toBeCloseTo(reliableCertainIfSwapped, 6);
+
+      // p = 0 removes `failing`'s own walk and fare from its score entirely,
+      // leaving only the failure branch: circling and the drive to the
+      // fallback, both at DELAY_VALUE_TEST, plus the fallback's own (already
+      // independently checked) cost.
+      const km = haversineMeters(failingPos, reliablePos) / 1000;
+      const expectedFailing =
+        DELAY_VALUE_TEST * (CIRCLING_PENALTY_MIN + DRIVE_MIN_PER_KM * km) + reliableCertain;
+      expect(failingRow.cost).toBeCloseTo(expectedFailing, 6);
+      // Discriminating half: had the failure branch instead read WALK_VALUE,
+      // this wrong-constant reading is what it would have produced.
+      const expectedFailingIfSwapped =
+        WALK_VALUE_TEST * (CIRCLING_PENALTY_MIN + DRIVE_MIN_PER_KM * km) + reliableCertain;
+      expect(failingRow.cost).not.toBeCloseTo(expectedFailingIfSwapped, 6);
+    } finally {
+      rmSync(genPath, { force: true });
+    }
+  });
+});
+
+/**
+ * The three preferences, and the floor that keeps them safe.
+ *
+ * A preference is not a new formula: it is a different price for a minute of
+ * walking, which is a number the cost model already had. What is not obvious --
+ * and what these tests pin -- is the second half of the rule,
+ * `DELAY_VALUE = max(5, WALK_VALUE)`. Both halves overturned a simpler design
+ * when they were measured against the live 1,090-lot roster (spec section 5):
+ *
+ *   - **Pinning `DELAY_VALUE` at 5** makes *Closer* unsafe: 35 availability
+ *     inversions against Balanced's 11, the worst reaching position #2, because
+ *     raising the price of walking penalises the **far** lot -- which is the
+ *     reliable one -- while the risky lot sits at the destination paying nothing.
+ *   - **Coupling the two symmetrically** repairs Closer and breaks *Cheaper*: 19
+ *     inversions where pinning gave 0, because a delay priced at NT$2 a minute
+ *     makes being turned away cost almost nothing.
+ *
+ * So the failure branch's price is checked here as carefully as the walk's, and
+ * each arithmetic assertion carries a paired `.not` against exactly what the
+ * overturned design would have produced.
+ */
+describe("rankLots: the three preferences", () => {
+  const priced = (n: number) => ({ k: "exact", lo: n, hi: n });
+  const lotAt = (id: string, lat: number, lon: number, hourly: number) =>
+    ({ i: 0, id, n: id, a: "中正區", y: lat, x: lon, c: 50, t: "民營停車場", p: priced(hourly) }) as never;
+  /** The latitude `km` kilometres north of the destination, on its meridian. */
+  const north = (km: number) => at.lat + km / 111.195;
+
+  it("prices the delay at the walk's value only when that is the higher of the two", () => {
+    // DELAY_VALUE = max(5, WALK_VALUE). Never below 5, so a preference cannot
+    // make being turned away cheap; above it when walking is dear, so making the
+    // walk expensive does not relatively cheapen failure. Both halves were
+    // measured: pinning breaks Closer, symmetric coupling breaks Cheaper.
+    expect(PREFERENCES.cheaper).toEqual({ walk: 2, delay: 5 });
+    expect(PREFERENCES.balanced).toEqual({ walk: 5, delay: 5 });
+    expect(PREFERENCES.closer).toEqual({ walk: 12, delay: 12 });
+    // Balanced *is* the shipped pair, which is what makes the regression below
+    // possible at all: it is not merely equal to 5/5 by coincidence.
+    expect(PREFERENCES.balanced).toEqual({ walk: WALK_VALUE, delay: DELAY_VALUE });
+  });
+
+  /**
+   * A roster wide enough that a change of order would show: 40 car parks spread
+   * over ~2.7 km and NT$10-66 an hour, at a spread of probabilities, with every
+   * seventh carrying no forecast at all. Deterministic -- index arithmetic, not
+   * a random seed -- so a failure is the same failure on every machine.
+   */
+  const roster = Array.from({ length: 40 }, (_unused, k) =>
+    lotAt(`lot-${k}`, north(((k * 37) % 40) * 0.07), 121.52 + ((k * 19) % 40) * 0.0004, 10 + ((k * 13) % 9) * 7),
+  );
+  const rosterInput = {
+    destination: at,
+    horizonMin: 15,
+    lots: roster,
+    probability: (i: number) => (i % 7 === 3 ? null : ((i * 17) % 100) / 100),
+  };
+
+  it("ranks identically to the shipped constants when balanced", () => {
+    // The regression that matters most: a driver who never opens the control
+    // must see no change whatsoever. Compared against the un-preferenced call,
+    // so it also pins the default.
+    expect(rankLots({ ...rosterInput, preference: "balanced" })).toEqual(rankLots(rosterInput));
+  });
+
+  it("on a roster the other two presets do reorder, so that equality means something", () => {
+    // Without this, the test above would pass just as happily on a fixture no
+    // preference could ever reorder -- three lots in a line, say -- and would be
+    // proving nothing about Balanced.
+    const balanced = rankLots(rosterInput).map((r) => r.id);
+    expect(rankLots({ ...rosterInput, preference: "cheaper" }).map((r) => r.id)).not.toEqual(balanced);
+    expect(rankLots({ ...rosterInput, preference: "closer" }).map((r) => r.id)).not.toEqual(balanced);
+  });
+
+  it("gives three different orders for the same three car parks", () => {
+    // All three are certain to have a space, so each score is exactly its walk
+    // term and the arithmetic is visible:
+    //
+    //            walk   fare   cheaper (2)   balanced (5)   closer (12)
+    //   door      0 min   120          120            120           120
+    //   middling  8 min    70           86            110           166
+    //   far      20 min    25           65            125           265
+    //
+    // Three presets, three different orders, and every pair separated by at
+    // least NT$5 -- so this fails on a real change of behaviour, not on rounding.
+    const lots = [
+      lotAt("at-the-door", at.lat, 121.52, 60),
+      lotAt("middling", north(0.6), 121.52, 35),
+      lotAt("far-and-cheap", north(1.56), 121.52, 12.5),
+    ] as never;
+    const order = (preference: Preference) =>
+      rankLots({ destination: at, horizonMin: 15, lots, preference, probability: () => 1 }).map((r) => r.id);
+
+    expect(order("cheaper")).toEqual(["far-and-cheap", "middling", "at-the-door"]);
+    expect(order("balanced")).toEqual(["middling", "at-the-door", "far-and-cheap"]);
+    expect(order("closer")).toEqual(["at-the-door", "middling", "far-and-cheap"]);
+  });
+
+  it("charges the walk at the preset's price and the failure branch at its delay price", () => {
+    // Two lots: one certain (p = 1, so its cost is exactly the walk term, and it
+    // is also the ranking's only reliable fallback) and one certain to fail
+    // (p = 0, so its own walk and fare weigh nothing and its cost is exactly the
+    // failure branch). That separates the two prices completely.
+    const reliableAt = { lat: north(0.2), lon: 121.52 };
+    const failingAt = { lat: north(2), lon: 121.52 };
+    const lots = [
+      lotAt("reliable", reliableAt.lat, reliableAt.lon, 40),
+      lotAt("failing", failingAt.lat, failingAt.lon, 40),
+    ] as never;
+    const km = haversineMeters(failingAt, reliableAt) / 1000;
+
+    // The second number is the delay price the design this preset overturned
+    // would have used: symmetric coupling for Cheaper, pinning for Closer.
+    const cases = [
+      { preference: "cheaper", overturnedDelay: 2 },
+      { preference: "closer", overturnedDelay: 5 },
+    ] as const;
+
+    for (const { preference, overturnedDelay } of cases) {
+      const values = PREFERENCES[preference];
+      const out = rankLots({
+        destination: at, horizonMin: 15, lots, preference,
+        probability: (i) => (i === 0 ? 1 : 0),
+      });
+      const reliable = out.find((r) => r.id === "reliable")!;
+      const failing = out.find((r) => r.id === "failing")!;
+      expect(reliable.hourly).not.toBeNull();
+
+      // Computed from the row's own reported `walkMin`/`hourly` rather than from
+      // `.cost`, so the check cannot be fooled by the formula it is checking.
+      const certain = reliable.walkMin * values.walk + reliable.hourly! * EXPECTED_HOURS;
+      expect(reliable.cost).toBeCloseTo(certain, 6);
+      // Discriminating half: what an inert preference -- one that took the
+      // argument and went on using the shipped constant -- would have produced.
+      expect(reliable.cost).not.toBeCloseTo(reliable.walkMin * WALK_VALUE + reliable.hourly! * EXPECTED_HOURS, 6);
+
+      const delayed = CIRCLING_PENALTY_MIN + DRIVE_MIN_PER_KM * km;
+      expect(failing.cost).toBeCloseTo(values.delay * delayed + certain, 6);
+      // Discriminating half: what the overturned design would have charged for
+      // being turned away. This is the assertion that holds the floor in place.
+      expect(failing.cost).not.toBeCloseTo(overturnedDelay * delayed + certain, 6);
+    }
+  });
+
+  it("never prices a delay below the shipped DELAY_VALUE, whatever the preset", () => {
+    // The invariant in one line: a preference may make walking dearer, and may
+    // make being turned away dearer with it, but may never make being turned
+    // away cheaper than it is today. That is what stops a preference from
+    // quietly eroding the availability signal it is not supposed to touch.
+    for (const values of Object.values(PREFERENCES)) {
+      expect(values.delay).toBeGreaterThanOrEqual(DELAY_VALUE);
+      expect(values.delay).toBe(Math.max(DELAY_VALUE, values.walk));
+    }
   });
 });

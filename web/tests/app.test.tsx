@@ -37,9 +37,10 @@ import {
 } from "../src/arrival";
 import { HEADER_SIZE, UNKNOWN, horizonColumn, resetWeekCache } from "../src/artifacts";
 import { WEEKLY_OBSERVATIONS } from "../src/confidence";
-import { haversineMeters } from "../src/geo";
+import { EARTH_RADIUS_M, haversineMeters } from "../src/geo";
 import { fillTemplate, t } from "../src/i18n";
 import { resetPlaceIndexCache } from "../src/places";
+import { NEARBY_RADIUS_M } from "../src/rank";
 import type { Grid, Lot, LotsDoc } from "../src/types";
 import { weekBucket } from "../src/week";
 
@@ -1922,6 +1923,254 @@ describe("the list cap", () => {
     stubCrowded(false);
     await renderLocated();
     expect(screen.getAllByTestId("lot-row").length).toBe(LIST_LIMIT);
+  });
+});
+
+/**
+ * The expander, and the car park the cap used to hide.
+ *
+ * The owner's report: *"I always see lots around that's green but didn't see it
+ * in the list if I'd like to know the detail about it."* The list took the
+ * ranking's first twenty rows, and the ranking sorts by expected *cost*, so a
+ * car park two streets away and visibly free could lose that race on price
+ * alone and have no row to open at all. The list is bounded by distance now --
+ * everything within `NEARBY_RADIUS_M` is reachable -- and the cap only decides
+ * how much of it renders before the driver asks.
+ *
+ * `listRows` is unit-tested in `rank.test.ts`; this is the wiring, and the
+ * wiring is where the last version of this bug lived. Every assertion below is
+ * about *which rows, in what order* -- never how many. A count would pass
+ * against a tail sorted the wrong way and against one repeating a row the head
+ * is already showing, which are the two ways this can be wrong while looking
+ * right.
+ */
+describe("the nearby expander", () => {
+  /**
+   * Metres per degree of latitude. Every lot here shares `HERE`'s longitude, so
+   * `haversineMeters` reduces to `EARTH_RADIUS_M * dLat` exactly -- which
+   * matters, since the fixture is built to straddle `NEARBY_RADIUS_M`.
+   */
+  const M_PER_DEG_LAT = (Math.PI / 180) * EARTH_RADIUS_M;
+
+  /** A car park `meters` due north of `HERE`, charging `hourly` NT$ an hour. */
+  function northOf(id: string, meters: number, hourly: number): Lot {
+    return {
+      i: 0,
+      id,
+      n: `車場${id}`,
+      a: "信義區",
+      y: HERE.lat + meters / M_PER_DEG_LAT,
+      x: HERE.lon,
+      c: 50,
+      t: "民營停車場",
+      p: { k: "exact", lo: hourly, hi: hourly },
+    };
+  }
+
+  const metersOf = (lot: Lot) => haversineMeters(HERE, { lat: lot.y, lon: lot.x });
+
+  /** Twenty cheap car parks on the doorstep: the head, under any ordering. */
+  const NEAR = Array.from({ length: LIST_LIMIT }, (_unused, k) =>
+    northOf(`TPE_NEAR_${String(k).padStart(2, "0")}`, 20 * (k + 1), 10),
+  );
+
+  /**
+   * Three more inside the radius, arranged so that cost and distance disagree
+   * about their order completely: the nearest is the dearest. That is the only
+   * arrangement in which "the tail keeps the ranker's order" is a claim a test
+   * can fail.
+   */
+  const DEAR = northOf("TPE_TAIL_DEAR", 700, 300);
+  const MID = northOf("TPE_TAIL_MID", 900, 60);
+  const CHEAP = northOf("TPE_TAIL_CHEAP", 1400, 10);
+
+  /**
+   * ...and one just outside it, cheap enough that the ranker would put it
+   * *second* of the four. So a tail that forgot its bound does not merely grow
+   * by a row at the end: it changes what the second row is.
+   */
+  const OUTSIDE = northOf("TPE_OUTSIDE", 1600, 10);
+
+  const NEIGHBOURHOOD = [...NEAR, DEAR, MID, CHEAP, OUTSIDE];
+  const HEAD_IDS = NEAR.map((lot) => lot.id);
+  /** Cheapest first -- the ranker's order. */
+  const TAIL_IDS = [CHEAP.id, MID.id, DEAR.id];
+  /** The same three nearest-first: what a tail sorted by distance would show. */
+  const TAIL_BY_DISTANCE = [DEAR, MID, CHEAP]
+    .slice()
+    .sort((a, b) => metersOf(a) - metersOf(b))
+    .map((lot) => lot.id);
+
+  /** Serve `lots`, re-indexed so a subset is still a valid roster. Everyone reads 70%. */
+  function stubRoster(lots: Lot[]) {
+    const rows = lots.map((lot, i) => ({ ...lot, i }));
+    const body: number[] = [];
+    for (const _row of rows) for (let h = 0; h < N_HORIZONS; h += 1) body.push(70);
+    stubFetch(encodeGrid(body, rows.length), {
+      v: 1,
+      generated_at: BASE_DATA_TS + 213,
+      base_data_ts: BASE_DATA_TS,
+      n_lots: rows.length,
+      roster_id: ROSTER_ID,
+      lots: rows,
+    });
+  }
+
+  const idsIn = (testId: string) =>
+    within(screen.getByTestId(testId))
+      .queryAllByTestId("lot-row")
+      .map((el) => el.getAttribute("data-lot-id"));
+  const headIds = () => idsIn("lot-list");
+  const tailIds = () => idsIn("nearby-list");
+  const toggle = () => screen.getByTestId("nearby-toggle");
+
+  it("offers the rows the cap dropped, says how many, and draws none of them yet", async () => {
+    stubRoster(NEIGHBOURHOOD);
+    await renderLocated();
+
+    expect(headIds()).toEqual(HEAD_IDS);
+    expect(screen.queryByTestId("nearby-list")).toBeNull();
+    expect(toggle()).toHaveAttribute("aria-expanded", "false");
+    expect(toggle()).toHaveTextContent(
+      fillTemplate(t("en").nearbyMoreTemplate, { n: TAIL_IDS.length }),
+    );
+  });
+
+  it("reveals them in the ranker's order, which here is the reverse of distance's", async () => {
+    stubRoster(NEIGHBOURHOOD);
+    await renderLocated();
+    fireEvent.click(toggle());
+
+    expect(tailIds()).toEqual(TAIL_IDS);
+    // The fixture really does separate the two orderings, so the line above is
+    // a claim about the ranking and not an accident of where the lots are.
+    expect(TAIL_BY_DISTANCE).not.toEqual(TAIL_IDS);
+    expect(tailIds()).not.toEqual(TAIL_BY_DISTANCE);
+  });
+
+  it("leaves the ranked head exactly where it was, and lists no car park twice", async () => {
+    stubRoster(NEIGHBOURHOOD);
+    await renderLocated();
+    const before = headIds();
+    fireEvent.click(toggle());
+
+    expect(headIds()).toEqual(before);
+    expect(headIds()).toEqual(HEAD_IDS);
+    const all = [...headIds(), ...tailIds()];
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("never reaches the car park past NEARBY_RADIUS_M, open or shut", async () => {
+    // The fixture straddles the bound -- asserted, not assumed.
+    expect(metersOf(OUTSIDE)).toBeGreaterThan(NEARBY_RADIUS_M);
+    expect(metersOf(CHEAP)).toBeLessThan(NEARBY_RADIUS_M);
+
+    stubRoster(NEIGHBOURHOOD);
+    await renderLocated();
+    expect(headIds()).not.toContain(OUTSIDE.id);
+    fireEvent.click(toggle());
+    expect([...headIds(), ...tailIds()]).not.toContain(OUTSIDE.id);
+  });
+
+  it("closes again, and takes its rows with it", async () => {
+    stubRoster(NEIGHBOURHOOD);
+    await renderLocated();
+
+    fireEvent.click(toggle());
+    expect(toggle()).toHaveAttribute("aria-expanded", "true");
+    expect(toggle()).toHaveTextContent(t("en").nearbyFewer);
+
+    fireEvent.click(toggle());
+    expect(screen.queryByTestId("nearby-list")).toBeNull();
+    expect(toggle()).toHaveAttribute("aria-expanded", "false");
+    expect(headIds()).toEqual(HEAD_IDS);
+  });
+
+  it("forgets the opened tail when the driver names a new destination", async () => {
+    stubRoster(NEIGHBOURHOOD);
+    await renderLocated();
+    fireEvent.click(toggle());
+    expect(tailIds()).toEqual(TAIL_IDS);
+
+    // A second destination a kilometre further north. The same car parks are
+    // still around it, so the *control* survives -- it is the opened state
+    // that has to be gone, and this is what tells the two apart.
+    const elsewhere = { lat: HERE.lat + 1000 / M_PER_DEG_LAT, lon: HERE.lon };
+    Object.defineProperty(navigator, "geolocation", {
+      value: {
+        getCurrentPosition: (ok: (p: { coords: { latitude: number; longitude: number } }) => void) =>
+          ok({ coords: { latitude: elsewhere.lat, longitude: elsewhere.lon } }),
+      },
+      configurable: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("en").useMyLocation }));
+
+    // The destination really did move, or this test is about nothing.
+    await waitFor(() => expect(headIds()).not.toEqual(HEAD_IDS));
+
+    // Asserted on **what renders**, not on the flag. `nearbyOpen === false`
+    // would hold just as well of a list that had stopped reading the flag and
+    // never drew a tail at all -- which is what the `tailIds()` line at the
+    // top of this test rules out, and why the two belong in one case.
+    expect(screen.queryByTestId("nearby-list")).toBeNull();
+    expect(screen.getAllByTestId("lot-row")).toHaveLength(LIST_LIMIT);
+    expect(toggle()).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("keeps the tail open across a filter press, which changes no destination", async () => {
+    // The other half of the rule above, and the reason it is written as "reset
+    // with the destination" rather than "reset when anything moves": pressing a
+    // chip narrows the neighbourhood the driver already asked to see. Closing
+    // the list under them there would answer a question they did not ask.
+    stubRoster(NEIGHBOURHOOD.map((lot) => ({ ...lot, m: 40 })));
+    await renderLocated();
+    fireEvent.click(toggle());
+    expect(tailIds()).toEqual(TAIL_IDS);
+
+    fireEvent.click(screen.getByTestId("filter-scooter"));
+    expect(screen.getByTestId("nearby-list")).toBeInTheDocument();
+    expect(tailIds()).toEqual(TAIL_IDS);
+  });
+
+  it("names the tail's list, so two lists on one page are told apart", async () => {
+    stubRoster(NEIGHBOURHOOD);
+    await renderLocated();
+    fireEvent.click(toggle());
+    // The ranked head sits under its own `<h2>`; the tail has only the button
+    // above it, so without this a screen reader announces two unnamed lists.
+    expect(screen.getByRole("list", { name: t("en").nearbyListLabel })).toBe(
+      screen.getByTestId("nearby-list"),
+    );
+  });
+
+  it("says 'car park' and not 'car parks' when the tail holds one", async () => {
+    // The `n === 1` branch, which the main fixture never reaches. Same
+    // singular/plural pattern as the hidden-count lines and `confidenceWeek`.
+    stubRoster([...NEAR, CHEAP, OUTSIDE]);
+    await renderLocated();
+    expect(toggle()).toHaveTextContent(fillTemplate(t("en").nearbyMoreOneTemplate, { n: 1 }));
+  });
+
+  it("offers nothing at all when the cap already reached everything nearby", async () => {
+    // Twenty rows and one car park 1.6 km away: the list is complete as it
+    // stands, and a control promising more would be promising nothing.
+    stubRoster([...NEAR, OUTSIDE]);
+    await renderLocated();
+    expect(headIds()).toEqual(HEAD_IDS);
+    expect(screen.queryByTestId("nearby-toggle")).toBeNull();
+  });
+
+  it("sits in the sheet's body, not in the header whose height is budgeted", async () => {
+    // `tests/preferencePicker.test.tsx` sums the header's blocks against the
+    // `peek` height and fails by name on an unbudgeted one -- there are 13 px
+    // of slack at 375x667. This control is part of the answer rather than part
+    // of the question, and belongs on the list's side of that line anyway.
+    stubRoster(NEIGHBOURHOOD);
+    await renderLocated();
+    const header = document.querySelector(".sheet__header");
+    expect(header).not.toBeNull();
+    expect(header!.contains(toggle())).toBe(false);
+    expect(document.querySelector(".sheet__body")!.contains(toggle())).toBe(true);
   });
 });
 

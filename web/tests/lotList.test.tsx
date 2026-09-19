@@ -13,7 +13,10 @@
  * scroll (every card moves, the order does not) be told apart from a reorder
  * (the cards swap places) at all.
  */
-import { cleanup, render } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LotList } from "../src/components/LotList";
 import type { Ranked } from "../src/rank";
@@ -84,5 +87,71 @@ describe("LotList reordering", () => {
     // offset, and not from zero.
     const frames = animate.mock.calls[0]?.[0] as Array<{ transform: string }>;
     expect(frames[0]?.transform).toMatch(/translate\(0px, -?200px\)/);
+  });
+});
+
+/**
+ * Two lists on one page.
+ *
+ * The nearby expander opens a second `<ol>` of the same component below the
+ * ranked head (`App`), which is only safe if the two can be told apart -- by a
+ * screen reader, which otherwise announces "list, 44 items" under another
+ * unnamed list, and by a test, which otherwise finds `lot-list` twice and every
+ * existing assertion about "the list" becomes a question about which one.
+ */
+describe("LotList as the second list on a page", () => {
+  it("keeps the ranked head's own handle and stays unnamed by default", () => {
+    render(<LotList rows={[A, B]} {...props} selectedId={null} />);
+    const list = screen.getByTestId("lot-list");
+    // Unnamed on purpose: the head sits under the `<h2>` that names it, and a
+    // second name beside that one would be read out twice.
+    expect(list).not.toHaveAttribute("aria-label");
+  });
+
+  it("takes its own handle and its own name when asked for one", () => {
+    render(
+      <LotList rows={[A, B]} {...props} selectedId={null} label="More car parks nearby" testId="nearby-list" />,
+    );
+    expect(screen.queryByTestId("lot-list")).toBeNull();
+    expect(screen.getByRole("list", { name: "More car parks nearby" })).toBe(
+      screen.getByTestId("nearby-list"),
+    );
+  });
+});
+
+/**
+ * The expander's own geometry, pinned where it is written.
+ *
+ * jsdom lays nothing out, so this asserts the rule rather than the rendered
+ * box; the measurement that decides whether it is honoured is a real browser at
+ * 375 px and on the desktop panel -- see the report. Same bargain, and the same
+ * 44 px floor, as `.fchip` and `.pchip`.
+ */
+describe("the expander's stylesheet", () => {
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "src", "styles", "components.css"),
+    "utf8",
+  );
+
+  it("gives the control a 44 px tap target", () => {
+    const rule = css.match(/\.nearby-toggle\s*\{([^}]*)\}/);
+    expect(rule).not.toBeNull();
+    expect(rule![1]).toMatch(/min-height:\s*44px/);
+  });
+
+  it("turns the caret over from aria-expanded, not from a class", () => {
+    // The same rule `.fchip` follows: the look is keyed on the state a screen
+    // reader is told, so the two cannot drift into a control that points one
+    // way and reads the other.
+    expect(css).toMatch(/\.nearby-toggle\[aria-expanded="true"\]::after\s*\{/);
+  });
+
+  it("animates nothing at rest -- only the press, the hover and the caret", () => {
+    const rule = css.match(/\.nearby-toggle\s*\{([^}]*)\}/)?.[1] ?? "";
+    // A transition fires on a change and stops; an `animation` would run
+    // forever under a finger that never touched it. `motion.css` zeroes the
+    // durations under `prefers-reduced-motion`.
+    expect(rule).not.toMatch(/animation/);
+    expect(rule).toMatch(/transition:/);
   });
 });

@@ -419,6 +419,122 @@ dot. See "the map's card" in `web/src/styles/components.css`.
 
 ---
 
+## Ranking preferences: cheaper, balanced, closer — built 2026-09-18 → 09-19 on `feat/ranking-preferences`, not yet merged or deployed
+
+The owner's own framing — *"some people doesn't care about cost then distance is prioritized"* —
+is the whole spec ([`docs/superpowers/specs/2026-09-18-ranking-preferences-design.md`](superpowers/specs/2026-09-18-ranking-preferences-design.md)).
+The ranker already turned probability, walk and fare into one NT$ number; a preference is a
+different exchange rate for that number, not a new formula.
+
+**The constant that had to split first.** `rank.ts`'s single `TIME_VALUE` priced two different
+things at one rate: the walk from a car park to the destination, and the delay of being turned
+away (circling, then the drive to a fallback lot). A "cheaper" preset that simply lowered
+`TIME_VALUE` would have shrunk the circling penalty along with the walk price — quietly weakening
+the availability signal for exactly the driver least likely to notice. So `WALK_VALUE` (moved by a
+preference) and `DELAY_VALUE` (derived, `max(5, WALK_VALUE)`) replaced it. `CLAUDE.md`'s "Ranking
+preferences" section has the full argument for why that floor, specifically, is the only shape that
+does not break one end or the other — worth reading before anyone reaches for a simpler rule.
+
+| Preset | `WALK_VALUE` | `DELAY_VALUE` |
+|---|---|---|
+| Cheaper | 2 | 5 |
+| **Balanced (default, shipped)** | **5** | **5** |
+| Closer | 12 | 12 |
+
+**Balanced is the pair the app already shipped with.** A driver who never opens the new control
+ranks exactly as they did the day before this feature existed — that is the property that made it
+safe to ship, and it is the first thing worth knowing about the feature.
+
+### The safety measurement — read the provenance before the numbers
+
+`scripts/probe-ranker.py` gained a preference sweep that measures the one invariant this feature is
+not allowed to break: **no preset may ever put an availability inversion — a car park it believes is
+likely full — at the top of the list.** The sweep runs over two samples: 130 car parks under 50%
+ranked as their own destination (adversarial), and 700 real places from the offline place index
+(realistic).
+
+**The inversion *counts* it reports are a photograph of one roster snapshot, not a property of the
+ranker, and must never be quoted without the snapshot they came from.** The design spec's §5
+originally quoted counts from an early measurement harness; a 2026-09-19 correction to that section
+records why they don't reproduce — the same probe, on code nobody touched, gave Balanced's
+adversarial count as 11 on one snapshot and 57 on another taken three hours later, and holding the
+code and roster fixed while varying only which forecast column is read swings the same roster's
+count from 22 to 84. A number that moves 4× with nothing but the clock is not a constant to defend;
+what is durable is the *direction* of each comparison and the `at #1` column.
+
+**Measured here, 2026-09-19:** `./.venv/Scripts/python.exe scripts/probe-ranker.py --artifacts
+web/.dev-artifacts`, against `web/.dev-artifacts` — **1,089 lots, roster `2564025264`, generated
+2026-09-18 05:31 UTC, column 2 (+15 min)**. Neither the ranker code nor these artifacts changed
+since the day before, so this run reproduces that one exactly — itself a small proof of the point
+above: the code held still and the numbers held still with it; it is the *roster* that moves them.
+
+**adversarial — 130 lots under 50% at their own position, top 10, reach over all 1,089:**
+
+| preset | walk | delay | inversions | worst | at #1 | far@20 | far@5 | median km | p90 km |
+|---|---|---|---|---|---|---|---|---|---|
+| cheaper | 2 | 5 | 2 | #7 | **0** | 18 | 0 | 2.40 | 2.87 |
+| balanced * | 5 | 5 | 57 | #3 | **0** | 385 | 7 | 1.68 | 2.77 |
+| closer | 12 | 12 | 20 | #4 | **0** | 191 | 6 | 1.31 | 2.03 |
+
+**realistic — 700 places from the offline place index, each ≥ 50 m from every lot:**
+
+| preset | walk | delay | inversions | worst | at #1 | far@20 | far@5 | median km | p90 km |
+|---|---|---|---|---|---|---|---|---|---|
+| cheaper | 2 | 5 | 17 | #6 | **0** | 43 | 0 | 2.74 | 5.71 |
+| balanced * | 5 | 5 | 193 | #3 | **0** | 365 | 9 | 2.12 | 6.40 |
+| closer | 12 | 12 | 137 | #2 | **0** | 266 | 13 | 1.74 | 5.86 |
+
+`*` = the default. **No preset puts an inversion at #1, in either sample — six cells, all zero.**
+That is the whole claim the probe gates on. What else holds across both samples and both runs so
+far: Cheaper is by a wide margin the safest direction (2 and 17 inversions against Balanced's 57
+and 193); floor-coupled Closer is safer than Balanced on inversion count in both samples (20 vs 57;
+137 vs 193) though not on worst position in the realistic one (#2 vs #3) — a real trade for asking
+to walk less, visible to the driver on the card, not a defect to tune away.
+
+### The list now reaches every car park worth walking to
+
+Before this branch the list showed the top 20 by cost plus a handful of rescued no-forecast
+neighbours, and stopped — so a car park drawn on the map a few hundred metres away, visibly free,
+could have no row to open, because twenty rows are chosen by price and a near lot can lose that race
+on price alone. `NEARBY_RADIUS_M = 1500` (about a 19-minute walk at the app's own walking pace) now
+bounds the list by distance instead of by count: the ranked head renders exactly as it always has,
+and every other car park within the radius, in the same cost order, sits behind a "show more nearby"
+expander.
+
+**Measured on the live Taipei roster, 120 destinations drawn from lot positions, at 1.5 km:** a
+median of **64–74** lots reachable, 90th percentile **140–148**, worst case up to **~157** — two
+independent samples, a day apart and one lot apart in roster size, agreeing on the shape if not the
+last digit (the design spec's §6 table has the first one; `web/src/rank.ts`'s own `NEARBY_RADIUS_M`
+doc comment has the second, from the 1,089-lot roster on 2026-09-18). Laying out up to 157 cards on
+a phone in one pass is exactly the rendering cost this project has already been told about once —
+see "UI redesign" above — which is why the tail sits behind an expander instead of rendering
+unconditionally: a phone pays only for the rows the driver actually opens, and nothing good is
+hidden by the fold, since a distant lot sinks to the tail under the ranking anyway.
+
+### Test counts, real runs, 2026-09-19, in this checkout (the collector machine — `data/` present, untouched)
+
+`./.venv/Scripts/python.exe -m pytest -q` → **626 passed**, 0 skipped, matching the branch's stated
+baseline, including a pass this run from the known-intermittent
+`test_artifacts_integration.py::test_end_to_end_over_real_observations`. That test reads the live
+six-city store **unscoped**, and its result varies with that store's own state between runs — it has
+failed on identical code before — so a bare "passed" here is one run's result, not a settled figure;
+re-run it rather than trust either a single pass or a single failure. `cd web && npx vitest run` →
+**548 passed**, 38 files, matching the branch's stated baseline.
+
+**The Worker suite is genuinely untouched by this branch** — `git diff` against the branch point
+touches no file under `worker/` — but it is re-measured here rather than carried forward:
+`cd worker && npm test` → **121 passed**, 5 files, matching the plan's own Global Constraints
+baseline (`tasks/todo.md`), not the **114** this document carried before this branch. **`scripts/` is
+not untouched**: `scripts/probe-ranker.py` is **+371/−41** in this branch (commit `468c653`) — the
+branch's own safety instrument, and arguably its most important non-UI change. No file under
+`scripts/tests/` changed, so that suite's own count is unaffected by this branch and is re-measured
+here rather than assumed: `node --test scripts/tests/*.test.mjs` → **55 passed**. The two facts do
+not contradict — a directory can carry a real change while the one test suite that exercises a
+different part of it stays green — but "no `scripts/` source changed" was the wrong thing to have
+said.
+
+---
+
 ## What to do next
 
 1. ~~Deploy Plan 3e to the collector~~ — **done 2026-09-14 09:06**; see "Which machine is which".
@@ -511,6 +627,11 @@ dot. See "the map's card" in `web/src/styles/components.css`.
    `lots.json` carries `m` and `e` (check a row, not just the file), and only then release the web
    app. See "Scooter and charging on the card" above for why the order matters and what the interim
    state looks like.
+9. **Ship ranking preferences.** `feat/ranking-preferences` is code-complete and probe-verified;
+   nothing of it is live. It needs no collector change and no artifact change — everything it touches
+   is client-side (`web/src/rank.ts` and the new preference control), so unlike items 5 and 8 above
+   there is no ordering constraint, only the usual `deploy:check` then `deploy:release`. See "Ranking
+   preferences" above.
 
 Also deferred: removing frozen lots from the climatology counts; retiring or recalibrating
 `find_frozen_lots`; compressing the daily metadata snapshots (2.17 MB a day, ~90% of the cold store).

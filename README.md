@@ -52,7 +52,7 @@ arrival-time forecast is the same machinery extended.
 
 Collecting since 2026-09-04 — on a laptop that slept until 2026-09-10, on an always-on desktop since.
 Corpus figures below are at the time of writing (2026-09-14); test counts are refreshed to
-2026-09-17, on `feat/stage-a`:
+2026-09-19, on `feat/ranking-preferences`:
 
 | | |
 |---|---|
@@ -62,7 +62,7 @@ Corpus figures below are at the time of writing (2026-09-14); test counts are re
 | Lots withheld as *not updating* | **112** at the first live publish (2026-09-14 09:11); 133 on a snapshot at 01:13 — the count moves as feeds freeze and recover (see the limitations) |
 | Lots with a parsed price | **97.8%** |
 | Published payload | **34.5 KB gzipped**, both files |
-| Tests | **613** Python (3 skipped) · **414** web · **114** Worker · **55** scripts |
+| Tests | **626** Python (0 skipped) · **548** web · **121** Worker · **55** scripts |
 
 Plans 1 through 3e are complete: the collector, the forecast grid, the ranked list, a map-first
 installable offline-capable app with place search, and — 3e — no forecast at all for a car park
@@ -73,10 +73,12 @@ still shows Taipei only until that rollout finishes and a following spec teaches
 cities' shards. **Stage A** adds a per-lot, per-half-hour-of-week climatology table (`week.bin`) so
 the app can answer any arrival within seven days instead of only the next two hours, and turns the
 confidence label into a statement about how much history backs a forecast rather than how far away
-it is — code-complete and tested on `feat/stage-a`, not yet deployed. **The forecast has been
-evaluated three times**; see the limitations below for what that found. A *trained* model is still
-to come, and deliberately so: the corpus needs weeks more before beating the baselines would mean
-anything.
+it is — code-complete and tested on `feat/stage-a`, not yet deployed. **Ranking preferences** lets a
+driver lean the ranker toward cheaper, balanced or closer — a preset moves what a minute of walking
+costs, never the odds of a space — code-complete and probe-verified on `feat/ranking-preferences`,
+not yet merged or deployed. **The forecast has been evaluated three times**; see the limitations
+below for what that found. A *trained* model is still to come, and deliberately so: the corpus needs
+weeks more before beating the baselines would mean anything.
 
 ## The app
 
@@ -90,10 +92,16 @@ and minute pickers for any moment up to seven days out, not only the next two ho
 a probability ring, a confidence label (High / Medium / Low, graded on the evidence behind it — a
 fresh live reading, or accumulated weeks of history at that half-hour of the week, whichever is
 stronger — never on how far away the arrival is), walking time, price, and — when the reading
-carried one — the observed free count at its age. Search finds car parks, MRT stations, landmarks,
-and streets and lanes down to the lane, from an offline place index built out of the basemap tiles:
-no geocoder, no key, nothing that leaves the phone. Every animation is gated by
-`prefers-reduced-motion`.
+carried one — the observed free count at its age. A driver can lean the ranking itself toward
+**cheaper, balanced or closer** with a segmented control beside the arrival picker; balanced is the
+default and the exact ranking the app has always produced, so leaving the control alone changes
+nothing. A preset moves what a minute of walking costs against what a minute of being turned away
+costs — never the odds of a space itself, and never a number the card shows. The list also reaches
+further than it used to: every car park within a 19-minute walk gets a row, in the same ranked
+order, with everything past the first twenty behind a "show more nearby" expander rather than
+rendering unconditionally. Search finds car parks, MRT stations, landmarks, and streets and lanes
+down to the lane, from an offline place index built out of the basemap tiles: no geocoder, no key,
+nothing that leaves the phone. Every animation is gated by `prefers-reduced-motion`.
 
 ---
 
@@ -154,7 +162,10 @@ You do not pay a car park's fare for a space it did not have, and arriving to fi
 more than the time spent circling — you still have to drive somewhere that has one, and pay for it.
 The alternative is derived from the roster being ranked rather than tuned, so failing in a dense
 district costs less than failing in a sparse one, and the drive is charged at NT$12 per
-straight-line kilometre from the car park that turned you away.
+straight-line kilometre from the car park that turned you away, at the app's default (balanced)
+preference — a driver who asks the ranker to lean toward *closer* prices that same kilometre at
+NT$28.8, deliberately, so that raising the price of distance never cheapens the price of being
+turned away. See "The app" above.
 
 Getting this wrong is instructive, so it is worth recording that it *was* wrong. The original score
 charged the fare unconditionally and priced a failure at a flat twelve minutes, which made the
@@ -278,9 +289,9 @@ npm run dev --prefix web
 **Tests:**
 
 ```bash
-python -m pytest                       # 613, 3 skipped (or in a docker-collector container; see docker/README.md)
-npm test --prefix web                  # 414
-npm test --prefix worker               # 114
+python -m pytest                       # 626 (or in a docker-collector container; see docker/README.md)
+npm test --prefix web                  # 548
+npm test --prefix worker               # 121
 node --test scripts/tests/*.test.mjs   # 55
 ```
 

@@ -8,14 +8,19 @@
  * head -- how likely a space is, how far they then walk, and what it costs --
  * into one comparable number, in NT$.
  *
- *     cost = p * (walkMin * TIME_VALUE + fee)
- *          + (1 - p) * (CIRCLING_PENALTY_MIN * TIME_VALUE
- *                       + DRIVE_MIN_PER_KM * TIME_VALUE * km to the fallback lot
+ *     cost = p * (walkMin * WALK_VALUE + fee)
+ *          + (1 - p) * (CIRCLING_PENALTY_MIN * DELAY_VALUE
+ *                       + DRIVE_MIN_PER_KM * DELAY_VALUE * km to the fallback lot
  *                       + the fallback lot's own cost)
  *
  * The second line is the one that converts a probability into a decision: it
  * charges a lot for the risk of arriving to find nothing, and for everything
  * that failure then forces. See `rankLots`.
+ *
+ * The two prices in that formula are the one thing a driver can move: see
+ * `Preference` and `PREFERENCES`, which hold three pairs of them. The default
+ * pair is `WALK_VALUE` / `DELAY_VALUE` exactly, so a driver who never opens the
+ * control gets the ranking this module produced before preferences existed.
  *
  * `cost` is a *sort key*, not something the UI shows. The spec is explicit that
  * P, walking time and price appear as three separate visible columns and are
@@ -34,14 +39,41 @@ import type { Lot, Price } from "./types";
  * ------------------------------------------------------------------ */
 
 /**
- * NT$ a minute of the driver's own time is worth. NT$5/min is NT$300/hour,
- * about 1.5x Taiwan's minimum wage -- the usual multiplier for out-of-vehicle
- * time, which people dislike more than time spent sitting in the car.
+ * NT$ a minute of the driver's own time is worth while walking from the car
+ * park to the destination. NT$5/min is NT$300/hour, about 1.5x Taiwan's
+ * minimum wage -- the usual multiplier for out-of-vehicle time, which people
+ * dislike more than time spent sitting in the car.
  *
- * Only the *ratios* between these four constants change any ranking; scaling
+ * Split from what used to be one constant, `TIME_VALUE`, which priced the
+ * walk and a failed attempt at the same rate despite them being different
+ * quantities. `DELAY_VALUE` now prices the failure branch on its own, so a
+ * later preference can move what a driver's time is worth on foot without
+ * moving what a failed attempt costs. Both start at 5, so the split changes
+ * no ranking by itself -- only a future difference between the two will.
+ *
+ * Only the *ratios* between these five constants change any ranking; scaling
  * all of them together changes nothing.
+ *
+ * This is the **Balanced** price, and the one the app shipped with. The other
+ * two presets move it -- NT$2 for Cheaper, NT$12 for Closer -- and nothing else
+ * in this file moves with it except `DELAY_VALUE`'s floor. See `PREFERENCES`.
  */
-export const TIME_VALUE = 5;
+export const WALK_VALUE = 5;
+
+/**
+ * NT$ a minute is worth when it is lost to a failed attempt: circling after
+ * arriving to find no space (`CIRCLING_PENALTY_MIN`), and the drive to
+ * wherever the trip actually ends up (`DRIVE_MIN_PER_KM`). Same NT$5/min
+ * out-of-vehicle rate as `WALK_VALUE`, and the same reasoning -- see there
+ * for why the two are priced separately instead of sharing one constant.
+ *
+ * A preference can raise this but never lower it: it is the **floor** in
+ * `DELAY_VALUE = max(5, WALK_VALUE)`, which is what stops a driver who asked
+ * for a cheaper car park from quietly buying a weaker availability signal.
+ * See `PREFERENCES` for why the rule has that shape and what was measured to
+ * settle it.
+ */
+export const DELAY_VALUE = 5;
 
 /**
  * How long we assume the visit lasts, in hours. Two hours is the shape of a
@@ -94,7 +126,7 @@ export const CIRCLING_PENALTY_MIN = 12;
  * 30 km/h on streets a fifth longer than the straight line, the quick end of
  * driving across Taipei, so close to the least this drive can cost. A straight
  * line because the ranker has no road network; the constant absorbs the detour.
- * The minutes are priced at `TIME_VALUE`, like circling. That rate is meant for
+ * The minutes are priced at `DELAY_VALUE`, like circling. That rate is meant for
  * time out of the car and overstates time behind the wheel, while fuel is not
  * counted at all; one time value keeps the exchange rate with circling where it
  * was set.
@@ -134,6 +166,90 @@ export const RELIABLE_P = 0.9;
  * the user the truth even though the ranking had to assume something.
  */
 export const MEDIAN_PRICE_FALLBACK = 77.5;
+
+/* ------------------------------------------------------------------ *
+ * What the driver is asking of the ranking. Not a second scoring
+ * scheme -- just a different price for a minute on foot, which is a
+ * number the cost model already had and has already been calibrated
+ * against the live roster.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Which way a driver wants the ranking to lean.
+ *
+ * Comparatives on purpose. "Cheaper" and "closer" describe a lean, not a
+ * promise: under every one of them the ranker still puts a likely space above
+ * an unlikely bargain, and neither the copy nor this type should suggest that
+ * choosing one buys a guarantee about the car park at the top of the list.
+ */
+export type Preference = "cheaper" | "balanced" | "closer";
+
+/**
+ * What a driver who has never touched the control is ranked by -- and what a
+ * stored value we cannot read falls back to (see `preference.ts`).
+ *
+ * Balanced is the pair the app shipped with, so this default is not merely a
+ * sensible choice among three: it is the guarantee that this whole feature
+ * changes nothing for a driver who ignores it.
+ */
+export const DEFAULT_PREFERENCE: Preference = "balanced";
+
+/** The floor rule, in one place: a preference may raise the price of a delay, never lower it. */
+function pricesFor(walk: number): { walk: number; delay: number } {
+  return { walk, delay: Math.max(DELAY_VALUE, walk) };
+}
+
+/**
+ * The two prices each preference pays for a minute, in NT$.
+ *
+ * `delay` is not a free parameter. It is `max(DELAY_VALUE, walk)` -- floor
+ * coupled -- and that rule is **measured, not reasoned**. It looks arbitrary
+ * next to the two obvious alternatives, and both of those were tried first and
+ * found unsafe, at opposite ends, against the live roster:
+ *
+ *   - **Pinning `delay` at 5 regardless of the preference makes Closer
+ *     unsafe.** Every inversion this produces has the shape *near, cheap,
+ *     unlikely* beating *far, expensive, likely*: raising `walk` penalises
+ *     only the **far** lot -- which is the reliable one -- while the risky
+ *     lot, sitting at the destination, pays nothing extra.
+ *   - **Coupling the two symmetrically (`delay = walk`) repairs Closer and
+ *     breaks Cheaper instead.** A delay of NT$2/min makes being turned away
+ *     almost free, so the preset a price-conscious driver reaches for buys a
+ *     weaker availability signal along with it.
+ *   - **The floor is the only shape that holds both ends**, because it can
+ *     only rise: the delay price can never fall below today's value, so a
+ *     preference cannot erode the penalty for being sent away, and it rises
+ *     with `walk` so that making walking expensive does not *relatively*
+ *     cheapen being turned away.
+ *
+ * Do not quote an inversion count in this comment. `scripts/probe-ranker.py`'s
+ * own sweep found the counts swing by a factor of five on the same code and
+ * the same roster, purely from which snapshot was measured or which forecast
+ * column was read -- see the 2026-09-19 correction in the design spec's §5.
+ * What reproduced everywhere measured instead: Cheaper is the safest
+ * direction by a wide margin; floor-coupled Closer is safer than Balanced on
+ * inversion count in both samples measured, though not always on worst
+ * position -- that is a real trade for asking to walk less, visible to the
+ * driver on the card, not a defect to tune away; and, the one invariant this
+ * module actually depends on, **no preset has ever put an inversion at #1**.
+ * Run the probe for a current number with its provenance -- it parses these
+ * constants out of this file rather than copying them, precisely so it cannot
+ * report a stale sweep as the current one.
+ *
+ * The invariant this protects is the app's central claim: it ranks by how
+ * likely you are to get a space. A preference is allowed to change what the
+ * walk and the fare are worth beside that; it is not allowed to erode it. If a
+ * later sweep finds an inversion at #1, the answer is to narrow the range of
+ * these presets, not to widen what counts as acceptable.
+ *
+ * The score built from these numbers is a sort key and is still never shown.
+ * The control names a preference, not a number -- no card gains a "NT$142".
+ */
+export const PREFERENCES: Record<Preference, { walk: number; delay: number }> = {
+  cheaper: pricesFor(2),
+  balanced: pricesFor(WALK_VALUE),
+  closer: pricesFor(12),
+};
 
 /**
  * One ranked candidate. Every component of the score is here separately and on
@@ -202,6 +318,17 @@ export interface RankInput {
    * only "we have a number" and "we do not".
    */
   probability: (lotIndex: number, horizonMin: number) => number | null;
+  /**
+   * Which way the driver asked the ranking to lean. Omitted means
+   * `DEFAULT_PREFERENCE`, which is Balanced, which is the pair of prices this
+   * module used before the option existed -- so every existing caller, and
+   * every test written before this, keeps the ordering it had.
+   *
+   * Optional rather than required for exactly that reason: a caller that has
+   * no opinion should not have to state one, and should not be able to change
+   * today's behaviour by forgetting to.
+   */
+  preference?: Preference;
 }
 
 /** What a parsed fare costs us, and what we can honestly say about it. */
@@ -350,15 +477,21 @@ function group(row: Ranked): number {
  * most `1 - RELIABLE_P` for exactly the lots this can happen to, so it can move
  * that lot's score by no more than a tenth of one circling penalty. Paying for a
  * second pass to remove a rounding error would be the wrong trade.
+ *
+ * `delay` is the preference's price for a minute lost, and `certain` already
+ * carries its price for a minute walked, so which lot the ranking falls back to
+ * can itself change with the preference -- as it should: the driver's own
+ * arithmetic is what decides where they would go instead.
  */
 function fallbackCost(
   scored: readonly { probability: number | null; certain: number; position: LatLon }[],
+  delay: number,
 ): { cost: number; at: LatLon | null } {
   let reliable: { cost: number; at: LatLon | null } = { cost: Infinity, at: null };
   let anyForecast: { cost: number; at: LatLon | null } = { cost: Infinity, at: null };
   for (const s of scored) {
     if (s.probability === null) continue;
-    const simple = s.certain + (1 - s.probability) * CIRCLING_PENALTY_MIN * TIME_VALUE;
+    const simple = s.certain + (1 - s.probability) * CIRCLING_PENALTY_MIN * delay;
     if (simple < anyForecast.cost) anyForecast = { cost: simple, at: s.position };
     if (s.probability >= RELIABLE_P && simple < reliable.cost) {
       reliable = { cost: simple, at: s.position };
@@ -417,8 +550,19 @@ function fallbackCost(
  * A car park whose feed has stopped sits between the two: it keeps its number
  * and its row, but sorts below every lot we have actually heard from. See
  * `group`, which is where the three-way ordering is argued.
+ *
+ * `input.preference` changes two numbers in the arithmetic above and nothing
+ * else -- not the grouping, not the fallback rule, not what any row reports.
+ * Omitting it ranks by Balanced, which is the pair of prices this function used
+ * before the option existed, so the default is a promise rather than a taste:
+ * the driver who never opens the control sees exactly what they saw before.
  */
 export function rankLots(input: RankInput): Ranked[] {
+  // The only thing a preference changes: what a minute on foot costs, and what
+  // a minute lost to a failed attempt costs. Every other constant, and the
+  // shape of the formula, is the same under all three. See `PREFERENCES`.
+  const price = PREFERENCES[input.preference ?? DEFAULT_PREFERENCE];
+
   const scored = input.lots.map((lot, index) => {
     const position = { lat: lot.y, lon: lot.x };
     const meters = haversineMeters(input.destination, position);
@@ -427,17 +571,17 @@ export function rankLots(input: RankInput): Ranked[] {
     const probability = usableProbability(input.probability(index, input.horizonMin));
     // What parking *here* costs once you are in: the whole story for a lot whose
     // probability is unknown, and the sort key within that group.
-    const certain = walkMin * TIME_VALUE + money.fee;
+    const certain = walkMin * price.walk + money.fee;
     return { lot, index, position, meters, walkMin, money, probability, certain };
   });
 
   // One fallback for the whole ranking, found before any lot is scored.
-  const fallback = fallbackCost(scored);
+  const fallback = fallbackCost(scored, price.delay);
   // NT$ to drive from a lot that turned you away to the fallback lot.
   const drive = (from: LatLon): number =>
     fallback.at === null
       ? 0
-      : (DRIVE_MIN_PER_KM * TIME_VALUE * haversineMeters(from, fallback.at)) / 1000;
+      : (DRIVE_MIN_PER_KM * price.delay * haversineMeters(from, fallback.at)) / 1000;
 
   const rows = scored.map((s) => {
     const row: Ranked = {
@@ -455,7 +599,7 @@ export function rankLots(input: RankInput): Ranked[] {
           ? null
           : s.probability * s.certain +
             (1 - s.probability) *
-              (CIRCLING_PENALTY_MIN * TIME_VALUE + drive(s.position) + fallback.cost),
+              (CIRCLING_PENALTY_MIN * price.delay + drive(s.position) + fallback.cost),
     };
     return { row, certain: s.certain };
   });
@@ -477,6 +621,80 @@ export function rankLots(input: RankInput): Ranked[] {
 export const UNKNOWN_RESERVE = 5;
 
 /**
+ * How far from the destination the list still reaches, in metres.
+ *
+ * The cap below is a rendering budget, not a judgment about where a driver
+ * would park -- but for as long as it was the list's only bound, it was being
+ * read as one. The owner reported the symptom: *"I always see lots around
+ * that's green but didn't see it in the list if I'd like to know the detail
+ * about it."* A car park drawn on the map a few hundred metres away, plainly
+ * free, with no row to open -- because twenty rows are chosen by expected
+ * *cost*, and a near lot can lose that race on price alone.
+ *
+ * So the list is bounded by distance, and the cap now only decides where the
+ * expander goes. 1,500 m is about a nineteen-minute walk at `WALK_METERS_PER_MIN`,
+ * and it is sized against the roster rather than picked. Sampling 120
+ * destinations drawn from lot positions in the 1,089-lot Taipei roster:
+ *
+ * | Radius | Walk | Median lots | 90th pct | Worst |
+ * |---|---|---|---|---|
+ * | 1.0 km | 12 min | 38 | 70 | 76 |
+ * | **1.5 km** | **19 min** | **74** | **148** | **156** |
+ * | 2.0 km | 25 min | 126 | 245 | 254 |
+ *
+ * What those figures are *of* matters more than their digits, so: the count of
+ * car parks within the radius of one destination, over 120 destinations taken
+ * from lot positions in `web/.dev-artifacts/lots.json` (2026-09-18, 1,089
+ * lots), evenly spaced through the roster array. Drawing the destinations from
+ * lots rather than from a grid is deliberate and makes the numbers *high* --
+ * a point where a car park already stands is a point car parks cluster around
+ * -- which is the conservative side to be on for a rendering budget. A
+ * different sample moves the median by single digits and the worst case by
+ * about a lot; it does not move the conclusion.
+ *
+ * The radius is therefore not the constraint; rendering is. Laying out 156
+ * cards at once is exactly the cost this project has already been told about,
+ * which is why everything past the cap sits in `ListRows.nearby` behind an
+ * expander, and a phone pays only for what the driver opens. Distant lots sink
+ * to the tail under the ranking anyway, so the order that budget is spent in is
+ * already the right one.
+ *
+ * Well inside `App`'s `COVERAGE_RADIUS_M`, which is the distance past which a
+ * tapped lot gets no card at all -- so every row this radius admits is one
+ * whose detail the app can actually show.
+ */
+export const NEARBY_RADIUS_M = 1500;
+
+/**
+ * What the list draws, and what it can reach from there.
+ *
+ * Two arrays rather than one, because they are bounded by different things and
+ * cost different amounts to render. `head` is the ranked list as it has always
+ * been -- the cap, plus the rescue -- and is drawn unconditionally. `nearby` is
+ * the rest of the neighbourhood, up to a hundred and fifty rows of it, and is
+ * drawn only when the driver asks.
+ */
+export interface ListRows {
+  /**
+   * The ranked head: the first `limit` rows, plus any nearer no-forecast lots
+   * the cap would otherwise have dropped. Exactly what the list drew before
+   * `nearby` existed, which is the promise this split has to keep.
+   */
+  head: Ranked[];
+  /**
+   * Every other car park within `NEARBY_RADIUS_M`, **in the ranker's order** --
+   * the same ordering `head` is in, continued, not a second sort. Disjoint from
+   * `head` by construction.
+   *
+   * Sorting this by distance instead would be the easy mistake and a quiet
+   * contradiction: the twenty rows above it are ordered by expected cost, and a
+   * tail that changed the rule halfway down would be two rankings stacked on
+   * top of each other with nothing saying so.
+   */
+  nearby: Ranked[];
+}
+
+/**
  * The head of the ranking, plus any nearer no-forecast lots the cap would drop.
  *
  * `rankLots` keeps a lot with no forecast and sorts it behind every lot that has
@@ -496,7 +714,7 @@ export const UNKNOWN_RESERVE = 5;
  * the city and everything about one on the same street. At most
  * `UNKNOWN_RESERVE` of them, nearest first.
  */
-export function listRows(ranked: readonly Ranked[], limit: number): Ranked[] {
+function rankedHead(ranked: readonly Ranked[], limit: number): Ranked[] {
   const head = ranked.slice(0, limit);
   // Nothing was cut, or the cap already reached the unknown group -- and when
   // no lot has a forecast at all, the head *is* that group and needs no rescue.
@@ -511,4 +729,33 @@ export function listRows(ranked: readonly Ranked[], limit: number): Ranked[] {
     .slice(0, UNKNOWN_RESERVE);
 
   return rescued.length === 0 ? head : [...head, ...rescued];
+}
+
+/**
+ * Split the ranking into the rows the list draws and the rows it can reach.
+ *
+ * The cap stays where it is and keeps doing what it did -- `head` is
+ * `rankedHead` unchanged, so a driver who never opens the expander sees the
+ * list they already had, down to the row. What changes is that the cap is no
+ * longer the *end* of the list: everything else within `NEARBY_RADIUS_M` comes
+ * back in `nearby`, so a car park the driver can see on the map and could walk
+ * to always has a row to open, whatever the cost model made of its price.
+ *
+ * `Array#filter` preserves order, so `nearby` is the ranker's own ordering with
+ * `head`'s rows lifted out of it -- a continuation, never a re-sort. See
+ * `ListRows.nearby`.
+ *
+ * Disjointness is by **row identity**, not by index. `rankedHead` can reach
+ * past `limit` for a no-forecast lot near the destination, so the rows it
+ * returns are not always `ranked`'s first `head.length`; a tail sliced from
+ * either offset would list every rescued lot twice, and those are precisely the
+ * nearby lots the rescue exists to show once.
+ */
+export function listRows(ranked: readonly Ranked[], limit: number): ListRows {
+  const head = rankedHead(ranked, limit);
+  const inHead = new Set<Ranked>(head);
+  return {
+    head,
+    nearby: ranked.filter((row) => !inHead.has(row) && row.meters <= NEARBY_RADIUS_M),
+  };
 }

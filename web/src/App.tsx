@@ -130,6 +130,7 @@ import { LotCard } from "./components/LotCard";
 import { LotList } from "./components/LotList";
 import { Notice } from "./components/Notice";
 import { PlaceSearch } from "./components/PlaceSearch";
+import { PreferencePicker } from "./components/PreferencePicker";
 import { Skeleton } from "./components/Skeleton";
 import { TopBar } from "./components/TopBar";
 import type { LatLon } from "./geo";
@@ -139,7 +140,8 @@ import { Shell, useIsDesktop } from "./layout/Shell";
 import { snapHeights, type Snap } from "./layout/sheet";
 import { toMapLot } from "./map/lotSource";
 import type { Place } from "./places";
-import { listRows, notUpdating, rankLots, type Ranked } from "./rank";
+import { readPreference, writePreference } from "./preference";
+import { listRows, notUpdating, rankLots, type Preference, type Ranked } from "./rank";
 import type { Grid, Lot, LotsDoc, WeekTable } from "./types";
 import { useGeolocation } from "./useGeolocation";
 import { blend, probabilityAt as weekProbabilityAt } from "./week";
@@ -190,8 +192,12 @@ const PLACES_URL = `${import.meta.env.BASE_URL.replace(/\/+$/, "")}/places/taipe
  * silently hide 98% of the city behind a map that looked like it was showing
  * all of it.
  *
- * It is also a *soft* limit: `listRows` grows the list rather than let a fixed
- * cap drop the no-forecast lots the ranker deliberately kept.
+ * It is also a *soft* limit, twice over. `listRows` grows it rather than let a
+ * fixed cap drop the no-forecast lots the ranker deliberately kept -- and it is
+ * no longer where the list *ends*: everything else within `NEARBY_RADIUS_M`
+ * comes back in `ListRows.nearby`, behind the expander below. What this number
+ * decides now is how much the page renders before the driver asks for more, not
+ * how far the list reaches.
  */
 export const LIST_LIMIT = 20;
 
@@ -265,8 +271,15 @@ export const MIN_REFETCH_MS = 30_000;
  */
 export const FUTURE_TOLERANCE_SEC = 600;
 
-/** The top bar's height, mirroring `--topbar-height`: the map's padding at the top. */
-const TOP_BAR_PX = 60;
+/**
+ * The top bar's height, mirroring `--topbar-height`: the map's padding at the top.
+ *
+ * Exported because it is half of `snapHeights`'s input, and the sheet header's
+ * own height budget is asserted against the result -- see
+ * `tests/preferencePicker.test.tsx`. A test that hardcoded 60 beside this would
+ * go on passing through the one change it exists to notice.
+ */
+export const TOP_BAR_PX = 60;
 
 /** The side panel's width, mirroring `--panel-width`: the map's padding at the left. */
 const PANEL_PX = 420;
@@ -460,6 +473,24 @@ function MapPlaceholder({ lang }: { lang: Lang }) {
   );
 }
 
+/**
+ * `window.localStorage`, or `null` when there is none or asking for it throws.
+ *
+ * The twin of `PlaceSearch`'s own `defaultStorage`, and deliberately a twin
+ * rather than a shared import: `preference.ts` takes a `Storage` precisely so
+ * that *the caller* owns the decision about where it comes from, which is what
+ * makes the SSR case and the test case a `null` instead of a special case. The
+ * getter itself is what throws when site data is blocked -- before any
+ * `getItem` runs -- so the guard has to be here, on the way in.
+ */
+function deviceStorage(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 export default function App() {
   const [lang, setLang] = useState<Lang>(detectLang);
   const [artifacts, setArtifacts] = useState<Artifacts | null>(null);
@@ -493,6 +524,35 @@ export default function App() {
   const [selected, setSelected] = useState<{ id: string; fromMap: boolean } | null>(null);
   const selectedLotId = selected?.id ?? null;
   /**
+   * Whether the driver has asked for the rest of the neighbourhood -- the
+   * nearby expander below the ranked list. See `listRows` and `listed`.
+   *
+   * The whole reason that tail sits behind a control rather than simply being
+   * appended: at `NEARBY_RADIUS_M` a Taipei destination has a median of 74 car
+   * parks around it and up to 156, and laying 156 cards out on a phone is a
+   * cost this project has already been told about once. Closed, the page
+   * renders exactly the twenty rows it rendered before; open, it renders what
+   * was asked for.
+   *
+   * **Reset with the destination, beside `selected`, and for the same reason.**
+   * Opening the tail is a decision about *this place* -- "show me everything
+   * around here" -- and not a standing opinion about how long lists should be.
+   * Carried across a search it would turn one deliberate act in a quiet
+   * neighbourhood into an involuntary 156-card render in Xinyi, which is the
+   * exact cost the expander exists to prevent, arriving by the back door. The
+   * design rests on a phone paying only for what the driver opened; this was
+   * the one path where they would pay for something they opened somewhere
+   * else. See `pickDestination`, which is the single funnel all three ways of
+   * naming a destination go through.
+   *
+   * A filter chip deliberately does *not* reset it. Pressing 機車 does not
+   * change where the driver is going; it narrows the same neighbourhood they
+   * already asked to see, and the tail narrows with it (both are cut from
+   * `matching`). Closing the list under them there would be answering a
+   * question they did not ask.
+   */
+  const [nearbyOpen, setNearbyOpen] = useState(false);
+  /**
    * Which of 機車 / 充電 the driver is filtering the list on. Empty is the
    * unfiltered screen, and the one this app opens in.
    *
@@ -502,6 +562,22 @@ export default function App() {
    * for a reason nothing on screen explains.
    */
   const [pressedFilters, setPressedFilters] = useState<readonly Amenity[]>([]);
+  /**
+   * Which way the driver asked the ranking to lean, and the one piece of state
+   * on this screen that outlives the visit.
+   *
+   * Storage on purpose, where `pressedFilters` above is deliberately not: "I
+   * would rather walk less" is a standing preference about how this person
+   * drives, not a fact about today's trip, and restoring it explains itself --
+   * the control is on screen showing the choice that produced the order. A
+   * filter restored from a previous session would instead be a shorter list
+   * with nothing on screen to account for it.
+   *
+   * Read once, in the initialiser, so a reload is the only thing that consults
+   * storage and a tab whose storage is blocked still ranks by
+   * `DEFAULT_PREFERENCE` rather than failing to start. See `preference.ts`.
+   */
+  const [preference, setPreference] = useState<Preference>(() => readPreference(deviceStorage()));
   /**
    * The card the pointer is over, which the map answers with a faint ring on
    * that lot's dot (spec §5.6) -- the link between a row in the list and a point
@@ -875,11 +951,20 @@ export default function App() {
    * second later would silently move the destination off the chosen point. A
    * failure the user has routed around stops being worth reporting, and the
    * selection belongs to the old destination, not this one.
+   *
+   * So does the opened tail. "Show me everything around here" is a decision
+   * about a place, and the place has just changed; leaving it open would spend
+   * the render budget the expander exists to protect, on a request the driver
+   * made about somewhere else. Reset here rather than in an effect on
+   * `destination` because this is the single funnel -- search, the locate
+   * button (`useGeolocation(pickDestination)`) and a tap on the map all arrive
+   * through it -- so the two resets sit together and cannot drift apart.
    */
   const pickDestination = useCallback((at: LatLon) => {
     abandonRef.current?.();
     clearFailureRef.current?.();
     setSelected(null);
+    setNearbyOpen(false);
     setDestination(at);
   }, []);
 
@@ -934,7 +1019,9 @@ export default function App() {
    * Every lot, ranked. Not sliced: `listRows` decides what the list shows.
    *
    * Recomputed when the arrival time moves: a new column out of a grid already
-   * in memory, no request, no refetch.
+   * in memory, no request, no refetch. The same is true of the preference,
+   * which changes two prices inside `rankLots` and nothing else -- so choosing
+   * one re-orders the cards already on screen and asks the network for nothing.
    */
   const ranked = useMemo(() => {
     if (artifacts === null || destination === null) return [];
@@ -947,8 +1034,9 @@ export default function App() {
       // `rows[i]`, resolved through `Lot.i` inside: `rankLots` reports the array
       // position it scored, and the grid row is the lot's own business.
       probability: (i, h) => (withheld ? null : probabilityForLot(g, week, rows[i], h, arrivalTs)),
+      preference,
     });
-  }, [artifacts, week, destination, horizonFromReadingMin, arrivalTs, withheld]);
+  }, [artifacts, week, destination, horizonFromReadingMin, arrivalTs, withheld, preference]);
 
   /**
    * The ranking, narrowed to the lots that have what the driver asked for.
@@ -970,8 +1058,10 @@ export default function App() {
   );
 
   /**
-   * What the list draws: the head of the ranking, grown if the cap would
-   * otherwise drop a nearby lot the ranker kept on purpose. See `listRows`.
+   * What the list draws, in two parts: the head of the ranking -- grown if the
+   * cap would otherwise drop a nearby lot the ranker kept on purpose -- and
+   * every other car park within walking distance, for the expander. See
+   * `listRows`.
    */
   const listed = useMemo(() => listRows(matching, LIST_LIMIT), [matching]);
 
@@ -979,10 +1069,17 @@ export default function App() {
    * How many car parks the filter took out of the list, split by why.
    *
    * **The scope is the rows the list would have shown with no filter on** --
-   * `listRows(ranked, LIST_LIMIT)`, normally twenty. Not the whole roster: a
-   * tally of "1,050 hidden" is arithmetic about a city, and what a driver
+   * `listRows(ranked, LIST_LIMIT).head`, normally twenty. Not the whole roster:
+   * a tally of "1,050 hidden" is arithmetic about a city, and what a driver
    * needs explained is the list in front of them that just got shorter. Not
    * the filtered list either, which by construction has nothing hidden in it.
+   *
+   * **And not the nearby tail**, open or closed, for the same reason: at 1.5 km
+   * the tail is a neighbourhood of up to 156 car parks, so counting it here
+   * would turn a sentence about a list back into arithmetic about a city --
+   * which is the one thing this scope was chosen to avoid. The tail narrows
+   * with the same filter (it is cut from `matching`, like the head), and the
+   * expander's own count says how many rows survived it.
    *
    * **And it is two numbers, never one.** That is the whole reason this
    * exists. "No car park near here takes scooters" and "the data doesn't say"
@@ -992,13 +1089,33 @@ export default function App() {
    * the notice below prints both.
    */
   const hidden = useMemo(
-    () => tallyHidden(listRows(ranked, LIST_LIMIT).map((row) => row.lot), filters),
+    () => tallyHidden(listRows(ranked, LIST_LIMIT).head.map((row) => row.lot), filters),
     [ranked, filters],
   );
 
   /** Turn one filter chip on or off. Stable, so `AmenityFilters` never re-renders for a hover. */
   const toggleFilter = useCallback((amenity: Amenity) => {
     setPressedFilters((active) => toggleAmenity(active, amenity));
+  }, []);
+
+  /**
+   * The driver chose a way for the ranking to lean.
+   *
+   * Two effects and no third: the ranking re-runs (`ranked` below reads
+   * `preference`), and the choice is written down for next time. Nothing here
+   * scrolls the list, moves the map or touches the arrival -- the same
+   * restraint `ArrivalPicker`'s own `onChange` observes, and the reason this is
+   * two lines rather than a handler with opinions. Re-ranking is visible on its
+   * own: the cards slide to their new places (`LotList`'s FLIP) and the map's
+   * best-pick halo follows `bestId`.
+   *
+   * Written on the change rather than in an effect on `preference`, so the one
+   * thing that reaches storage is a choice the driver actually made -- never a
+   * default echoed back over a value some other tab has just written.
+   */
+  const choosePreference = useCallback((next: Preference) => {
+    setPreference(next);
+    writePreference(deviceStorage(), next);
   }, []);
 
   /**
@@ -1094,9 +1211,17 @@ export default function App() {
    * A map rather than a callback because `LotList` is memoised: a fresh closure
    * every render would defeat that memo on every mouse move across the list,
    * which is the exact cost the memo was added to avoid. Built over the rows
-   * that actually render a card -- `listed`, plus the pinned lot when there is
-   * one -- and not the whole 1,075-lot roster, because a card is the only
-   * thing that shows a confidence grade.
+   * that actually render a card -- the head, the nearby tail once it is open,
+   * plus the pinned lot when there is one -- and not the whole 1,075-lot
+   * roster, because a card is the only thing that shows a confidence grade.
+   *
+   * The tail is in here **only while it is open**, which is the same bargain
+   * the expander itself is: a closed tail draws no cards, so paying for up to
+   * 156 `supportForLot` lookups to describe them would be work for nothing. It
+   * has to be in here when it *is* open, though, for the reason the map card is
+   * below -- a tail card left to the `?? 0` default would read "Low - thin"
+   * beside a head card reading "High - 5 weeks" for the same arrival, which is
+   * the list quietly knowing less about a lot the further down it sits.
    *
    * The map card's row belongs in here rather than being left to the `?? 0`
    * default: `0` is `confidence.ts`'s thinnest evidence ("not watched at this
@@ -1108,9 +1233,13 @@ export default function App() {
    * nothing and the gate stays one line.
    */
   const supportById = useMemo(() => {
-    const carded = mapCard === null ? listed : [...listed, mapCard];
+    const carded = [
+      ...listed.head,
+      ...(nearbyOpen ? listed.nearby : []),
+      ...(mapCard === null ? [] : [mapCard]),
+    ];
     return new Map(carded.map((r) => [r.id, supportForLot(week, r.lot, arrivalTs)]));
-  }, [listed, mapCard, week, arrivalTs]);
+  }, [listed, nearbyOpen, mapCard, week, arrivalTs]);
 
   /**
    * The destination is somewhere this app cannot answer for.
@@ -1234,10 +1363,18 @@ export default function App() {
    * demotes the same rows in the ordering for the same reason and argues it at
    * length; this is the badge half of that, and `notUpdating` is shared so the
    * two can never disagree about which lots they mean.
+   *
+   * Read off the head alone, and not off the head plus the nearby tail. That is
+   * not a judgment call: `rankLots` sorts every row with a forecast above every
+   * row without one, and the tail is the ranking continued past the head, so a
+   * tail row can only carry a forecast if some head row already does. The two
+   * spellings pick the same lot in every reachable state, and the shorter one
+   * says what the badge means -- the crown belongs to the list, and cannot
+   * appear on a row that is off screen until the driver opens the expander.
    */
   const bestId = withheld
     ? null
-    : (listed.find((r) => r.probability !== null && !notUpdating(r.lot))?.id ?? null);
+    : (listed.head.find((r) => r.probability !== null && !notUpdating(r.lot))?.id ?? null);
 
   /**
    * A lot was chosen, in the list or on the map. One path for both, so the
@@ -1360,6 +1497,42 @@ export default function App() {
   const locate = <LocateButton geo={geo} onClick={request} lang={lang} />;
   const langToggle = <LangToggle lang={lang} onChange={setLang} />;
 
+  /**
+   * Whether the sheet header has room for the preference row -- everywhere
+   * except the phone's `peek`.
+   *
+   * `peek` is the glance state: `sheet.ts` calls it "just the search bar and a
+   * hint of the list", and derives it from the viewport so that "a short phone
+   * in landscape still gets a usable peek instead of a sheet that swallows the
+   * map". The arithmetic is unforgiving. The grip is 44 px and the rest of this
+   * header is 178, which left about 64 px of list at `peek` -- the hint. A
+   * fourth row takes the header to 232 and the body to 8-12 px, which is a hint
+   * of nothing; at 375x812 it fits exactly, and at 375x667 and on notched
+   * phones (where `--safe-bottom` is padding inside the sheet's own height) the
+   * row falls off the bottom of the screen.
+   *
+   * The two obvious fixes both defeat something. Growing `peek` to fit spends
+   * the map's share, which is the one thing that constant exists to protect.
+   * Moving the row into the body puts an "what am I asking for" control on the
+   * "here is what we found" side of a line this app draws deliberately -- it
+   * belongs beside the arrival picker, which is where it is.
+   *
+   * So the row keeps its place and skips the one state with no room for it. The
+   * cost is real and accepted: at `peek` a driver cannot see which preference
+   * is in force. `peek` is a glance at the map, and changing what you are
+   * asking for is a deliberate act that can fairly require opening the sheet.
+   * **Not** compensated for by naming the preference in the list heading --
+   * that would re-spend the pixels this saves, and put a lean into the one line
+   * whose job is saying whether a forecast stands behind the order at all.
+   *
+   * Rendered rather than hidden in CSS, so at `peek` the control is absent from
+   * the accessibility tree as well as from the layout -- and so the header's
+   * budget can be asserted against `snapHeights` from the rows actually in it.
+   * See `tests/preferencePicker.test.tsx`, which pins the geometry at 375x667,
+   * 375x812 and 390x844 rather than pinning which component rendered.
+   */
+  const roomForPreference = desktop || snap !== "peek";
+
   const header = (
     <>
       <div className="head-row">
@@ -1369,13 +1542,26 @@ export default function App() {
         <FreshnessBadge ageMin={ageMin} expired={forecastExpired} lang={lang} />
       </div>
       {desktop && search}
+      {/* The two halves of "what am I asking for", in the order a driver asks
+          them: when I get there, and what I would rather trade. Both sit in the
+          header, above the list, because the list is the answer to them --
+          which is also why they share the arrival picker's own guard. With no
+          forecast in hand there is nothing to rank and nothing to lean.
+          The second one also waits for the sheet to be open past `peek`, which
+          is a question of pixels rather than of meaning -- see
+          `roomForPreference`. */}
       {grid !== null && (
-        <ArrivalPicker
-          value={arrivalTs}
-          nowSec={nowSec}
-          onChange={setArrivalTs}
-          lang={lang}
-        />
+        <>
+          <ArrivalPicker
+            value={arrivalTs}
+            nowSec={nowSec}
+            onChange={setArrivalTs}
+            lang={lang}
+          />
+          {roomForPreference && (
+            <PreferencePicker value={preference} onChange={choosePreference} lang={lang} />
+          )}
+        </>
       )}
       {/* The locate button is an icon, so its state has to be said somewhere a
           screen reader will announce it. The visible copy is the notice below. */}
@@ -1572,7 +1758,17 @@ export default function App() {
               week-sourced probability *is* a forecast for the chosen arrival,
               and the ranking really was computed from it, so the same test
               governs both -- the heading and the sentence above it can never
-              disagree about whether anything was ranked. */}
+              disagree about whether anything was ranked.
+
+              **It does not name the preference, now that the ordering has a
+              second input.** The two say different things: this heading is the
+              honesty guard over whether a *forecast* stands behind the order at
+              all (against `nearbyCarParks`, which is what the list is when the
+              reading has expired), while the preference is a lean, and the
+              control naming it is a few lines above in the same surface. Adding
+              it here would put the same word in two places, need a variant for
+              each branch, and blunt the one distinction the heading exists to
+              draw. */}
           <h2 className="list-head">
             {forecastExpired && !fromHistory ? s.nearbyCarParks : s.rankedForArrival}
           </h2>
@@ -1590,9 +1786,9 @@ export default function App() {
               `confidenceWeekTemplate` and `confidenceWeeksTemplate`; zh's two
               are the same text, so the branch is a no-op there. "1 car parks
               are hidden" is common on the unknown line especially. */}
-          {(listed.length === 0 || hidden.none > 0 || hidden.unknown > 0) && filters.length > 0 && (
+          {(listed.head.length === 0 || hidden.none > 0 || hidden.unknown > 0) && filters.length > 0 && (
             <Notice tone="info" testId="filter-hidden" role="status">
-              {listed.length === 0 && <>{s.filterNoMatch} </>}
+              {listed.head.length === 0 && <>{s.filterNoMatch} </>}
               {hidden.none > 0 && (
                 <span data-testid="filter-hidden-none">
                   {fillTemplate(
@@ -1612,7 +1808,7 @@ export default function App() {
             </Notice>
           )}
           <LotList
-            rows={listed}
+            rows={listed.head}
             lang={lang}
             baseDataTs={artifacts.grid.baseDataTs}
             ageMin={ageMin ?? 0}
@@ -1624,6 +1820,69 @@ export default function App() {
             onSelect={selectLot}
             onHover={setHoverLotId}
           />
+          {/* The car park the owner could see on the map and could not open.
+              The cap picks twenty rows by expected *cost*, so a lot two streets
+              away and visibly free loses that race on price alone and simply is
+              not there -- "I always see lots around that's green but didn't see
+              it in the list if I'd like to know the detail about it."
+
+              **In the body, under the list, and never in the header.** The
+              header is the "what am I asking for" surface and has 13 px of
+              slack at 375x667 (see `roomForPreference` and
+              `tests/preferencePicker.test.tsx`); this is part of the answer,
+              not part of the question, and it costs that budget nothing.
+
+              Between the two lists rather than below both, which is a decision
+              about the finger that opened it: expanded, the control stays where
+              it was tapped, so collapsing 140 rows is a scroll back to a known
+              place instead of a hunt past the bottom of them.
+
+              The APG disclosure pattern: `aria-expanded` on the button and the
+              revealed list immediately after it, with no `aria-controls` --
+              which would have to name an id that does not exist while the tail
+              is closed, and the tail is closed precisely so that nothing of it
+              is built. */}
+          {listed.nearby.length > 0 && (
+            <>
+              <button
+                type="button"
+                className="nearby-toggle"
+                aria-expanded={nearbyOpen}
+                data-testid="nearby-toggle"
+                onClick={() => setNearbyOpen((open) => !open)}
+              >
+                {nearbyOpen
+                  ? s.nearbyFewer
+                  : fillTemplate(
+                      listed.nearby.length === 1 ? s.nearbyMoreOneTemplate : s.nearbyMoreTemplate,
+                      { n: listed.nearby.length },
+                    )}
+              </button>
+              {/* Rendered only when open, which is the entire point: the tail
+                  runs to 156 rows at a dense Taipei destination, and a phone
+                  pays for what the driver opened and nothing else. Hiding it in
+                  CSS instead would lay every one of those cards out anyway, and
+                  leave a screen reader walking through a list the page says is
+                  collapsed. */}
+              {nearbyOpen && (
+                <LotList
+                  rows={listed.nearby}
+                  lang={lang}
+                  label={s.nearbyListLabel}
+                  testId="nearby-list"
+                  baseDataTs={artifacts.grid.baseDataTs}
+                  ageMin={ageMin ?? 0}
+                  horizonFromReadingMin={horizonFromReadingMin}
+                  supportById={supportById}
+                  fromHistory={fromHistory}
+                  bestId={bestId}
+                  selectedId={selectedLotId}
+                  onSelect={selectLot}
+                  onHover={setHoverLotId}
+                />
+              )}
+            </>
+          )}
         </>
       )}
     </Shell>
