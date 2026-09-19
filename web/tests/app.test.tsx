@@ -2086,6 +2086,52 @@ describe("the nearby expander", () => {
     expect(headIds()).toEqual(HEAD_IDS);
   });
 
+  it("forgets the opened tail when the driver names a new destination", async () => {
+    stubRoster(NEIGHBOURHOOD);
+    await renderLocated();
+    fireEvent.click(toggle());
+    expect(tailIds()).toEqual(TAIL_IDS);
+
+    // A second destination a kilometre further north. The same car parks are
+    // still around it, so the *control* survives -- it is the opened state
+    // that has to be gone, and this is what tells the two apart.
+    const elsewhere = { lat: HERE.lat + 1000 / M_PER_DEG_LAT, lon: HERE.lon };
+    Object.defineProperty(navigator, "geolocation", {
+      value: {
+        getCurrentPosition: (ok: (p: { coords: { latitude: number; longitude: number } }) => void) =>
+          ok({ coords: { latitude: elsewhere.lat, longitude: elsewhere.lon } }),
+      },
+      configurable: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: t("en").useMyLocation }));
+
+    // The destination really did move, or this test is about nothing.
+    await waitFor(() => expect(headIds()).not.toEqual(HEAD_IDS));
+
+    // Asserted on **what renders**, not on the flag. `nearbyOpen === false`
+    // would hold just as well of a list that had stopped reading the flag and
+    // never drew a tail at all -- which is what the `tailIds()` line at the
+    // top of this test rules out, and why the two belong in one case.
+    expect(screen.queryByTestId("nearby-list")).toBeNull();
+    expect(screen.getAllByTestId("lot-row")).toHaveLength(LIST_LIMIT);
+    expect(toggle()).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("keeps the tail open across a filter press, which changes no destination", async () => {
+    // The other half of the rule above, and the reason it is written as "reset
+    // with the destination" rather than "reset when anything moves": pressing a
+    // chip narrows the neighbourhood the driver already asked to see. Closing
+    // the list under them there would answer a question they did not ask.
+    stubRoster(NEIGHBOURHOOD.map((lot) => ({ ...lot, m: 40 })));
+    await renderLocated();
+    fireEvent.click(toggle());
+    expect(tailIds()).toEqual(TAIL_IDS);
+
+    fireEvent.click(screen.getByTestId("filter-scooter"));
+    expect(screen.getByTestId("nearby-list")).toBeInTheDocument();
+    expect(tailIds()).toEqual(TAIL_IDS);
+  });
+
   it("names the tail's list, so two lists on one page are told apart", async () => {
     stubRoster(NEIGHBOURHOOD);
     await renderLocated();

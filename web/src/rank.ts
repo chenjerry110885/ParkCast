@@ -636,6 +636,16 @@ export const UNKNOWN_RESERVE = 5;
  * | **1.5 km** | **19 min** | **74** | **148** | **156** |
  * | 2.0 km | 25 min | 126 | 245 | 254 |
  *
+ * What those figures are *of* matters more than their digits, so: the count of
+ * car parks within the radius of one destination, over 120 destinations taken
+ * from lot positions in `web/.dev-artifacts/lots.json` (2026-09-18, 1,089
+ * lots), evenly spaced through the roster array. Drawing the destinations from
+ * lots rather than from a grid is deliberate and makes the numbers *high* --
+ * a point where a car park already stands is a point car parks cluster around
+ * -- which is the conservative side to be on for a rendering budget. A
+ * different sample moves the median by single digits and the worst case by
+ * about a lot; it does not move the conclusion.
+ *
  * The radius is therefore not the constraint; rendering is. Laying out 156
  * cards at once is exactly the cost this project has already been told about,
  * which is why everything past the cap sits in `ListRows.nearby` behind an

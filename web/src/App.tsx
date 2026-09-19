@@ -524,6 +524,35 @@ export default function App() {
   const [selected, setSelected] = useState<{ id: string; fromMap: boolean } | null>(null);
   const selectedLotId = selected?.id ?? null;
   /**
+   * Whether the driver has asked for the rest of the neighbourhood -- the
+   * nearby expander below the ranked list. See `listRows` and `listed`.
+   *
+   * The whole reason that tail sits behind a control rather than simply being
+   * appended: at `NEARBY_RADIUS_M` a Taipei destination has a median of 74 car
+   * parks around it and up to 156, and laying 156 cards out on a phone is a
+   * cost this project has already been told about once. Closed, the page
+   * renders exactly the twenty rows it rendered before; open, it renders what
+   * was asked for.
+   *
+   * **Reset with the destination, beside `selected`, and for the same reason.**
+   * Opening the tail is a decision about *this place* -- "show me everything
+   * around here" -- and not a standing opinion about how long lists should be.
+   * Carried across a search it would turn one deliberate act in a quiet
+   * neighbourhood into an involuntary 156-card render in Xinyi, which is the
+   * exact cost the expander exists to prevent, arriving by the back door. The
+   * design rests on a phone paying only for what the driver opened; this was
+   * the one path where they would pay for something they opened somewhere
+   * else. See `pickDestination`, which is the single funnel all three ways of
+   * naming a destination go through.
+   *
+   * A filter chip deliberately does *not* reset it. Pressing 機車 does not
+   * change where the driver is going; it narrows the same neighbourhood they
+   * already asked to see, and the tail narrows with it (both are cut from
+   * `matching`). Closing the list under them there would be answering a
+   * question they did not ask.
+   */
+  const [nearbyOpen, setNearbyOpen] = useState(false);
+  /**
    * Which of 機車 / 充電 the driver is filtering the list on. Empty is the
    * unfiltered screen, and the one this app opens in.
    *
@@ -922,11 +951,20 @@ export default function App() {
    * second later would silently move the destination off the chosen point. A
    * failure the user has routed around stops being worth reporting, and the
    * selection belongs to the old destination, not this one.
+   *
+   * So does the opened tail. "Show me everything around here" is a decision
+   * about a place, and the place has just changed; leaving it open would spend
+   * the render budget the expander exists to protect, on a request the driver
+   * made about somewhere else. Reset here rather than in an effect on
+   * `destination` because this is the single funnel -- search, the locate
+   * button (`useGeolocation(pickDestination)`) and a tap on the map all arrive
+   * through it -- so the two resets sit together and cannot drift apart.
    */
   const pickDestination = useCallback((at: LatLon) => {
     abandonRef.current?.();
     clearFailureRef.current?.();
     setSelected(null);
+    setNearbyOpen(false);
     setDestination(at);
   }, []);
 
@@ -1026,25 +1064,6 @@ export default function App() {
    * `listRows`.
    */
   const listed = useMemo(() => listRows(matching, LIST_LIMIT), [matching]);
-
-  /**
-   * Whether the driver has asked for the rest of the neighbourhood.
-   *
-   * The whole reason the tail is behind a control rather than simply appended:
-   * at 1.5 km a Taipei destination has a median of 74 car parks around it and
-   * up to 156, and laying 156 cards out on a phone is a cost this project has
-   * already been told about once. Closed, the page renders exactly the twenty
-   * rows it rendered before; open, it renders what was asked for.
-   *
-   * **Not reset when the destination or the filters move.** It is a standing
-   * answer to "how much of the neighbourhood do you want to see?", not a fact
-   * about one search, and a driver who wants the wide view at every destination
-   * should not have to ask again at each one. The cost of the other choice is
-   * the more visible one: re-collapsing the list under a driver who opened it
-   * is the app taking a decision back. What a new destination *does* change is
-   * the count on the control, which is recomputed with everything else.
-   */
-  const [nearbyOpen, setNearbyOpen] = useState(false);
 
   /**
    * How many car parks the filter took out of the list, split by why.
