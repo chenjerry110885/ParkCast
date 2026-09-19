@@ -17,6 +17,11 @@
  * charges a lot for the risk of arriving to find nothing, and for everything
  * that failure then forces. See `rankLots`.
  *
+ * The two prices in that formula are the one thing a driver can move: see
+ * `Preference` and `PREFERENCES`, which hold three pairs of them. The default
+ * pair is `WALK_VALUE` / `DELAY_VALUE` exactly, so a driver who never opens the
+ * control gets the ranking this module produced before preferences existed.
+ *
  * `cost` is a *sort key*, not something the UI shows. The spec is explicit that
  * P, walking time and price appear as three separate visible columns and are
  * never collapsed into a single opaque score -- users do not trust magic
@@ -48,6 +53,10 @@ import type { Lot, Price } from "./types";
  *
  * Only the *ratios* between these five constants change any ranking; scaling
  * all of them together changes nothing.
+ *
+ * This is the **Balanced** price, and the one the app shipped with. The other
+ * two presets move it -- NT$2 for Cheaper, NT$12 for Closer -- and nothing else
+ * in this file moves with it except `DELAY_VALUE`'s floor. See `PREFERENCES`.
  */
 export const WALK_VALUE = 5;
 
@@ -57,6 +66,12 @@ export const WALK_VALUE = 5;
  * wherever the trip actually ends up (`DRIVE_MIN_PER_KM`). Same NT$5/min
  * out-of-vehicle rate as `WALK_VALUE`, and the same reasoning -- see there
  * for why the two are priced separately instead of sharing one constant.
+ *
+ * A preference can raise this but never lower it: it is the **floor** in
+ * `DELAY_VALUE = max(5, WALK_VALUE)`, which is what stops a driver who asked
+ * for a cheaper car park from quietly buying a weaker availability signal.
+ * See `PREFERENCES` for why the rule has that shape and what was measured to
+ * settle it.
  */
 export const DELAY_VALUE = 5;
 
@@ -152,6 +167,84 @@ export const RELIABLE_P = 0.9;
  */
 export const MEDIAN_PRICE_FALLBACK = 77.5;
 
+/* ------------------------------------------------------------------ *
+ * What the driver is asking of the ranking. Not a second scoring
+ * scheme -- just a different price for a minute on foot, which is a
+ * number the cost model already had and has already been calibrated
+ * against the live roster.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Which way a driver wants the ranking to lean.
+ *
+ * Comparatives on purpose. "Cheaper" and "closer" describe a lean, not a
+ * promise: under every one of them the ranker still puts a likely space above
+ * an unlikely bargain, and neither the copy nor this type should suggest that
+ * choosing one buys a guarantee about the car park at the top of the list.
+ */
+export type Preference = "cheaper" | "balanced" | "closer";
+
+/**
+ * What a driver who has never touched the control is ranked by -- and what a
+ * stored value we cannot read falls back to (see `preference.ts`).
+ *
+ * Balanced is the pair the app shipped with, so this default is not merely a
+ * sensible choice among three: it is the guarantee that this whole feature
+ * changes nothing for a driver who ignores it.
+ */
+export const DEFAULT_PREFERENCE: Preference = "balanced";
+
+/** The floor rule, in one place: a preference may raise the price of a delay, never lower it. */
+function pricesFor(walk: number): { walk: number; delay: number } {
+  return { walk, delay: Math.max(DELAY_VALUE, walk) };
+}
+
+/**
+ * The two prices each preference pays for a minute, in NT$.
+ *
+ * `delay` is not a free parameter. It is `max(DELAY_VALUE, walk)` -- floor
+ * coupled -- and that rule is **measured, not reasoned**. It looks arbitrary
+ * next to the two obvious alternatives, and both of those were tried first,
+ * against the live 1,090-lot roster with a harness that reproduced
+ * `scripts/probe-ranker.py`'s shipped figures exactly. An "inversion" below is
+ * a car park the model thinks is likely full ranked above one it thinks is
+ * likely free:
+ *
+ * | Scheme | walk | delay | Inversions | Worst | Destinations, of 1,090, whose top 20 holds a lot both unlikely and over 1.5 km away |
+ * |---|---|---|---|---|---|
+ * | Cheaper, `delay` pinned at 5 | 2 | 5 | 0 | -- | 19 |
+ * | Balanced (shipped) | 5 | 5 | 11 | #3 | 299 |
+ * | Closer, `delay` pinned at 5 | 12 | 5 | **35** | **#2** | **963** |
+ * | Cheaper, `delay` coupled symmetrically | 2 | 2 | **19** | **#2** | 618 |
+ * | **Closer, floor-coupled** | **12** | **12** | **8** | **#6** | **173** |
+ *
+ *   - **Pinning the delay at 5 makes Closer unsafe.** Every inversion has the
+ *     shape *near, cheap, unlikely* beating *far, expensive, likely*, so raising
+ *     the price of walking penalises the **far** lot -- which is the reliable
+ *     one -- while the risky lot sits at the destination paying nothing.
+ *   - **Coupling the two symmetrically repairs Closer and breaks Cheaper.** A
+ *     delay at NT$2 a minute makes being turned away cost almost nothing, and
+ *     Cheaper goes from 0 inversions to 19.
+ *   - **The floor satisfies both.** Closer at 12/12 measures *safer than the
+ *     shipped ranker* -- 8 inversions against 11, worst #6 against #3 -- while
+ *     still changing the top pick for 29.8% of destinations, so it loses none
+ *     of its point.
+ *
+ * The invariant this protects is the app's central claim: it ranks by how
+ * likely you are to get a space. A preference is allowed to change what the
+ * walk and the fare are worth beside that; it is not allowed to erode it. If a
+ * later sweep finds an inversion at #1, the answer is to narrow the range of
+ * these presets, not to widen what counts as acceptable.
+ *
+ * The score built from these numbers is a sort key and is still never shown.
+ * The control names a preference, not a number -- no card gains a "NT$142".
+ */
+export const PREFERENCES: Record<Preference, { walk: number; delay: number }> = {
+  cheaper: pricesFor(2),
+  balanced: pricesFor(WALK_VALUE),
+  closer: pricesFor(12),
+};
+
 /**
  * One ranked candidate. Every component of the score is here separately and on
  * purpose (see the module comment): the list renders them as columns.
@@ -219,6 +312,17 @@ export interface RankInput {
    * only "we have a number" and "we do not".
    */
   probability: (lotIndex: number, horizonMin: number) => number | null;
+  /**
+   * Which way the driver asked the ranking to lean. Omitted means
+   * `DEFAULT_PREFERENCE`, which is Balanced, which is the pair of prices this
+   * module used before the option existed -- so every existing caller, and
+   * every test written before this, keeps the ordering it had.
+   *
+   * Optional rather than required for exactly that reason: a caller that has
+   * no opinion should not have to state one, and should not be able to change
+   * today's behaviour by forgetting to.
+   */
+  preference?: Preference;
 }
 
 /** What a parsed fare costs us, and what we can honestly say about it. */
@@ -367,15 +471,21 @@ function group(row: Ranked): number {
  * most `1 - RELIABLE_P` for exactly the lots this can happen to, so it can move
  * that lot's score by no more than a tenth of one circling penalty. Paying for a
  * second pass to remove a rounding error would be the wrong trade.
+ *
+ * `delay` is the preference's price for a minute lost, and `certain` already
+ * carries its price for a minute walked, so which lot the ranking falls back to
+ * can itself change with the preference -- as it should: the driver's own
+ * arithmetic is what decides where they would go instead.
  */
 function fallbackCost(
   scored: readonly { probability: number | null; certain: number; position: LatLon }[],
+  delay: number,
 ): { cost: number; at: LatLon | null } {
   let reliable: { cost: number; at: LatLon | null } = { cost: Infinity, at: null };
   let anyForecast: { cost: number; at: LatLon | null } = { cost: Infinity, at: null };
   for (const s of scored) {
     if (s.probability === null) continue;
-    const simple = s.certain + (1 - s.probability) * CIRCLING_PENALTY_MIN * DELAY_VALUE;
+    const simple = s.certain + (1 - s.probability) * CIRCLING_PENALTY_MIN * delay;
     if (simple < anyForecast.cost) anyForecast = { cost: simple, at: s.position };
     if (s.probability >= RELIABLE_P && simple < reliable.cost) {
       reliable = { cost: simple, at: s.position };
@@ -434,8 +544,19 @@ function fallbackCost(
  * A car park whose feed has stopped sits between the two: it keeps its number
  * and its row, but sorts below every lot we have actually heard from. See
  * `group`, which is where the three-way ordering is argued.
+ *
+ * `input.preference` changes two numbers in the arithmetic above and nothing
+ * else -- not the grouping, not the fallback rule, not what any row reports.
+ * Omitting it ranks by Balanced, which is the pair of prices this function used
+ * before the option existed, so the default is a promise rather than a taste:
+ * the driver who never opens the control sees exactly what they saw before.
  */
 export function rankLots(input: RankInput): Ranked[] {
+  // The only thing a preference changes: what a minute on foot costs, and what
+  // a minute lost to a failed attempt costs. Every other constant, and the
+  // shape of the formula, is the same under all three. See `PREFERENCES`.
+  const price = PREFERENCES[input.preference ?? DEFAULT_PREFERENCE];
+
   const scored = input.lots.map((lot, index) => {
     const position = { lat: lot.y, lon: lot.x };
     const meters = haversineMeters(input.destination, position);
@@ -444,17 +565,17 @@ export function rankLots(input: RankInput): Ranked[] {
     const probability = usableProbability(input.probability(index, input.horizonMin));
     // What parking *here* costs once you are in: the whole story for a lot whose
     // probability is unknown, and the sort key within that group.
-    const certain = walkMin * WALK_VALUE + money.fee;
+    const certain = walkMin * price.walk + money.fee;
     return { lot, index, position, meters, walkMin, money, probability, certain };
   });
 
   // One fallback for the whole ranking, found before any lot is scored.
-  const fallback = fallbackCost(scored);
+  const fallback = fallbackCost(scored, price.delay);
   // NT$ to drive from a lot that turned you away to the fallback lot.
   const drive = (from: LatLon): number =>
     fallback.at === null
       ? 0
-      : (DRIVE_MIN_PER_KM * DELAY_VALUE * haversineMeters(from, fallback.at)) / 1000;
+      : (DRIVE_MIN_PER_KM * price.delay * haversineMeters(from, fallback.at)) / 1000;
 
   const rows = scored.map((s) => {
     const row: Ranked = {
@@ -472,7 +593,7 @@ export function rankLots(input: RankInput): Ranked[] {
           ? null
           : s.probability * s.certain +
             (1 - s.probability) *
-              (CIRCLING_PENALTY_MIN * DELAY_VALUE + drive(s.position) + fallback.cost),
+              (CIRCLING_PENALTY_MIN * price.delay + drive(s.position) + fallback.cost),
     };
     return { row, certain: s.certain };
   });

@@ -8,11 +8,13 @@ import {
   DELAY_VALUE,
   DRIVE_MIN_PER_KM,
   EXPECTED_HOURS,
+  PREFERENCES,
   UNKNOWN_RESERVE,
   WALK_VALUE,
   listRows,
   notUpdating,
   rankLots,
+  type Preference,
 } from "../src/rank";
 
 const lot = (id: string, lat: number, p: unknown) =>
@@ -544,6 +546,161 @@ describe("rankLots: WALK_VALUE and DELAY_VALUE price independently", () => {
       expect(failingRow.cost).not.toBeCloseTo(expectedFailingIfSwapped, 6);
     } finally {
       rmSync(genPath, { force: true });
+    }
+  });
+});
+
+/**
+ * The three preferences, and the floor that keeps them safe.
+ *
+ * A preference is not a new formula: it is a different price for a minute of
+ * walking, which is a number the cost model already had. What is not obvious --
+ * and what these tests pin -- is the second half of the rule,
+ * `DELAY_VALUE = max(5, WALK_VALUE)`. Both halves overturned a simpler design
+ * when they were measured against the live 1,090-lot roster (spec section 5):
+ *
+ *   - **Pinning `DELAY_VALUE` at 5** makes *Closer* unsafe: 35 availability
+ *     inversions against Balanced's 11, the worst reaching position #2, because
+ *     raising the price of walking penalises the **far** lot -- which is the
+ *     reliable one -- while the risky lot sits at the destination paying nothing.
+ *   - **Coupling the two symmetrically** repairs Closer and breaks *Cheaper*: 19
+ *     inversions where pinning gave 0, because a delay priced at NT$2 a minute
+ *     makes being turned away cost almost nothing.
+ *
+ * So the failure branch's price is checked here as carefully as the walk's, and
+ * each arithmetic assertion carries a paired `.not` against exactly what the
+ * overturned design would have produced.
+ */
+describe("rankLots: the three preferences", () => {
+  const priced = (n: number) => ({ k: "exact", lo: n, hi: n });
+  const lotAt = (id: string, lat: number, lon: number, hourly: number) =>
+    ({ i: 0, id, n: id, a: "中正區", y: lat, x: lon, c: 50, t: "民營停車場", p: priced(hourly) }) as never;
+  /** The latitude `km` kilometres north of the destination, on its meridian. */
+  const north = (km: number) => at.lat + km / 111.195;
+
+  it("prices the delay at the walk's value only when that is the higher of the two", () => {
+    // DELAY_VALUE = max(5, WALK_VALUE). Never below 5, so a preference cannot
+    // make being turned away cheap; above it when walking is dear, so making the
+    // walk expensive does not relatively cheapen failure. Both halves were
+    // measured: pinning breaks Closer, symmetric coupling breaks Cheaper.
+    expect(PREFERENCES.cheaper).toEqual({ walk: 2, delay: 5 });
+    expect(PREFERENCES.balanced).toEqual({ walk: 5, delay: 5 });
+    expect(PREFERENCES.closer).toEqual({ walk: 12, delay: 12 });
+    // Balanced *is* the shipped pair, which is what makes the regression below
+    // possible at all: it is not merely equal to 5/5 by coincidence.
+    expect(PREFERENCES.balanced).toEqual({ walk: WALK_VALUE, delay: DELAY_VALUE });
+  });
+
+  /**
+   * A roster wide enough that a change of order would show: 40 car parks spread
+   * over ~2.7 km and NT$10-66 an hour, at a spread of probabilities, with every
+   * seventh carrying no forecast at all. Deterministic -- index arithmetic, not
+   * a random seed -- so a failure is the same failure on every machine.
+   */
+  const roster = Array.from({ length: 40 }, (_unused, k) =>
+    lotAt(`lot-${k}`, north(((k * 37) % 40) * 0.07), 121.52 + ((k * 19) % 40) * 0.0004, 10 + ((k * 13) % 9) * 7),
+  );
+  const rosterInput = {
+    destination: at,
+    horizonMin: 15,
+    lots: roster,
+    probability: (i: number) => (i % 7 === 3 ? null : ((i * 17) % 100) / 100),
+  };
+
+  it("ranks identically to the shipped constants when balanced", () => {
+    // The regression that matters most: a driver who never opens the control
+    // must see no change whatsoever. Compared against the un-preferenced call,
+    // so it also pins the default.
+    expect(rankLots({ ...rosterInput, preference: "balanced" })).toEqual(rankLots(rosterInput));
+  });
+
+  it("on a roster the other two presets do reorder, so that equality means something", () => {
+    // Without this, the test above would pass just as happily on a fixture no
+    // preference could ever reorder -- three lots in a line, say -- and would be
+    // proving nothing about Balanced.
+    const balanced = rankLots(rosterInput).map((r) => r.id);
+    expect(rankLots({ ...rosterInput, preference: "cheaper" }).map((r) => r.id)).not.toEqual(balanced);
+    expect(rankLots({ ...rosterInput, preference: "closer" }).map((r) => r.id)).not.toEqual(balanced);
+  });
+
+  it("gives three different orders for the same three car parks", () => {
+    // All three are certain to have a space, so each score is exactly its walk
+    // term and the arithmetic is visible:
+    //
+    //            walk   fare   cheaper (2)   balanced (5)   closer (12)
+    //   door      0 min   120          120            120           120
+    //   middling  8 min    70           86            110           166
+    //   far      20 min    25           65            125           265
+    //
+    // Three presets, three different orders, and every pair separated by at
+    // least NT$5 -- so this fails on a real change of behaviour, not on rounding.
+    const lots = [
+      lotAt("at-the-door", at.lat, 121.52, 60),
+      lotAt("middling", north(0.6), 121.52, 35),
+      lotAt("far-and-cheap", north(1.56), 121.52, 12.5),
+    ] as never;
+    const order = (preference: Preference) =>
+      rankLots({ destination: at, horizonMin: 15, lots, preference, probability: () => 1 }).map((r) => r.id);
+
+    expect(order("cheaper")).toEqual(["far-and-cheap", "middling", "at-the-door"]);
+    expect(order("balanced")).toEqual(["middling", "at-the-door", "far-and-cheap"]);
+    expect(order("closer")).toEqual(["at-the-door", "middling", "far-and-cheap"]);
+  });
+
+  it("charges the walk at the preset's price and the failure branch at its delay price", () => {
+    // Two lots: one certain (p = 1, so its cost is exactly the walk term, and it
+    // is also the ranking's only reliable fallback) and one certain to fail
+    // (p = 0, so its own walk and fare weigh nothing and its cost is exactly the
+    // failure branch). That separates the two prices completely.
+    const reliableAt = { lat: north(0.2), lon: 121.52 };
+    const failingAt = { lat: north(2), lon: 121.52 };
+    const lots = [
+      lotAt("reliable", reliableAt.lat, reliableAt.lon, 40),
+      lotAt("failing", failingAt.lat, failingAt.lon, 40),
+    ] as never;
+    const km = haversineMeters(failingAt, reliableAt) / 1000;
+
+    // The second number is the delay price the design this preset overturned
+    // would have used: symmetric coupling for Cheaper, pinning for Closer.
+    const cases = [
+      { preference: "cheaper", overturnedDelay: 2 },
+      { preference: "closer", overturnedDelay: 5 },
+    ] as const;
+
+    for (const { preference, overturnedDelay } of cases) {
+      const values = PREFERENCES[preference];
+      const out = rankLots({
+        destination: at, horizonMin: 15, lots, preference,
+        probability: (i) => (i === 0 ? 1 : 0),
+      });
+      const reliable = out.find((r) => r.id === "reliable")!;
+      const failing = out.find((r) => r.id === "failing")!;
+      expect(reliable.hourly).not.toBeNull();
+
+      // Computed from the row's own reported `walkMin`/`hourly` rather than from
+      // `.cost`, so the check cannot be fooled by the formula it is checking.
+      const certain = reliable.walkMin * values.walk + reliable.hourly! * EXPECTED_HOURS;
+      expect(reliable.cost).toBeCloseTo(certain, 6);
+      // Discriminating half: what an inert preference -- one that took the
+      // argument and went on using the shipped constant -- would have produced.
+      expect(reliable.cost).not.toBeCloseTo(reliable.walkMin * WALK_VALUE + reliable.hourly! * EXPECTED_HOURS, 6);
+
+      const delayed = CIRCLING_PENALTY_MIN + DRIVE_MIN_PER_KM * km;
+      expect(failing.cost).toBeCloseTo(values.delay * delayed + certain, 6);
+      // Discriminating half: what the overturned design would have charged for
+      // being turned away. This is the assertion that holds the floor in place.
+      expect(failing.cost).not.toBeCloseTo(overturnedDelay * delayed + certain, 6);
+    }
+  });
+
+  it("never prices a delay below the shipped DELAY_VALUE, whatever the preset", () => {
+    // The invariant in one line: a preference may make walking dearer, and may
+    // make being turned away dearer with it, but may never make being turned
+    // away cheaper than it is today. That is what stops a preference from
+    // quietly eroding the availability signal it is not supposed to touch.
+    for (const values of Object.values(PREFERENCES)) {
+      expect(values.delay).toBeGreaterThanOrEqual(DELAY_VALUE);
+      expect(values.delay).toBe(Math.max(DELAY_VALUE, values.walk));
     }
   });
 });
