@@ -296,7 +296,6 @@ def test_a_neighbourhood_nobody_reported_is_missing_not_full(conn):
 # --- the skew test ----------------------------------------------------------
 
 
-@pytest.mark.xfail(reason="trainset.rows arrives in Task 3", strict=False)
 def test_training_and_serving_build_the_identical_row(conn):
     """The reason `features.row` exists at all.
 
@@ -306,9 +305,13 @@ def test_training_and_serving_build_the_identical_row(conn):
     This asserts the trainer has not grown its own copy -- not that the two are
     similar, that they are the same list.
 
-    Deliberately not deleted while `trainset` is unwritten: an xfail that turns
-    into a pass is a signal, where a test added later is one somebody has to
-    remember.
+    Written in Task 2 as an xfail, before `trainset` existed, and un-xfailed in
+    Task 3 when it did: an xfail that turns into a pass is a signal, where a
+    test added later is one somebody has to remember.
+
+    `exclude_frozen=False` is the serving path's own setting -- `liveness` has
+    already withheld the frozen lots there -- and it is what makes this a
+    comparison of the two paths rather than of two filters.
     """
     from parkcast import trainset
 
@@ -320,6 +323,7 @@ def test_training_and_serving_build_the_identical_row(conn):
 
     serving = features.row(history, clim, lot(), origin_ts=ORIGIN, horizon_min=15,
                            neighbours=())
-    training = trainset.rows(history, clim, [lot()], origins=[ORIGIN], horizons=[15])
+    training = trainset.rows(history, clim, [lot()], origins=[ORIGIN], horizons=[15],
+                             exclude_frozen=False)
 
     assert [r.values for r in training] == [serving]

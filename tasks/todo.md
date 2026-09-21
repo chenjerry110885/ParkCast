@@ -284,6 +284,8 @@ Sampling is spec §4.2: one origin every 30 minutes, all lots, horizons `(5, 15,
 
 Build a training set over a synthetic 17-day, 1,000-lot corpus. Record rows, wall-clock and peak RSS in the commit message. If memory exceeds ~1 GB, chunk by day before moving on rather than after.
 
+**Measured 2026-09-21.** 4,414,560 rows — the estimate, confirmed — at ~130,000 rows/s, so ~0.6 min. Time is not the constraint; memory was. Materialised as `Row` objects: **913 bytes each, 3,844 MB**, which is past the trainer's 2 GB cap and would have OOM-ed on the first real run. Streamed into a `float32` array: **222 bytes each, 934 MB**. So `iter_rows` is a generator and `rows` is the materialising convenience, with the cost in its docstring. Recorded in spec §4.2.
+
 - [ ] **Step 7: Commit**
 
 ---

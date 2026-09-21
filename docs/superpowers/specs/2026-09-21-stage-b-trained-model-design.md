@@ -159,9 +159,20 @@ day), all lots, 5 horizons (5/15/30/60/120 min).
 
     1,082 lots × 48 origins × 17 days × 5 horizons ≈ 4.4M rows
 
-At ~20 float32 features that is ~350 MB materialised, which is why the dataset is built in day-sized
-chunks and handed to LightGBM incrementally rather than assembled whole. Sampling denser is a knob;
-the plan should measure fit time and memory at 48/day before turning it.
+**Measured 2026-09-21** on a synthetic seventeen-day corpus, extrapolated from 300 lots to Taipei's
+1,082: **4,414,560 rows** — the estimate above, confirmed — built at ~130,000 rows/second, so about
+**0.6 minutes**. Time is not the constraint. Memory is:
+
+| how the rows are held | bytes/row | total |
+|---|---|---|
+| materialised as `Row` objects | 913 | **3,844 MB** |
+| streamed into a `float32` array | 222 | **934 MB** |
+
+913 bytes is what a Python list of 26 boxed floats costs. The first figure is past the trainer's 2 GB
+cap (§9.3) and would have OOM-ed on the first real run, so `trainset.iter_rows` is a generator and
+`train.py` streams it into a preallocated array; `trainset.rows` materialises and exists for tests and
+small callers, with the cost written into its docstring. Sampling denser is a knob, and now one with a
+number attached.
 
 **Frozen lots are excluded from training — at read time, never by touching the corpus.** A lot whose
 feed has stuck repeats one number forever; trained on, it teaches the model that lot is perfectly
