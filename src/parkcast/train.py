@@ -29,14 +29,17 @@ no executable content, and `test_the_model_is_never_a_pickle` keeps it that way.
 """
 import hashlib
 import json
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
-from typing import Iterable
 
 import lightgbm as lgb
 import numpy as np
 
 from parkcast import features
-from parkcast.trainset import Row
+from parkcast.compact import day_bounds
+from parkcast.trainset import Row, iter_rows, sample_origins
 
 #: How many previous models stay on disk. A rollback reaches back about a week;
 #: keeping every one would grow without bound beside a corpus measured in tens
@@ -190,3 +193,193 @@ def save(
         old.unlink()
         old.with_suffix(".json").unlink(missing_ok=True)
     return current
+
+
+# --- the adoption gate ------------------------------------------------------
+#
+# A model that retrains itself nightly can degrade itself nightly, unattended,
+# with every log staying green. This is the only thing standing between that
+# and the published grid, and it is allowed to say no.
+
+
+@dataclass(frozen=True)
+class Decision:
+    adopted: bool
+    reason: str
+    scores: dict
+    #: The digest of what was written, so a caller can prove the artifact it
+    #: validated is the artifact that shipped. None when nothing was written.
+    digest: str | None = None
+
+
+#: Minimum labelled rows before a fit is attempted at all. Below this the
+#: honest outcome is "not enough corpus", which must not be mistaken for a
+#: rejection on merit -- see `Decision.reason`.
+MIN_TRAIN_ROWS = 5_000
+
+
+def brier(probabilities: Sequence[float], labels: Sequence[int]) -> float | None:
+    """Mean squared error. None for an empty set, never 0.0.
+
+    An unmeasured gate and a perfect one must not print the same number -- the
+    same distinction `evaluate.brier` makes, for the same reason.
+    """
+    if not probabilities:
+        return None
+    return sum((p - y) ** 2 for p, y in zip(probabilities, labels)) / len(probabilities)
+
+
+def validation_window(day: date) -> tuple[int, int, int]:
+    """`(train_cutoff, validation_start, validation_end)` for serving `day`.
+
+    Training stops at the start of the previous day and validation runs over
+    that whole day, so the candidate is scored on 24 hours it has never seen.
+
+    This ships a model one day staler than it could be. The alternative --
+    validate one fit, then refit on everything and ship that -- ships a model
+    nobody ever scored. Freshness comes from the features, which are seconds
+    old, not from the weights, so the stale day costs almost nothing and never
+    shipping an unvalidated artifact is worth more.
+    """
+    start, _ = day_bounds(day)
+    return start - 86400, start - 86400, start
+
+
+def _scored(forecaster, rows: Sequence[Row]) -> tuple[list[float], list[int]]:
+    """One forecaster's answers over exactly the rows every other one gets."""
+    probabilities, labels = [], []
+    for row in rows:
+        p = forecaster.predict(row.lot_id, row.origin_ts + row.horizon_min * 60,
+                               row.horizon_min)
+        if p is None:
+            continue
+        probabilities.append(p)
+        labels.append(row.label)
+    return probabilities, labels
+
+
+def _candidate_brier(booster, rows: Sequence[Row]) -> float | None:
+    if not rows:
+        return None
+    x = np.array([[np.nan if v is None else v for v in r.values] for r in rows],
+                 dtype=np.float32)
+    return brier(list(booster.predict(x)), [r.label for r in rows])
+
+
+def _verdict(scores: dict, *, beat_baselines: bool) -> str | None:
+    """Why the candidate is refused, or None to adopt it."""
+    candidate = scores["candidate"]
+    if candidate is None:
+        return "the candidate scored no predictions on the validation day"
+    incumbent = scores.get("incumbent")
+    if incumbent is not None and candidate > incumbent:
+        return f"worse than the incumbent ({candidate:.4f} against {incumbent:.4f})"
+    if not beat_baselines:
+        return None
+    for name in ("persistence", "climatology"):
+        reference = scores.get(name)
+        if reference is not None and candidate >= reference:
+            return f"does not beat {name} ({candidate:.4f} against {reference:.4f})"
+    return None
+
+
+def _record(model_dir: Path, day: date, decision: Decision) -> Decision:
+    """Append the decision where `report.py` can find it.
+
+    A run of consecutive rejections is itself a signal, and a log line nobody
+    reads is not where it belongs.
+    """
+    model_dir.mkdir(parents=True, exist_ok=True)
+    with (model_dir / "decisions.jsonl").open("a", encoding="utf-8") as out:
+        out.write(json.dumps({
+            "day": day.isoformat(),
+            "adopted": decision.adopted,
+            "reason": decision.reason,
+            "scores": decision.scores,
+        }) + "\n")
+    return decision
+
+
+def nightly(
+    conn,
+    cold_dir,
+    *,
+    city: str,
+    day: date,
+    model_dir,
+    lots: Sequence,
+    horizons: Sequence[int] = (5, 15, 30, 60, 120),
+    beat_baselines: bool = True,
+    now: int | None = None,
+    _force_scores: dict | None = None,
+) -> Decision:
+    """Fit a candidate, score it on a day it has never seen, adopt it or not.
+
+    Adopted only when it is no worse than the incumbent AND beats both
+    `Persistence` and `Climatology` -- the two the spec gates on. Beating the
+    incumbent alone is not enough if both have drifted below the baselines.
+
+    Nothing is written unless the candidate is adopted, and what is written is
+    the object that was scored: there is no refit between the two.
+
+    `_force_scores` exists for the tests, which need to drive the decision
+    without constructing six plausible corpora. It replaces the measured scores
+    and nothing else -- the fit, the write and the bookkeeping all still happen
+    exactly as they would.
+    """
+    from parkcast import model as model_module
+    from parkcast.evaluate import load_labels, reading_series
+    from parkcast.forecast import Blend, Climatology, Persistence, by_city, load_history
+
+    model_dir = Path(model_dir)
+    cutoff, val_start, val_end = validation_window(day)
+
+    labels = load_labels(conn, cold_dir, city=city)
+    series = reading_series(labels)
+
+    train_history = by_city(load_history(conn, cold_dir=cold_dir, before_ts=cutoff)).get(city)
+    if train_history is None:
+        return _record(model_dir, day, Decision(False, "no history for this city", {}))
+
+    train_clim = Climatology(train_history)
+    train_origins = [t for t in sample_origins(labels) if t < cutoff]
+    x, y = to_arrays(iter_rows(train_history, train_clim, lots, origins=train_origins,
+                               horizons=horizons, labels=labels, reading_series=series))
+    if len(y) < MIN_TRAIN_ROWS:
+        return _record(model_dir, day, Decision(
+            False, f"only {len(y)} labelled rows, below the {MIN_TRAIN_ROWS} floor", {}))
+
+    candidate = fit(x, y)
+
+    # Validation: one history for every forecaster, cut at the end of the day
+    # the candidate did NOT train on, so they all answer from identical inputs.
+    val_history = by_city(load_history(conn, cold_dir=cold_dir, before_ts=val_end)).get(city)
+    val_clim = Climatology(val_history)
+    val_origins = [t for t in sample_origins(labels) if val_start <= t < val_end]
+    val_rows = [r for r in iter_rows(val_history, val_clim, lots, origins=val_origins,
+                                     horizons=horizons, labels=labels, reading_series=series)
+                if r.label is not None]
+
+    roster = {l.id: l for l in lots}
+    incumbent = model_module.Trained(val_history, model_dir=model_dir, lots=roster,
+                                     clim=val_clim, now=now)
+    scores = {
+        "candidate": _candidate_brier(candidate, val_rows),
+        "persistence": brier(*_scored(Persistence(val_history), val_rows)),
+        "climatology": brier(*_scored(Climatology(val_history), val_rows)),
+        "blend": brier(*_scored(Blend(val_history), val_rows)),
+        "incumbent": brier(*_scored(incumbent, val_rows)) if incumbent.available else None,
+        "rows": len(val_rows),
+    }
+    if _force_scores is not None:
+        scores.update(_force_scores)
+
+    verdict = _verdict(scores, beat_baselines=beat_baselines)
+    if verdict is not None:
+        return _record(model_dir, day, Decision(False, verdict, scores))
+
+    path = save(candidate, model_dir, trained_through=cutoff,
+                feature_order=features.FEATURES, scores=scores)
+    return _record(model_dir, day, Decision(
+        True, "beat the incumbent and both baselines", scores,
+        digest=hashlib.sha256(path.read_bytes()).hexdigest()))
