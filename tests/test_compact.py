@@ -6,7 +6,7 @@ import pytest
 
 from parkcast import store
 from parkcast.compact import ARRAY_COLUMNS, compact_day, day_bounds
-from parkcast.feed import TS_FEED, FeedSnapshot, Observation
+from parkcast.feed import TS_FEED, TS_FETCH, FeedSnapshot, Observation
 from parkcast.quality import Q
 
 
@@ -185,3 +185,21 @@ def test_quality_flags_are_index_aligned_with_free_car(conn, tmp_path):
 
 def test_empty_day_produces_no_file(conn, tmp_path):
     assert compact_day(conn, date(2026, 9, 4), tmp_path) is None
+
+
+def test_the_assumption_flag_reaches_the_cold_store(conn, tmp_path):
+    """Provenance that does not outlive the 48-hour hot window is no use to a
+    backtest over months.
+
+    No code should be needed for this -- Parquet already carries `quality` per
+    slot -- which is exactly why it is worth a test rather than an assumption.
+    """
+    day = date(2026, 9, 6)
+    start, _ = day_bounds(day)
+    store.insert_snapshot(conn, FeedSnapshot("taoyuan", start + 180, (
+        Observation("taoyuan:A", 4, None, start + 180, TS_FETCH),
+    )), {"taoyuan:A": 50})
+
+    compact_day(conn, day, tmp_path)
+    row = pq.read_table(tmp_path / "2026-09-06.parquet").to_pylist()[0]
+    assert row["quality"][0] & Q.ASSUMED_TS

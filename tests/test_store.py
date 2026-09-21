@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from parkcast import store
-from parkcast.feed import TS_FEED, FeedSnapshot, Observation
+from parkcast.feed import TS_FEED, TS_FETCH, TS_RECORD, FeedSnapshot, Observation
 from parkcast.quality import Q
 
 
@@ -360,3 +360,44 @@ def test_a_failed_fetch_does_not_erase_the_newest_data_timestamp(tmp_path):
     health = store.source_health(conn)["tainan"]
     assert health["last_ts"] == 199, "the last reading we ever saw survives the outage"
     assert health["ok"] is False, "and the failure itself is what reports the outage"
+
+
+# --- timestamp provenance ---------------------------------------------------
+
+
+def test_a_fetch_stamped_observation_is_flagged_as_an_assumption(conn):
+    """`data_ts = now` is our clock, not the feed's, and nothing recovers that later.
+
+    Kaohsiung and Taoyuan stamp every row this way, so for them the city would
+    answer it. Tainan, New Taipei and Hsinchu fall back PER RECORD whenever the
+    feed's own timestamp is missing or unparseable, so for those three the city
+    answers nothing and only the row can.
+    """
+    store.insert_snapshot(conn, FeedSnapshot("tainan", 1_700_000_100, (
+        Observation("tainan:A", 5, None, 1_700_000_000, TS_RECORD),
+        Observation("tainan:B", 5, None, 1_700_000_100, TS_FETCH),
+    )), {"tainan:A": 50, "tainan:B": 50})
+
+    flags = dict(conn.execute("SELECT lot_id, quality FROM observations"))
+    assert not flags["tainan:A"] & Q.ASSUMED_TS, "the feed stamped this one itself"
+    assert flags["tainan:B"] & Q.ASSUMED_TS, "this data_ts is our clock, not the feed's"
+
+
+def test_a_payload_stamped_observation_is_not_an_assumption(conn):
+    """TS_FEED is the feed's own clock too -- one stamp for the payload rather
+    than per lot, but still the feed's statement about when it was true."""
+    store.insert_snapshot(conn, snap(1_700_000_000, 1_700_000_100), {"TPE0001": 50})
+
+    quality = conn.execute("SELECT quality FROM observations").fetchone()[0]
+    assert not quality & Q.ASSUMED_TS
+
+
+def test_the_assumption_flag_does_not_disturb_the_other_quality_bits(conn):
+    """Provenance and validity are independent facts and must both survive."""
+    store.insert_snapshot(conn, FeedSnapshot("hsinchu", 1_700_000_100, (
+        Observation("hsinchu:A", 5, None, 1_700_000_100, TS_FETCH),
+    )), {})
+
+    quality = conn.execute("SELECT quality FROM observations").fetchone()[0]
+    assert quality & Q.ASSUMED_TS
+    assert quality & Q.NO_CAPACITY, "capacity was unknown and that is still true"
