@@ -1,0 +1,305 @@
+# Stage B — a trained model that keeps learning
+
+**Status:** proposed 2026-09-21
+**Follows:** [`2026-09-16-stage-a-any-time-arrival-design.md`](2026-09-16-stage-a-any-time-arrival-design.md), which named this as its successor
+**Depends on:** the per-city evaluation scoping landed 2026-09-21 (`c19de14`) — every number below is meaningless without it
+
+## 0. What this is, and what it is not
+
+A gradient-boosted classifier that replaces `Blend` in the published grid, retrained nightly on
+everything collected so far, and never adopted without first proving itself against the model it
+would replace.
+
+It is **not** a rewrite of the forecasting layer. `Persistence`, `Climatology` and `Blend` all stay
+exactly as they are: they remain the baselines the evaluation scores against, they remain the
+fallback when no model file loads, and `Climatology`'s counts become one of the new model's inputs.
+Stage B adds a fourth forecaster to `FORECASTERS` and a job that produces it.
+
+It is also **not** a change to the ranker. Preferences (cheaper / balanced / closer) live in
+`web/src/rank.ts` and stay there. The model emits a probability; the ranker turns a probability into
+an expected cost. Keeping that seam is what lets either side change without re-deriving the other,
+and it is why "the trained model should account for preferences" resolves to "the ranker already
+does, using the model's output".
+
+## 1. Why — what the evidence says is actually wrong
+
+From `docs/state-of-play.md`, the 2026-09-14 run (231,536 predictions per forecaster, base rate
+0.899). Blend already beats persistence by **+6.9%** at 5 minutes rising to **+21.9%** at 120. The
+headline is not the opportunity. Two measured defects are:
+
+1. **Calibration fails in the middle.** The 0.8–0.9 band says 0.862 and happens 0.791. The 0.6–0.7
+   band says 0.657 and happens 0.520. The top band is sound (198,024 of 231,536 predictions, says
+   0.986 against 0.976 observed) — so the app is honest about the easy cases and overconfident about
+   exactly the ones a driver is deciding on.
+2. **The hard subset is where the gain collapses.** On the 256 lots that actually fill up, blend's
+   advantage over persistence falls from +16.3% to **+5.4%** at 60 minutes. That is the lot the
+   product exists for.
+
+A third thing the evidence shows is not a defect but a lever: **support dominates accuracy.**
+Bucket n = 0 → Brier 0.1013; n = 1–5 → 0.0509; n = 6–19 → 0.0157. A model that is *told* how much
+evidence is behind each prediction can learn to fall back when there is none, which is something
+`Blend`'s fixed 30-minute half-life cannot express.
+
+## 2. Constraints
+
+Inherited and binding:
+
+- **No data is never 0%.** A lot with no basis renders "no data". `UNKNOWN = 255` in the grid stays
+  distinct from a real `0`. The model must be able to return `None`.
+- **No leak, ever.** A forecaster at origin `T` may see only data strictly before `T` (the
+  `load_history(before_ts=T)` contract in `forecast.py`). This is the constraint that shapes
+  everything in §4 and §7.
+- **No paid tier, no recurring cost.** No hosted training, no external feature APIs (which rules out
+  weather for now — see §10).
+- **One laptop.** The collector runs on OMEN_DESKTOP_YU and sleeps when the machine does. Memory
+  after a six-city tick is 207 MiB.
+- **The 300-second poll slot is not negotiable.** `run_forever` already warns that everything after
+  the fetch loop — publishing six shards, compaction, prune — delays the next slot, and that an
+  overrun past `target + 300` makes `next_poll_ts` skip a slot entirely. Nothing in this spec may run
+  inside that loop. See §4.3.
+
+New, and chosen here:
+
+- **Nightly refit from scratch**, not online updates (§4.1).
+- **LightGBM**, native API (§3.1). The dependency cost is measured in §9.
+- **Nothing ships that was not validated as the exact artifact that ships** (§5).
+
+## 3. The model
+
+### 3.1 Class
+
+LightGBM, binary objective, trained through the native `lgb.train` API rather than the scikit-learn
+wrapper — the wrapper would pull in scikit-learn and scipy for nothing we use.
+
+Why a GBT over the alternatives considered: the useful signal here is full of interactions that a
+linear model cannot express without being told about them by hand — "a thin bucket matters more at
+long horizons", "the current reading matters less for a lot that churns fast", "downtown at 18:00
+behaves unlike the same clock time in a suburb". Trees find those without a feature-engineering
+round per hypothesis. The cost is a dependency and a heavier nightly fit, both quantified below.
+
+**Determinism is a hard requirement, not a preference.** The backtest must reproduce a model exactly
+or §7 is worthless. Pinned in the training config: `deterministic: true`, `force_row_wise: true`,
+`num_threads: 1`, and a fixed `seed`. Multi-threaded histogram construction is a known source of
+run-to-run variation. A test trains the same data twice and asserts the serialised models are
+byte-identical.
+
+### 3.2 Target
+
+Unchanged from every forecaster before it: `P(free_car >= 1)` at `target_ts`, for a given lot and a
+given horizon. One model across all horizons, with `horizon_min` as a feature, rather than one model
+per horizon — the horizons share almost all of their structure, and splitting them would divide the
+training data 24 ways.
+
+### 3.3 Features
+
+One row is a `(lot, origin, horizon)` triple. LightGBM handles missing values natively, so an absent
+feature stays absent rather than being imputed — which is the same honesty rule the rest of the
+codebase follows, expressed in the model.
+
+**From the current reading** (the persistence signal):
+- `free_car` now, and `free_car / capacity_car` where capacity is known
+- `is_free_now` (the exact quantity `Persistence` returns)
+- minutes since this lot's last reading — staleness the app already reasons about in `liveness`
+- trend: change in `free_car` over the last 15, 30 and 60 minutes
+
+**From climatology** (stacking, not replacing):
+- the shrunk probability `Climatology` would return for this lot and target bucket
+- that bucket's support `n` — the lever identified in §1
+- the lot's own historical free rate, and its `n`
+
+**From the clock:**
+- `horizon_min`
+- sin/cos of time-of-day, and day-of-week
+
+**From the lot:**
+- `capacity_car`, `capacity_motor`, `charging`, `serves_cars`
+- price per hour, as `pricing.py` parses it
+- `lot_type` and `area`, as LightGBM native categoricals
+- `city`, as a categorical
+
+**From the neighbourhood:**
+- mean free ratio of the *k* nearest lots at the origin (k = 5), and how many of them had a reading.
+  District-level demand is the thing a per-lot model structurally cannot see, and it is what makes
+  "everything around here is filling up" available as evidence.
+
+### 3.4 Fallback
+
+`Trained.predict` returns `None` when it has no basis — no current reading **and** no climatology
+support for the bucket. It never manufactures a number from an empty row. The grid writes `UNKNOWN`,
+exactly as it does for `Blend` today.
+
+## 4. Training
+
+### 4.1 Cadence: nightly, refit from scratch
+
+Every night, discard the previous model and fit a new one on the corpus as it then stands.
+
+The alternative — updating weights online as observations arrive — was rejected for one specific
+reason. Online weights are **path-dependent**: they depend on the order observations arrived and how
+many times each was seen. The question the backtest asks at every origin is "what would this model
+have said at `T`?", and for a path-dependent model the only honest answer is to replay the entire
+stream up to `T`, once per origin. That is not an evaluation anyone runs twice, and a model whose
+evaluation stops being run is a model that cannot be defended.
+
+A refit from scratch over data `< T` is a pure function of the corpus before `T`, which is the
+existing `load_history(before_ts=T)` contract restated. The evaluation keeps working unchanged.
+
+**Freshness does not come from the weights.** The model's weights are up to a day old; its *inputs*
+are seconds old — the current reading, the trend, the neighbourhood, the climatology counts, all
+recomputed every tick. This is why a day-stale model is not a stale forecast.
+
+### 4.2 The training set, and its size
+
+Naively expanding every `(lot, slot, horizon)` is not tractable and the arithmetic should be in the
+spec rather than discovered later. Taipei alone, at 1,082 lots × 288 slots/day × 24 horizons, is
+~7.5M rows **per day** of corpus — ~127M rows over 17 days.
+
+So origins are **sampled**, exactly as the backtest samples them: one origin every 30 minutes (48 a
+day), all lots, 5 horizons (5/15/30/60/120 min).
+
+    1,082 lots × 48 origins × 17 days × 5 horizons ≈ 4.4M rows
+
+At ~20 float32 features that is ~350 MB materialised, which is why the dataset is built in day-sized
+chunks and handed to LightGBM incrementally rather than assembled whole. Sampling denser is a knob;
+the plan should measure fit time and memory at 48/day before turning it.
+
+**Frozen lots are excluded from training.** A lot whose feed has stuck repeats one number forever;
+trained on, it teaches the model that lot is perfectly predictable, and the model learns to be
+confident exactly where the data is fictional. The app already withholds these at serving time
+(`liveness.not_updating`) and the backtest already withholds them from scoring. Training is the third
+place that has to, and this promotes "removing frozen lots from the climatology counts" from the
+deferred list to a prerequisite.
+
+### 4.3 Where it runs
+
+**Not in `run_forever`.** A LightGBM fit inside the poll slot would eat the slot and, per the
+`deadline` logic, potentially the one after it — trading collected data for a model trained on less
+of it.
+
+A separate process: its own compose service, sharing the data volume read-only for the corpus and
+read-write for the model directory alone. It wakes after the collector has compacted a day, trains,
+validates (§5), and writes or declines to write. A crash there cannot stop collection, which is the
+property that matters most — the corpus is the irreplaceable asset.
+
+## 5. The adoption gate
+
+A model that retrains itself nightly can degrade itself nightly. Unattended retraining without a gate
+is the single largest risk in this design.
+
+Each night, for city C:
+
+1. **Fit** a candidate on everything strictly before day boundary `D−1`.
+2. **Validate** it on `[D−1, D)` — a full day the candidate has never seen — against three
+   references: the incumbent model, `Blend`, and `Persistence`.
+3. **Adopt** only if the candidate's Brier is no worse than the incumbent's, **and** it beats both
+   `Persistence` and `Climatology`, **and** no calibration band with n ≥ 1,000 is off by more than
+   0.05.
+4. **Otherwise keep the incumbent** and log it loudly enough to show up in `report.py`. A run of
+   consecutive rejections is itself a signal worth surfacing.
+
+**The artifact validated is the artifact shipped.** Training on `< D−1` and validating on `[D−1, D)`
+means the shipped model is one day staler than it could be. The alternative — validate one fit, then
+refit on `< D` and ship *that* — ships a model no one ever scored. Given §4.1 (freshness comes from
+features, not weights), one extra day of weight staleness costs approximately nothing, and never
+shipping an unvalidated artifact is worth more.
+
+The last 7 models per city are kept, so a rollback is a file rename.
+
+## 6. Serving
+
+- Model per city at `data/models/<city>/current.txt` (LightGBM's own text format) plus
+  `manifest.json`: feature order, trained-through timestamp, validation scores, and the git commit of
+  the trainer. Written to a temp name and renamed, so a reader never sees a half-written model.
+- The collector loads it at publish time. 1,082 lots × 24 horizons × 6 cities ≈ 156k rows per tick,
+  which LightGBM predicts in well under a second — but the plan measures it against the slot budget
+  rather than assuming.
+- **A missing or unreadable model falls back to `Blend` and publishes anyway**, as does one whose
+  manifest says it was trained through a date more than 14 days old — a trainer that has been dead
+  for a fortnight should not keep serving, and 14 days is comfortably longer than the longest
+  intentional pause (the collector is paused while the machine is gaming) and far shorter than a
+  season. The site never stops updating because a model file is bad.
+- `FORECASTERS` gains `("trained", Trained)`, which is what puts it in every table
+  `evaluate-forecast.py` prints.
+
+## 7. Evaluation
+
+`evaluate.py` is per city as of `c19de14`, and everything here inherits that.
+
+**The backtest refits on the same cadence production does.** Not once per origin — once per day
+boundary, reused for that day's origins, which is exactly what ships. This is both cheaper (days, not
+origins, many fits) and *more faithful*: a per-origin refit would score a model fresher than the one
+users get, and would flatter it.
+
+The leak guarantee is unchanged and easy to state: the model serving an origin in day `D` was
+trained on data strictly before the boundary of day `D−1` (§5), so it is a full day clear of every
+label it is scored on, not merely a second.
+
+**The gate for shipping at all** — distinct from the nightly adoption gate — is the one Stage A
+inherited from spec §8, on the hard subset, per horizon, per city:
+
+- beats `Persistence` **and** `Climatology` on Brier at every horizon, and
+- closes the mid-band calibration defect in §1 rather than moving it, and
+- does not regress the 0.9–1.0 band, where 85% of the mass lives.
+
+Failing any of those, `Blend` stays in the grid and the model stays in the table. A trained model
+that does not beat the baseline is a finding, not a failure.
+
+**Rollout is shadow-first.** The trained model publishes nothing until it has run alongside `Blend`
+for a week of nightly refits with the adoption gate passing each night. Taipei first — it has the
+deepest corpus by two weeks — and each further city when its own corpus clears the same bar.
+
+## 8. Honesty
+
+Unchanged and non-negotiable, restated because a model is the easiest place to break them:
+
+- A null probability never renders as a number; `0` is a real reading.
+- The ranker's expected-cost score is never shown.
+- A stalled feed still says so — the model must not paper over a frozen lot with a plausible forecast.
+- A `0` amenity count still differs from an absent one.
+- No skill number is ever reported without its support alongside it.
+
+## 9. Dependency footprint (measured, 2026-09-21)
+
+The collector image `docker-collector:latest` today holds: `pyarrow 25.0.1`, `pyproj 3.8.0`,
+`requests`, `certifi`, `charset-normalizer`, `idna`, `urllib3`. **`numpy` is not present** — pyarrow
+25 no longer requires it.
+
+So LightGBM costs `numpy` (~20 MB) + `lightgbm` (~1.5 MB) ≈ **22 MB**, using the native API.
+
+For comparison, and why the native API matters: scikit-learn's `HistGradientBoostingClassifier` would
+cost numpy + scipy + scikit-learn ≈ 90 MB, and XGBoost's wheel is larger still. Only the trainer
+image needs them; whether the collector image also carries LightGBM depends on whether inference runs
+in-process, which §6 assumes and the plan should confirm.
+
+## 10. Risks
+
+- **Frozen lots poison training.** Mitigated in §4.2, and it is the reason a deferred item became a
+  prerequisite.
+- **Nightly self-degradation.** Mitigated by §5. The gate is the load-bearing part of this design; if
+  any part of the plan gets cut, it is not this one.
+- **Nondeterminism silently invalidates the backtest.** Mitigated by the pinned config in §3.1 and a
+  byte-identity test.
+- **The corpus is thinner than it looks.** Six-city collection began 2026-09-17; at the time of
+  writing that is four days, and a 30-minute-of-week bucket is visited once a week. Taipei (since
+  ~09-04) is the only city with real depth. `scripts/corpus-coverage.py --city <city>` is the check,
+  and it was only made per-city on 2026-09-21 — before that it reported the union of six cities and
+  one feed's healthy night filled in another's outage.
+- **Disk is still unmeasured** (`docs/state-of-play.md`, step 5). If cold storage outruns the disk,
+  collection stops, and the corpus is the one asset that cannot be recreated. This should be measured
+  before a trainer starts writing models beside it.
+- **`ts_kind` is not persisted.** `feed.py` says a fetch-time stamp "is an assumption, not a reading,
+  and a backtest must be able to exclude it" — but the `observations` table has no such column.
+  Kaohsiung and Taoyuan are inferable from the city; Tainan, New Taipei and Hsinchu fall back to
+  fetch time **per record** (`tainan.py:105` and its counterparts), so which rows are assumptions is
+  unrecoverable afterwards. A column added later only helps data collected later, so if the model
+  should be able to exclude assumed timestamps, this wants to land **before** the corpus deepens.
+- **Weather is the obvious missing feature** and is deliberately excluded: every source is either paid
+  or rate-limited beyond what six cities × 5 minutes needs, and this project takes no recurring cost.
+
+## 11. Out of scope
+
+- Any change to `rank.ts`, the preferences, or the UI.
+- Predicting anything other than `P(free_car >= 1)` — no expected-count, no distribution.
+- Per-horizon models (§3.2).
+- Online learning (§4.1).
+- Training for cities whose corpus has not cleared the §7 bar.
