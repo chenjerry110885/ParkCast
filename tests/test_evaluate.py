@@ -249,6 +249,101 @@ def test_backtest_scores_every_forecaster_on_the_same_inputs(conn):
     )
 
 
+def _two_city_corpus(conn, origin, *, with_kaohsiung):
+    """Taipei fills up regularly; Kaohsiung never does and is six times its size.
+
+    Both cities stamp the same timestamps, so every origin and every label is
+    shared: the only thing the second city can change is what the corpus looks
+    like in aggregate, which is exactly what the test is about.
+    """
+    for i in range(60, -1, -1):
+        ts = origin - i * 300
+        write(conn, ts, lot="taipei:A", free=0 if i % 5 else 7)
+        for n in range(6 if with_kaohsiung else 0):
+            write(conn, ts, lot=f"kaohsiung:B{n}", free=9)
+    write(conn, origin + 900, lot="taipei:A", free=7)
+    for n in range(6 if with_kaohsiung else 0):
+        write(conn, origin + 900, lot=f"kaohsiung:B{n}", free=9)
+
+
+def test_a_second_city_cannot_move_the_climatology_the_backtest_scores(conn, tmp_path):
+    """The backtest has to score the forecaster that actually ships.
+
+    Climatology's top tier shrinks toward `counts.glob`, and every published
+    shard gets a `glob` summed from its own city's lots -- that is what makes a
+    shard identical to what a store holding only that city would serve
+    (`forecast.by_city`). Loading the corpus unscoped shrinks Taipei toward a
+    global spanning all six cities instead, so the baseline in the report is one
+    no client ever receives, and the trained model in Plan 4 would be measured
+    against a bar that does not exist. Measured on this fixture before the fix:
+    0.367 where the published answer is 0.247.
+
+    Two stores rather than one assertion about a recomputed number: the property
+    is that a neighbouring city is invisible, and comparing against Taipei alone
+    states it without restating the arithmetic.
+    """
+    origin = 1_700_000_000
+    alone = store.connect(tmp_path / "alone.sqlite")
+    _two_city_corpus(alone, origin, with_kaohsiung=False)
+    _two_city_corpus(conn, origin, with_kaohsiung=True)
+
+    solo = backtest(alone, cold_dir=None, city="taipei", origins=[origin], horizons=[15])
+    both = backtest(conn, cold_dir=None, city="taipei", origins=[origin], horizons=[15])
+    taipei_probs = lambda r: [x.probability for x in r.by_model["climatology"]
+                              if x.lot_id == "taipei:A"]
+
+    assert taipei_probs(solo), "the fixture produced no Taipei prediction to compare"
+    assert taipei_probs(both) == taipei_probs(solo), (
+        "Kaohsiung moved Taipei's climatology: the backtest is scoring a "
+        "forecaster no published shard contains"
+    )
+
+
+def test_a_scoped_run_scores_only_its_own_city(conn, tmp_path):
+    """A city's report must contain that city and nothing else."""
+    origin = 1_700_000_000
+    _two_city_corpus(conn, origin, with_kaohsiung=True)
+
+    result = backtest(conn, cold_dir=None, city="taipei", origins=[origin], horizons=[15])
+    for name, preds in result.by_model.items():
+        assert {x.lot_id for x in preds} == {"taipei:A"}, f"{name} scored another city"
+
+
+def test_origins_and_labels_come_from_the_same_clock(conn):
+    """The failure a review run actually produced: every origin one city's, every
+    label another's, and zero predictions scored.
+
+    Kaohsiung and Taoyuan stamp `data_ts = now`, which lands on no fixed phase,
+    while Taipei's feed publishes 180s into each five-minute slot. A label is
+    joined by its exact timestamp, so an origin on one clock finds nothing on the
+    other -- and `choose_origins` over the unscoped store picks whichever
+    timestamps sort first, not whichever city is being scored.
+    """
+    base = 1_700_000_000 - 1_700_000_000 % 300
+    for i in range(40):
+        write(conn, base + i * 300 + 180, lot="taipei:A", free=0 if i % 4 else 7)
+        write(conn, base + i * 300 + 37 + i % 11, lot="kaohsiung:B", free=0 if i % 3 else 9)
+
+    scoped = load_labels(conn, None, city="taipei")
+    assert {ts % 300 for ts in scoped} == {180}, "a scoped run must see one clock"
+
+    origins = choose_origins(scoped, start_ts=base + 20 * 300, every_minutes=30)
+    result = backtest(conn, cold_dir=None, city="taipei", origins=origins, horizons=[15])
+    assert result.by_model["blend"], (
+        "no prediction was scored: the origins and the labels are on different clocks"
+    )
+    assert all(x.lot_id == "taipei:A" for x in result.by_model["blend"])
+
+
+def test_an_unscoped_load_still_sees_the_whole_store(conn):
+    """`city=None` is what the single-city fixtures rely on, and must not filter."""
+    write(conn, 1_700_000_000, lot="taipei:A", free=3)
+    write(conn, 1_700_000_000, lot="kaohsiung:B", free=4)
+
+    assert load_labels(conn, None)[1_700_000_000] == {"taipei:A": 3, "kaohsiung:B": 4}
+    assert load_labels(conn, None, city="kaohsiung")[1_700_000_000] == {"kaohsiung:B": 4}
+
+
 # --- the not-updating rule -------------------------------------------------
 
 

@@ -12,6 +12,12 @@ later than that cutoff. Walking the origins forward lets climatology grow the
 way it does in production, and no forecaster ever counts a reading it is about
 to be scored on.
 
+One city per run, scoped through `forecast.by_city` the same way `publish_city`
+scopes what it serves. Six feeds keep six clocks and six climatologies; a run
+over the whole store mixes them and reports a number about no city in
+particular. See `backtest` for both halves of that, and `load_labels` for what
+an unscoped run was measured doing.
+
 Three things it refuses to do, each because the number would otherwise flatter
 itself:
 
@@ -44,7 +50,8 @@ import pyarrow.parquet as pq
 
 from parkcast import config, ids, liveness
 from parkcast.compact import SLOTS_PER_DAY, SLOT_SECONDS, day_bounds
-from parkcast.forecast import Blend, Climatology, Persistence, load_history, week_bucket
+from parkcast.forecast import (Blend, Climatology, Persistence, by_city,
+                               empty_history, load_history, week_bucket)
 
 # Feed publishes at data_ts minutes = 3 (mod 5), i.e. 180s into each 5-minute
 # slot. Verified against the hot store, not assumed -- see the module docstring.
@@ -124,8 +131,19 @@ def calibration(predictions: Sequence[Prediction], bins: int = 10) -> list[Bin]:
     return out
 
 
-def load_labels(conn: sqlite3.Connection, cold_dir: Path | None) -> dict[int, dict[str, int]]:
+def load_labels(
+    conn: sqlite3.Connection, cold_dir: Path | None, *, city: str | None = None
+) -> dict[int, dict[str, int]]:
     """Every observation the corpus holds, as `{data_ts: {lot_id: free_car}}`.
+
+    `city` keeps only that city's lots. It is not an optimisation: the six feeds
+    stamp on six different clocks -- Kaohsiung and Taoyuan use fetch time, which
+    lands on no fixed phase at all -- and `backtest` joins a label by its exact
+    timestamp. Over the whole store, `choose_origins` therefore picks origins on
+    one city's clock and finds labels for a different one; a review run selected
+    only Kaohsiung origins and scored **zero** Taipei predictions. Scoped, every
+    origin and every label belong to the same feed. `city=None` remains the
+    whole store, which is what the single-city fixtures in the tests want.
 
     Both stores, one timestamp convention AND one id convention. A reading
     present in both (cold owns a day the hot window still covers) lands on the
@@ -151,6 +169,8 @@ def load_labels(conn: sqlite3.Connection, cold_dir: Path | None) -> dict[int, di
         table = pq.read_table(path, columns=["lot_id", "free_car"]).to_pylist()
         for row in table:
             lot_id = ids.as_stored(row["lot_id"])
+            if city is not None and ids.city_of_stored(lot_id) != city:
+                continue
             for slot, free in enumerate(row["free_car"]):
                 if free is None or not 0 <= slot < SLOTS_PER_DAY:
                     continue
@@ -160,6 +180,13 @@ def load_labels(conn: sqlite3.Connection, cold_dir: Path | None) -> dict[int, di
     for lot_id, data_ts, free in conn.execute(
         "SELECT lot_id, data_ts, free_car FROM observations WHERE free_car IS NOT NULL"
     ):
+        # Filtered here rather than with a `city = ?` predicate: the store's own
+        # city column is not the authority on which shard a lot publishes in --
+        # `ids.city_of_stored` is, and it is what the histories are split on. A
+        # SQL predicate would also push the planner off the covering scan, for
+        # the reason `forecast.load_history` documents.
+        if city is not None and ids.city_of_stored(lot_id) != city:
+            continue
         labels.setdefault(data_ts, {})[lot_id] = free
 
     return labels
@@ -171,6 +198,12 @@ def hard_lots(conn, cold_dir: Path | None, *, before_ts: int, threshold: float) 
     "At or near capacity" has to be decided from the training side: choosing the
     hard subset using test-period outcomes would be selecting the cases on the
     labels being scored, which is the same leak in a different coat.
+
+    Unscoped on purpose, unlike `backtest`. This reads only `counts.lot`, and
+    `by_city` re-keys those counters rather than recomputing them -- the union
+    over the six cities is the whole dict, lot ids are namespaced so nothing
+    collides, and the answer is identical either way. What `by_city` changes is
+    `glob` and `current`, neither of which this touches.
     """
     history = load_history(conn, cold_dir=cold_dir, before_ts=before_ts)
     return {
@@ -245,23 +278,48 @@ def backtest(
     conn,
     cold_dir: Path | None,
     *,
+    city: str | None = None,
     origins: Iterable[int],
     horizons: Sequence[int],
     withhold_not_updating: bool = True,
 ) -> Result:
     """Score every forecaster at every origin, on identical inputs.
 
+    One city per call, and `origins` must be that city's own (`choose_origins`
+    over `load_labels(..., city=city)`). Two reasons, and either alone would be
+    enough:
+
+    * **Different clocks.** A label is joined by its exact timestamp, and the
+      six feeds publish on six phases -- Kaohsiung and Taoyuan on none at all,
+      since they stamp fetch time. Origins drawn from the whole store belong to
+      whichever city happened to stamp them, and the labels at `origin +
+      horizon` belong to whoever shares that phase. See `load_labels`.
+    * **Different climatologies.** Climatology's top tier shrinks toward
+      `counts.glob`, and a published shard's `glob` covers only its own city --
+      that is what makes a shard identical to what a store holding only that
+      city would serve (`forecast.by_city`). Scored against a global summed over
+      six cities, the baseline in the report is one no client receives: on the
+      fixture in `test_a_second_city_cannot_move_the_climatology_the_backtest_scores`,
+      0.367 where the published answer is 0.247. Plan 4's trained model would be
+      measured against a bar that does not exist.
+
+    `city=None` scores the store unscoped, which is what a single-city fixture
+    or a pre-namespacing corpus is. It is not the right setting for the live
+    store.
+
     One `load_history` per origin, so the cost is linear in origins rather than
-    in predictions. All three forecasters share that history, which is what
-    makes the comparison fair: they differ in what they do with the data, never
-    in which data they got.
+    in predictions. Six cities means six passes rather than one -- unavoidable,
+    because each city's origins are its own and every origin carries its own
+    `before_ts`, so there is no shared load to make. All three forecasters share
+    that history, which is what makes the comparison fair: they differ in what
+    they do with the data, never in which data they got.
 
     `withhold_not_updating` replays the publishing rule in `liveness`: a lot the
     app would have shown as not updating at an origin is scored by no
     forecaster there, and counted in `Result.withheld` instead. On by default,
     because the evaluation measures what ships; off only to compare.
     """
-    labels = load_labels(conn, cold_dir)
+    labels = load_labels(conn, cold_dir, city=city)
     result = Result(by_model={name: [] for name, _ in FORECASTERS})
     stamps = sorted(labels)
     series = reading_series(labels) if withhold_not_updating else {}
@@ -270,7 +328,8 @@ def backtest(
         # +1 so the reading *at* the origin is inside the history -- it is the
         # forecaster's input, not one of its labels. Everything scored below is
         # strictly later.
-        history = load_history(conn, cold_dir=cold_dir, before_ts=origin + 1)
+        whole = load_history(conn, cold_dir=cold_dir, before_ts=origin + 1)
+        history = whole if city is None else by_city(whole).get(city, empty_history())
         if not history.counts.glob[1]:
             continue
         withheld: dict[str, int] = {}
