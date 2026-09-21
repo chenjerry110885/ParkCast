@@ -18,6 +18,7 @@ mean understates today's rate. Both are printed; the projection uses the newest.
 Takes its paths as arguments and reads nothing else. Nothing here writes.
 """
 import argparse
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -57,21 +58,60 @@ def summarise(sizes: dict[date, int], *, hot_bytes: int) -> Report:
     )
 
 
-def day_sizes(cold_dir: Path) -> dict[date, int]:
-    """One entry per compacted day.
+@dataclass(frozen=True)
+class Entry:
+    day: date
+    component: str
+    bytes: int
 
-    A stem that is not an ISO date is not a day this project wrote, so it is
-    skipped rather than parsed -- the same rule `forecast._read_parquet_day`
-    applies, so that one stray file in the directory cannot skew the answer.
+
+def scan(cold_dir: Path) -> tuple[list[Entry], int]:
+    """Every dated file under the cold store, and the bytes of everything else.
+
+    **Recursive, and that is the whole point.** The first version of this script
+    globbed `*.parquet` at the top level only, which is what `forecast._read_cold`
+    reads -- and missed `cold/meta/`, the dated JSON metadata snapshots that
+    `__main__.build_capacities` writes and that `docs/state-of-play.md` measured
+    at 2.17 MB a day, ~90% of the cold store. It reported 4.7 MB where the real
+    figure was several times that, and concluded the corpus fitted comfortably.
+    An undercount is the dangerous direction for this particular question.
+
+    So nothing is silently dropped: a file whose stem is not an ISO date cannot
+    be attributed to a day, but its bytes are still returned and still printed.
+    A measurement that quietly omits what it does not recognise is how the first
+    version got the answer wrong.
     """
-    sizes: dict[date, int] = {}
-    for path in sorted(cold_dir.glob("*.parquet")):
+    entries: list[Entry] = []
+    unattributed = 0
+    for path in sorted(cold_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        size = path.stat().st_size
         try:
             day = date.fromisoformat(path.stem)
         except ValueError:
+            unattributed += size
             continue
-        sizes[day] = path.stat().st_size
-    return sizes
+        folder = path.parent.relative_to(cold_dir)
+        entries.append(Entry(day, "observations" if folder == Path(".")
+                             else folder.as_posix(), size))
+    return entries, unattributed
+
+
+def day_totals(entries: Iterable[Entry]) -> dict[date, int]:
+    """Bytes per day, every component summed."""
+    totals: dict[date, int] = {}
+    for entry in entries:
+        totals[entry.day] = totals.get(entry.day, 0) + entry.bytes
+    return totals
+
+
+def component_totals(entries: Iterable[Entry]) -> dict[str, int]:
+    """Bytes per component, so a surprise is attributable to whatever wrote it."""
+    totals: dict[str, int] = {}
+    for entry in entries:
+        totals[entry.component] = totals.get(entry.component, 0) + entry.bytes
+    return totals
 
 
 def mb(value: float | None) -> str:
@@ -92,11 +132,17 @@ def main() -> int:
     if not cold.exists():
         raise SystemExit(f"no cold store at {cold}")
     hot = Path(args.hot)
-    report = summarise(day_sizes(cold), hot_bytes=hot.stat().st_size if hot.exists() else 0)
+    entries, unattributed = scan(cold)
+    report = summarise(day_totals(entries),
+                       hot_bytes=hot.stat().st_size if hot.exists() else 0)
 
     print(f"COLD STORE  {args.cold}")
-    print(f"  compacted days   {report.days:>10}")
+    print(f"  dated days       {report.days:>10}")
     print(f"  total            {mb(report.total_bytes)}")
+    for component, size in sorted(component_totals(entries).items()):
+        print(f"    {component:<14} {mb(size)}")
+    if unattributed:
+        print(f"    {'(undated)':<14} {mb(unattributed)}   not attributable to a day")
     print(f"  mean day         {mb(report.mean_bytes_per_day)}")
     print(f"  newest full day  {mb(report.newest_day_bytes)}   <- today's rate")
     print(f"  hot store        {mb(report.hot_bytes)}   (bounded: a 48 h window)")
