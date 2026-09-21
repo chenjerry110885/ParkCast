@@ -18,7 +18,14 @@ day, those hours are thin in every week of climatology at once, and the model
 will be least informed exactly where it is least able to notice.
 
     python scripts/corpus-coverage.py
+    python scripts/corpus-coverage.py --city kaohsiung
     python scripts/corpus-coverage.py --cold data/cold --hot data/hot.sqlite
+
+One city per run, defaulting to Taipei. A slot counts as covered when that
+city's own lots recorded something in it: measured over all six at once, one
+feed's healthy night fills in another's outage and the strip stops being a
+statement about anybody. Climatology is per city too (`forecast.by_city`), so
+this is the same scope the model is trained and scored in.
 """
 import argparse
 import sqlite3
@@ -31,8 +38,22 @@ import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parent.parent
 SLOTS_PER_DAY = 288          # 24h at the feed's five-minute cadence
+SEPARATOR = ":"              # `parkcast.ids`, repeated rather than imported
+LEGACY_CITY = "taipei"       # what a bare, pre-namespacing id belongs to
 MINUTES_PER_CELL = 30        # one character of the strip
 SLOTS_PER_CELL = MINUTES_PER_CELL // 5
+
+
+def city_of(lot_id: str) -> str:
+    """`parkcast.ids.city_of_stored`, inlined.
+
+    Days compacted before ids were namespaced still say `TPE0001`, and Parquet
+    is never rewritten -- so a bare id is Taipei's, exactly as the package
+    treats it. This script runs straight from a checkout with no PYTHONPATH,
+    so it takes the two lines rather than an import.
+    """
+    city, sep, _ = lot_id.partition(SEPARATOR)
+    return city if sep else LEGACY_CITY
 
 
 def strip(covered: set[int]) -> str:
@@ -44,15 +65,17 @@ def strip(covered: set[int]) -> str:
     return "".join(out)
 
 
-def cold_coverage(cold_dir: Path) -> dict[date, set[int]]:
+def cold_coverage(cold_dir: Path, city: str) -> dict[date, set[int]]:
     days: dict[date, set[int]] = {}
     for path in sorted(cold_dir.glob("*.parquet")):
-        table = pq.read_table(path, columns=["date", "lag"])
+        table = pq.read_table(path, columns=["date", "lot_id", "lag"])
         if table.num_rows == 0:
             continue
         day = date.fromisoformat(str(table["date"][0].as_py()))
         covered: set[int] = set()
-        for row in table["lag"]:
+        for lot_id, row in zip(table["lot_id"], table["lag"]):
+            if city_of(str(lot_id.as_py())) != city:
+                continue
             for slot, value in enumerate(row):
                 if value.as_py() is not None:
                     covered.add(slot)
@@ -60,17 +83,22 @@ def cold_coverage(cold_dir: Path) -> dict[date, set[int]]:
     return days
 
 
-def hot_coverage(hot: Path) -> dict[date, set[int]]:
+def hot_coverage(hot: Path, city: str) -> dict[date, set[int]]:
     """Days still only in SQLite -- today, and anything not yet compacted."""
     if not hot.exists():
         return {}
     conn = sqlite3.connect(f"file:{hot}?mode=ro", uri=True)
     days: dict[date, set[int]] = {}
     rows = conn.execute(
-        "SELECT DISTINCT date(data_ts,'unixepoch','+8 hours'),"
+        "SELECT DISTINCT lot_id, date(data_ts,'unixepoch','+8 hours'),"
         "       (data_ts + 28800) % 86400 / 300 FROM observations"
     )
-    for day_text, slot in rows:
+    # Filtered here rather than with a `city = ?` predicate: the store's own
+    # city column is not what decides which shard a lot publishes in --
+    # `city_of` is, and it is what every other reader splits on.
+    for lot_id, day_text, slot in rows:
+        if city_of(lot_id) != city:
+            continue
         days.setdefault(date.fromisoformat(day_text), set()).add(int(slot))
     return days
 
@@ -79,10 +107,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cold", default="data/cold")
     parser.add_argument("--hot", default="data/hot.sqlite")
+    parser.add_argument("--city", default=LEGACY_CITY,
+                        help="which city's coverage to measure (default taipei)")
     args = parser.parse_args()
 
-    cold = cold_coverage(ROOT / args.cold)
-    hot = hot_coverage(ROOT / args.hot)
+    cold = cold_coverage(ROOT / args.cold, args.city)
+    hot = hot_coverage(ROOT / args.hot, args.city)
     # A day is whichever source has more of it: the hot store is a rolling
     # window and holds only part of an old day, while a compacted day is whole.
     days: dict[date, set[int]] = dict(cold)
@@ -90,14 +120,14 @@ def main() -> int:
         if len(slots) > len(days.get(day, set())):
             days[day] = slots
     if not days:
-        raise SystemExit("no corpus found -- nothing in the cold store or the hot one")
+        raise SystemExit(f"no corpus found for {args.city} -- nothing in the cold store or the hot one")
 
     # Calendar days with no file and no rows are the most important ones to show,
     # because they are the only kind of gap that leaves no trace to count.
     span = [min(days) + timedelta(days=i) for i in range((max(days) - min(days)).days + 1)]
 
-    print(f"CORPUS COVERAGE  {min(days)} .. {max(days)}   "
-          f"({len(span)} calendar days, Taipei)\n")
+    print(f"CORPUS COVERAGE  {args.city}  {min(days)} .. {max(days)}   "
+          f"({len(span)} calendar days, Taipei clock)\n")
     print(f"{'day':12s} {'slots':>9s}  {'':4s} 00:00{'':<19s}12:00{'':<17s}24:00")
     per_cell = Counter()
     total = 0

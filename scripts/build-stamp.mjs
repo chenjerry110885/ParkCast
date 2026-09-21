@@ -30,6 +30,16 @@ export const STAMP_PATH = join("worker", ".wrangler", "build-stamp.json");
  * Everything whose bytes decide what `npm run build --prefix web` and the
  * worker bundle come out as. `node_modules` is covered by the lockfiles rather
  * than walked: hashing it would cost more than the build.
+ *
+ * Deliberately NOT the whole repo. `src/` and `tests/` (the python collector),
+ * `scripts/` and `docs/` cannot change a single uploaded byte, and a stamp that
+ * went stale when a collector docstring moved would charge a four-minute
+ * re-check for nothing -- friction this pipeline has already had enough of.
+ *
+ * The test suites are out for a subtler reason: the stamp is written only after
+ * they pass, so it already records that THESE bytes passed the tests as they
+ * stood. Editing a test afterwards does not un-pass them, and a stamp is not a
+ * claim about the tests' current contents.
  */
 export const SOURCE_PATHS = [
   "web/src", "web/public", "web/index.html", "web/package.json",

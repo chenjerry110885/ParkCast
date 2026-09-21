@@ -74,10 +74,12 @@ if (problems.length > 0) {
 }
 console.log(`\nbundle check passed: ${listFiles(join(ROOT, "web", "dist")).length} files`);
 
-// Last, and only now: the stamp attests that every gate above passed over
-// exactly these bytes. `release.mjs` refuses to upload without a stamp that
-// still matches, so a check that aborts anywhere earlier can no longer leave a
-// stale web/dist behind for the release phase to ship as though it were new.
+// Last, and only now: written after every gate above has passed, so a stamp
+// exists exactly when this build's inputs -- and this web/dist -- got through
+// all of them. `release.mjs` refuses to upload without one that still matches,
+// so a check that aborts anywhere earlier can no longer leave a stale web/dist
+// behind for the release phase to ship as though it were new. What the digest
+// covers, and what it deliberately does not, is in scripts/build-stamp.mjs.
 const stamp = writeStamp(ROOT);
 console.log(`build stamped ${stamp.builtAt} (sources ${stamp.sources.slice(0, 12)})`);
 
