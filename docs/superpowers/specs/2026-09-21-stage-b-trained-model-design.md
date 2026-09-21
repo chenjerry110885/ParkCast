@@ -310,8 +310,20 @@ requirement.
 
 So LightGBM via the native API costs `numpy` (~20 MB) + `lightgbm` (~1.5 MB) ≈ **22 MB**. For
 comparison, scikit-learn's `HistGradientBoostingClassifier` would cost numpy + scipy + scikit-learn
-≈ 90 MB, and XGBoost's wheel is larger still. Both new packages are pinned with hashes and installed
-`--require-hashes`, as the existing dependencies are.
+≈ 90 MB, and XGBoost's wheel is larger still.
+
+**Correcting an earlier draft of this section:** it said the new packages would be hash-pinned "as
+the existing dependencies are". They are not. `pyproject.toml` declares version *ranges*
+(`requests>=2.32`, `pyarrow>=17`, `pyproj>=3.6`) and the image installs with a plain `pip install .`,
+so nothing here is hash-pinned today. Adding two more range-pinned packages does not change that
+posture, and pinning only the two new ones would be security theatre — a supply-chain guarantee is
+worth having across all six or not claimed at all. Introducing `--require-hashes` for the whole
+dependency set is a reasonable separate change; this spec does not assume it.
+
+Both packages are also needed by the **collector**, not only the trainer, because §6 runs inference
+in-process at publish time. That is worth stating plainly: it puts a C++ extension in the process
+that talks to six external feeds. The mitigations are the ones in §9.3 — the model is a text file,
+never a pickle, and its digest is verified before it is loaded.
 
 ### 9.3 Security
 
