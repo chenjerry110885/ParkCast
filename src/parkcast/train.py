@@ -29,9 +29,10 @@ no executable content, and `test_the_model_is_never_a_pickle` keeps it that way.
 """
 import hashlib
 import json
+import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import lightgbm as lgb
@@ -39,6 +40,8 @@ import numpy as np
 
 from parkcast import features
 from parkcast.compact import day_bounds
+
+log = logging.getLogger(__name__)
 from parkcast.trainset import Row, iter_rows, sample_origins
 
 #: How many previous models stay on disk. A rollback reaches back about a week;
@@ -383,3 +386,86 @@ def nightly(
     return _record(model_dir, day, Decision(
         True, "beat the incumbent and both baselines", scores,
         digest=hashlib.sha256(path.read_bytes()).hexdigest()))
+
+
+# --- the nightly entry point ------------------------------------------------
+
+
+def latest_roster(meta_dir: Path, *, before_ts: int, city: str = "taipei") -> tuple:
+    """The newest dated metadata snapshot at or before `before_ts`.
+
+    Capacity and lot membership change over time, which is why
+    `metadata.snapshot_metadata` writes one raw payload per day. Training rows
+    from three weeks ago should be joined against the roster as it was then,
+    not as it is now -- using today's would be a mild look-ahead, and would
+    describe a lot that has since left the feed as though it were still there.
+
+    Only Taipei has this history: `snapshot_metadata` is called once, on
+    `config.METADATA_URL`, and the other five cities carry their rosters in the
+    tick and never write them dated. That is why Stage B ships Taipei first;
+    see the spec's risks.
+    """
+    from parkcast.metadata import parse_metadata
+
+    best = None
+    for path in sorted(Path(meta_dir).glob("*.json")):
+        try:
+            day = date.fromisoformat(path.stem)
+        except ValueError:
+            continue
+        if day_bounds(day)[0] <= before_ts:
+            best = path
+    if best is None:
+        return ()
+    return parse_metadata(json.loads(best.read_text(encoding="utf-8")), city)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """One night's work: fit, validate, adopt or decline.
+
+    Runs in its own container with no network, the corpus mounted read-only and
+    write access to nothing but the model directory. It is emphatically NOT run
+    inside `scheduler.run_forever`: a fit there would eat the 300-second poll
+    slot and, by the deadline logic, possibly the one after it -- trading
+    collected data for a model trained on less of it. A crash here cannot stop
+    collection, which is the property that matters most.
+    """
+    import argparse
+
+    from parkcast import config, ids, store
+
+    parser = argparse.ArgumentParser(description="Fit and gate one night's model.")
+    parser.add_argument("--city", default=ids.LEGACY_CITY)
+    parser.add_argument("--day", type=date.fromisoformat, default=None,
+                        help="the day to serve; defaults to today in Taipei")
+    parser.add_argument("--hot", default=str(config.DB_PATH))
+    parser.add_argument("--cold", default=str(config.PARQUET_DIR))
+    parser.add_argument("--models", default=str(config.DATA_DIR / "models"))
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    day = args.day or datetime.now(config.TAIPEI_TZ).date()
+    cutoff, _, _ = validation_window(day)
+
+    lots = latest_roster(Path(args.cold) / "meta", before_ts=cutoff, city=args.city)
+    if not lots:
+        log.error("no dated roster at or before %s for %s; nothing to train on",
+                  cutoff, args.city)
+        return 1
+
+    conn = store.connect_readonly(args.hot)
+    try:
+        decision = nightly(conn, Path(args.cold), city=args.city, day=day,
+                           model_dir=Path(args.models) / args.city, lots=list(lots))
+    finally:
+        conn.close()
+
+    log.info("%s %s: %s | %s", day, args.city,
+             "ADOPTED" if decision.adopted else "declined", decision.reason)
+    # Zero either way. Declining is a normal outcome, not a failure, and a
+    # non-zero exit would make a restart policy fight a healthy gate.
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -31,6 +31,21 @@ CREATE TABLE IF NOT EXISTS sources (
 """
 
 
+def connect_readonly(path: Path | str) -> sqlite3.Connection:
+    """Open the store without being able to change it.
+
+    `connect` runs the schema script and an ALTER TABLE, so it needs write
+    access and will fail outright on a read-only mount. The trainer has exactly
+    that mount, deliberately: it reads the corpus and writes only its own model
+    directory, so a bug in it can cost a bad model but never a damaged corpus --
+    the one asset here that cannot be recreated.
+
+    `mode=ro` is enforced by SQLite itself rather than by convention, so this
+    holds even where the filesystem would have allowed a write.
+    """
+    return sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)
+
+
 def connect(path: Path | str) -> sqlite3.Connection:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

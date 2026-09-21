@@ -285,6 +285,43 @@ first live upload, 2026-09-15). `send_pair` therefore sends `User-Agent: parkcas
 None of this can block collection or raise into `run_forever` — an upload failure only ever costs an
 upload.
 
+## 6b. Verifying the trainer's isolation
+
+Stage B's nightly fit runs as its own compose service, behind a `trainer` profile so a bare
+`docker compose up` never starts it. Every containment flag on it is a decision, and each should be
+checked rather than trusted — run these from the repository root:
+
+```bash
+docker compose -f docker/docker-compose.yml run --rm trainer python -c "import socket; socket.create_connection(('1.1.1.1', 53), timeout=3)"
+```
+
+That must **fail**. `network_mode: none`, because training makes no network call at all, and denying
+egress removes the whole exfiltration and runtime-supply-chain class rather than mitigating it.
+
+```bash
+docker compose -f docker/docker-compose.yml run --rm trainer sh -c "touch /app/data/cold/probe"
+```
+
+That must **fail too**. The corpus is mounted read-only, and `store.connect_readonly` opens the hot
+store with SQLite's own `mode=ro` on top of that. A bug in the trainer can cost a bad model; it must
+never cost the one asset here that cannot be recreated.
+
+```bash
+docker compose -f docker/docker-compose.yml run --rm trainer sh -c "touch /app/data/models/probe && echo writable"
+```
+
+That must **succeed** — the model directory is the only thing it may write.
+
+The service holds no secrets: no `secrets:` entry, no upload URL, no deploy key. The rule that
+third-party code never runs in a shell holding a credential extends to it. Memory is capped at 2g
+against a measured peak of 934 MB for Taipei's 4.4M training rows; the collector deliberately has no
+such cap, because an OOM kill there costs ticks that cannot be re-fetched, while a trainer can always
+be re-run.
+
+The mechanism was verified against a scratch directory on 2026-09-21 — network denied, corpus
+read-only, models writable, root filesystem read-only, uid 10001 — but the commands above are what
+check it against the real mounts.
+
 ## 7. Runbook
 
 | Situation | Action |

@@ -41,6 +41,52 @@ services:
     secrets:
       - parkcast_upload_secret
 
+  # Stage B's nightly fit. Deliberately a separate container, never a step
+  # inside run_forever: a fit there would eat the 300-second poll slot and, by
+  # the deadline logic, possibly the one after it -- trading collected data for
+  # a model trained on less of it. A crash here cannot stop collection, which
+  # is the property that matters most.
+  #
+  # Every line below is a containment decision, and each is verified rather
+  # than asserted -- see docs/deploy.md, "Verifying the trainer's isolation".
+  trainer:
+    image: docker-collector:latest
+    command: ["python", "-m", "parkcast.train", "--city", "taipei"]
+    profiles: ["trainer"]        # never started by a bare `up`; run on demand
+    # Training makes no network call at all. Denying egress removes the entire
+    # exfiltration and runtime-supply-chain class rather than mitigating it,
+    # and costs nothing because there is nothing to fetch.
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # The corpus is read-only, enforced by the mount AND by
+    # store.connect_readonly's `mode=ro`. A bug in the trainer can cost a bad
+    # model; it must never cost the one asset that cannot be recreated.
+    volumes:
+      - ../data/cold:/app/data/cold:ro
+      - ../data/hot.sqlite:/app/data/hot.sqlite:ro
+      - ../data/models:/app/data/models
+    # The collector deliberately has no memory limit, because an OOM kill of
+    # the one irreplaceable process costs ticks that cannot be re-fetched. The
+    # trainer is the opposite case: it is the component that could run away, it
+    # can always be re-run, and it shares a laptop with the collector. Measured
+    # peak for Taipei's 4.4M rows is 934 MB, so 2g is room to grow into and a
+    # long way short of starving anything.
+    mem_limit: 2g
+    cpus: "1.0"
+    pids_limit: 128
+    restart: "no"
+    environment:
+      TZ: Asia/Taipei
+    # No `secrets:` and no upload URL. The trainer has no business holding the
+    # upload secret or the deploy key, and the deploy pipeline's rule -- third
+    # party code never runs in a shell holding a credential -- extends to it.
+
 secrets:
   parkcast_upload_secret:
     file: ./secrets/parkcast_upload_secret
