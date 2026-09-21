@@ -128,7 +128,7 @@ collector was not touched.
 
 `python scripts/evaluate-forecast.py` (withholding frozen lots by default; `--include-not-updating`
 scores them too). Time-split, walk-forward, leak-free by the train/test contract in `forecast.py`;
-24 tests in `tests/test_evaluate.py`, three of which exist to catch a leaked label, two to catch a
+29 tests in `tests/test_evaluate.py`, three of which exist to catch a leaked label, two to catch a
 withholding decision that could see the future, and one to check that the backtest withholds exactly
 what publishing would.
 
@@ -633,8 +633,20 @@ said.
 
    `hard_lots` is deliberately left unscoped: it reads only `counts.lot`, which `by_city` re-keys
    rather than recomputes, so the answer is identical either way. Its docstring says so.
-7. **Then** consider a trained model — against a persistence baseline that is strong on an
-   autocorrelated series, and a blend that now beats it.
+7. **Then** the trained model — against a persistence baseline that is strong on an autocorrelated
+   series, and a blend that now beats it. Specified 2026-09-21 in
+   [`docs/superpowers/specs/2026-09-21-stage-b-trained-model-design.md`](superpowers/specs/2026-09-21-stage-b-trained-model-design.md):
+   LightGBM, refit nightly from scratch out of process, with an adoption gate that keeps the
+   incumbent whenever the candidate fails to beat it on a held-out day. The opportunity it targets is
+   not the headline — blend is already +6.9% to +21.9% over persistence — but the two defects the
+   evaluations actually measured: mid-band calibration (0.8–0.9 says 0.862, happens 0.791) and the
+   hard subset, where the advantage falls to +5.4% at 60 minutes.
+
+   Three things it needs first, in this order: frozen lots excluded from the counts (currently
+   deferred, and a model trained on a stuck feed learns to be confident where the data is fiction);
+   the disk measured (step 5 — the corpus is the one asset that cannot be recreated); and, if the
+   model should ever be able to exclude assumed timestamps, a `ts_kind` column, because one added
+   later only helps data collected later.
 8. **Ship 機車 / 充電 — collector first, then the web app.** `fix/map-card-and-amenities` is built and
    reviewed; nothing of it is live. Rebuild and restart the collector, wait for one publish whose
    `lots.json` carries `m` and `e` (check a row, not just the file), and only then release the web
