@@ -1,15 +1,21 @@
 """Score the shipped forecasters against what actually happened.
 
     python scripts/evaluate-forecast.py
+    python scripts/evaluate-forecast.py --city kaohsiung
     python scripts/evaluate-forecast.py --test-fraction 0.3 --origins 60
+
+One city per run, defaulting to Taipei. The store holds six, each on its own
+feed clock and with its own published climatology, and a run over all of them
+reports a number about none of them -- see `parkcast.evaluate.backtest`. To
+compare cities, run it once per city; there is deliberately no combined
+headline.
 
 The split is by time and the cutoff is data-driven: by default the earliest 70%
 of collected timestamps train, the latest 30% are scored. Nothing is chosen at
 random -- see `parkcast.evaluate` for why that would invalidate the result.
 
-Read the support table before the headline. This corpus is a week old with
-34% coverage, so the honest reading of a small difference is "not yet
-distinguishable", not "climatology wins".
+Read the support table before the headline. A thin corpus makes a small
+difference mean "not yet distinguishable", not "climatology wins".
 """
 import argparse
 import sys
@@ -18,7 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from parkcast import config, store                                    # noqa: E402
+from parkcast import config, ids, store                               # noqa: E402
 from parkcast.evaluate import (                                       # noqa: E402
     FORECASTERS, backtest, brier, calibration, choose_origins,
     hard_lots, load_labels, skill, taipei,
@@ -55,12 +61,14 @@ def main() -> int:
     ap.add_argument("--every-minutes", type=int, default=30, help="spacing between origins")
     ap.add_argument("--include-not-updating", action="store_true",
                     help="also score lots the app shows as not updating (to compare)")
+    ap.add_argument("--city", default=ids.LEGACY_CITY,
+                    help="which city's shard to score (default taipei)")
     args = ap.parse_args()
 
     conn = store.connect(config.DB_PATH)
-    labels = load_labels(conn, config.PARQUET_DIR)
+    labels = load_labels(conn, config.PARQUET_DIR, city=args.city)
     if not labels:
-        raise SystemExit("no observations -- nothing to evaluate")
+        raise SystemExit(f"no observations for {args.city} -- nothing to evaluate")
 
     stamps = sorted(labels)
     cutoff = stamps[int(len(stamps) * (1 - args.test_fraction))]
@@ -69,7 +77,7 @@ def main() -> int:
     if not origins:
         raise SystemExit("no origins in the test period")
 
-    print("ParkCast forecast evaluation")
+    print(f"ParkCast forecast evaluation -- {args.city}")
     print(f"  corpus   {taipei(stamps[0]):%Y-%m-%d %H:%M} -> {taipei(stamps[-1]):%Y-%m-%d %H:%M} Taipei"
           f"  ({len(stamps):,} collected ticks)")
     print(f"  train    everything before {taipei(cutoff):%Y-%m-%d %H:%M}")
@@ -79,7 +87,8 @@ def main() -> int:
     hard = hard_lots(conn, config.PARQUET_DIR, before_ts=cutoff, threshold=HARD_THRESHOLD)
     print(f"  hard set {len(hard)} lots free <{HARD_THRESHOLD:.0%} of the time in training")
 
-    result = backtest(conn, config.PARQUET_DIR, origins=origins, horizons=HORIZONS,
+    result = backtest(conn, config.PARQUET_DIR, city=args.city, origins=origins,
+                      horizons=HORIZONS,
                       withhold_not_updating=not args.include_not_updating)
     if not any(result.by_model.values()):
         raise SystemExit("no predictions scored -- the test period has no paired labels")
@@ -94,7 +103,7 @@ def main() -> int:
     print(f"  base rate {base:.3f} of them had a space "
           f"(a forecast of a flat {base:.3f} scores {base * (1 - base):.4f})")
 
-    table("CITYWIDE  -- dominated by easy cases; read the hard subset below",
+    table(f"{args.city.upper()}  -- dominated by easy cases; read the hard subset below",
           [("", result.by_model)])
 
     hard_only = {name: [p for p in preds if p.lot_id in hard]

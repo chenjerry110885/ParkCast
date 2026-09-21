@@ -187,6 +187,10 @@ third-party code — tests, linters, `npm audit` — is running.
 npm run deploy:check --prefix worker
 ```
 
+Run it from the repository root, not from `worker/`. `--prefix` is resolved against the current
+directory, so from inside `worker/` npm looks for `worker/worker/package.json`, exits with `ENOENT`,
+and nothing runs at all — while `web/dist` keeps whatever an earlier build left there.
+
 Add `-- --with-python` when `src/` changed, to also run the Python test suite in a throwaway
 `docker-collector:latest` container. The check phase runs the web, worker and script test suites, both
 typechecks, the web linter, a production build, and a `wrangler deploy --dry-run --outdir` of the
@@ -202,6 +206,10 @@ basemap tiles and no `.pmtiles` archive, the label fonts present (only glyph ran
 `web/` and `worker/` for review (informational, not a gate). `deploy-check.mjs` itself refuses to run at
 all if `CLOUDFLARE_API_TOKEN` is set in the shell.
 
+Last of all — and only if every gate above passed — it writes `worker/.wrangler/build-stamp.json`, a
+SHA-256 over the build's inputs (`web/src`, `web/public`, `worker/src`, the lockfiles and configs) and
+another over `web/dist` itself. See `scripts/build-stamp.mjs`.
+
 **Phase 2 — release, in a fresh PowerShell, deploy key entered by hand:**
 
 ```powershell
@@ -212,7 +220,14 @@ npm run deploy:release --prefix worker
 Remove-Item Env:CLOUDFLARE_API_TOKEN
 ```
 
-The release phase re-scans the bundle (now also for the deploy key's own value, since it exists to leak
+The release phase first checks the build stamp: if there is none, or either digest no longer matches the
+tree, it stops without uploading. That guard exists because `.wrangler/dry` merely existing was the old
+test, and `dry` survives a check that aborted at any gate — so a check that never reached the build step
+left the previous run's `web/dist` in place and the release uploaded it, printing `deployed … smoke test
+passed` over a bundle days old. A release that reports success while shipping the wrong bytes is the
+worst failure this pipeline can have, because nobody goes back to look at it.
+
+It then re-scans the bundle (now also for the deploy key's own value, since it exists to leak
 for the first time), uploads a new version (`wrangler versions upload`), promotes it to 100% of traffic
 (`wrangler versions deploy <id>@100% --yes`), then applies the committed `workers_dev: true` and
 `preview_urls: false` with `wrangler triggers deploy --config wrangler.jsonc`. That last step is needed:

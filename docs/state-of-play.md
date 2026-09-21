@@ -614,12 +614,25 @@ said.
    are in [`docs/sources.md`](sources.md).
 6. **Accumulate, then re-run the evaluation around 2026-10-01**, when every half-hour-of-week bucket
    has three days behind it (at 09-13: 134 of 336 had none, 120 one, 82 two; Tuesday none at all).
-   **Scope `evaluate.py` per city first.** It is not scoped today: origin selection and labels run
-   over the whole store, and with six cities' clock phases a review run selected **only Kaohsiung
-   origins and scored zero Taipei predictions** — Kaohsiung and Taoyuan stamp `data_ts = now`, so
-   they always hold the global maximum, which is the same defect `forecast.by_city` fixed on the
-   publishing side. Deliberately left unfixed in the nationwide round (nothing publishes off it), but
-   a number produced before scoping it is about the wrong city.
+   ~~Scope `evaluate.py` per city first.~~ **Done 2026-09-21.** `backtest` and `load_labels` now take
+   a `city`, and `scripts/evaluate-forecast.py` takes `--city` (default `taipei`) and prints one
+   city per run — there is deliberately no combined headline. Two separate defects were behind this,
+   and only the first was the one recorded here:
+
+   * **Origins and labels on different clocks.** A label is joined by its exact timestamp; the six
+     feeds publish on six phases, and Kaohsiung and Taoyuan stamp `data_ts = now`, which lands on no
+     fixed phase at all. Unscoped, `choose_origins` picks whichever city sorts first and the labels at
+     `origin + horizon` belong to whoever shares that phase — the review run that scored **zero
+     Taipei predictions**. Reproduced on a synthetic two-city store before the fix.
+   * **The wrong climatology.** Climatology's top tier shrinks toward `counts.glob`, and a published
+     shard's `glob` covers only its own city. Unscoped, the backtest scored a climatology *no client
+     receives*: **0.367 where the published answer is 0.247** on the fixture in
+     `test_a_second_city_cannot_move_the_climatology_the_backtest_scores`. This one bites on the cold
+     path too — the path the 10-01 evaluation will actually use — so it would have flattered or
+     penalised the trained model without ever looking wrong.
+
+   `hard_lots` is deliberately left unscoped: it reads only `counts.lot`, which `by_city` re-keys
+   rather than recomputes, so the answer is identical either way. Its docstring says so.
 7. **Then** consider a trained model — against a persistence baseline that is strong on an
    autocorrelated series, and a blend that now beats it.
 8. **Ship 機車 / 充電 — collector first, then the web app.** `fix/map-card-and-amenities` is built and
@@ -627,11 +640,20 @@ said.
    `lots.json` carries `m` and `e` (check a row, not just the file), and only then release the web
    app. See "Scooter and charging on the card" above for why the order matters and what the interim
    state looks like.
-9. **Ship ranking preferences.** `feat/ranking-preferences` is code-complete and probe-verified;
-   nothing of it is live. It needs no collector change and no artifact change — everything it touches
-   is client-side (`web/src/rank.ts` and the new preference control), so unlike items 5 and 8 above
-   there is no ordering constraint, only the usual `deploy:check` then `deploy:release`. See "Ranking
-   preferences" above.
+9. ~~**Ship ranking preferences.**~~ **Live 2026-09-20** (`assets/index-BIXCJwhT.js`), after three
+   failed release attempts that each reported success. All three were the same shape: `deploy:check`
+   never reached its build step, `web/dist` kept a bundle from 09-18, and `deploy:release` uploaded
+   it and printed `deployed … smoke test passed`. The causes were `--prefix worker` run from inside
+   `worker/` (npm looks for `worker/worker/package.json`, exits, nothing runs) and — found on
+   09-21 — `deploy-check.mjs` mounting neither `scripts/` nor `web/tests/` into the Python
+   container, so `tests/test_seam_fixture.py` failed 9 tests on missing paths and aborted the check
+   at its first gate whenever `--with-python` was passed.
+
+   Both are fixed, and the class of failure is now closed rather than just the two instances:
+   `deploy-check.mjs` writes `worker/.wrangler/build-stamp.json` (SHA-256 over the build's inputs and
+   over `web/dist`) as its last act, and `release.mjs` refuses to upload unless both digests still
+   match. `.wrangler/dry` merely existing is no longer accepted as proof that a check passed. See
+   `scripts/build-stamp.mjs` and [`docs/deploy.md`](deploy.md).
 
 Also deferred: removing frozen lots from the climatology counts; retiring or recalibrating
 `find_frozen_lots`; compressing the daily metadata snapshots (2.17 MB a day, ~90% of the cold store).

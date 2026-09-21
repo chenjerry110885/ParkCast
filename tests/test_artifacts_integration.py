@@ -6,7 +6,7 @@ import pytest
 
 from parkcast import config, ids, store
 from parkcast.artifacts import HEADER_SIZE, build_lots_json, decode_header, encode_grid
-from parkcast.forecast import Blend, load_history
+from parkcast.forecast import Blend, by_city, load_history
 from parkcast.grid import UNKNOWN, build_grid
 from parkcast.metadata import Lot
 
@@ -39,9 +39,21 @@ def test_end_to_end_over_real_observations(tmp_path):
     _snapshot(copy)
     conn = store.connect(copy)
 
-    history = load_history(conn)
+    # One city's shard, not the whole store. `load_history` takes `latest_ts` as
+    # a single maximum over every lot in it, and the store now holds six cities
+    # -- two of which stamp `data_ts = now` and so always own that maximum. Read
+    # unscoped, `current` comes back holding only their lots, `Persistence`
+    # answers None for all ~1,082 of Taipei's, and `Blend` quietly degrades to
+    # climatology alone: a grid full of plausible numbers with the short-horizon
+    # signal gone. The roster would be six cities wide as well, which is not a
+    # shape `publish_city` ever builds. See `forecast.by_city`.
+    history = by_city(load_history(conn))[ids.LEGACY_CITY]
     assert history.latest_ts > 0
     assert len(history.recent) > 500, "expected a citywide history"
+    assert history.current, (
+        "no Taipei lot sits at Taipei's own latest reading -- the degradation "
+        "`by_city` exists to prevent, and one that shows up as plausible numbers"
+    )
 
     # Three id conventions meet here, exactly as they do in `publish_city`, and
     # the live snapshot may be either side of the startup migration:
