@@ -603,9 +603,37 @@ said.
       Memory after the first six-city tick: **207 MiB**, which answers the open question about
       `counts.bucket` at this scale. No memory limit is set in compose, deliberately.
 
-   5. **Still open: measure the disk.** Read `data/cold/`'s growth after a full day of six cities
-      (baseline 2026-09-17: 29 MB total, ~235 KB/day for Taipei alone) and compare it against the
-      spec's 150–400 MB/month estimate — the number the plan deliberately left unmeasured.
+   5. ~~**Still open: measure the disk.**~~ **Measured 2026-09-21** with `scripts/disk-growth.py`,
+      17 dated days of a six-city corpus:
+
+      | | |
+      |---|---|
+      | cold total | **41.6 MB** |
+      | — `meta/` (dated JSON payload snapshots) | 36.9 MB — **89%** |
+      | — observations (Parquet) | 4.7 MB — 11% |
+      | newest full day | 2.2 MB |
+      | projected | **65.4 MB/month**, ~0.78 GB/year |
+      | hot store | 311.9 MB, bounded by the 48 h window |
+
+      **Comfortably inside** the nationwide spec's 150–400 MB/month estimate, at about a third of its
+      low end. Disk does not block Stage B. Two things the breakdown shows that the total hid:
+
+      * **The metadata snapshots are 89% of the cold store** — 36.9 MB over 17 days is 2.17 MB/day,
+        exactly the figure already recorded below. They are near-identical day to day (one raw
+        `TCMSV_alldesc.json` per day), so "compressing the daily metadata snapshots" is no longer a
+        vague deferred item: it is the single change that would cut the cold store by ~85%, and
+        writing a snapshot only when it *differs* from the previous day's would cost almost nothing.
+      * **The hot store dwarfs the cold corpus** — 311.9 MB against 4.7 MB of observations for 17
+        days, because row-oriented SQLite with a `WITHOUT ROWID` index over ~4,500 lots × 288 ticks ×
+        2 days is ~3.5M rows, and Parquet compresses a day of that to well under a megabyte. It does
+        not grow with the corpus, but it is a permanent ~312 MB floor — more than a year of cold
+        storage. `HOT_RETENTION_SEC` is the expensive dial here, not the cold store.
+
+      The first run of the script reported 4.7 MB and "under the estimate" because it globbed
+      `*.parquet` at the top level only and never descended into `meta/`. Two figures already in this
+      document contradicted it — the 2.17 MB/day above and the 29 MB baseline — and neither was
+      checked against it. Fixed in `8aeab63`; the walk is recursive, reports per component, and
+      counts undated files rather than dropping them.
    6. The app keeps showing Taipei only until a following spec teaches it to read the other
       cities' shards — the shards will exist on disk, but nothing reads them yet.
 
@@ -668,7 +696,17 @@ said.
    `scripts/build-stamp.mjs` and [`docs/deploy.md`](deploy.md).
 
 Also deferred: removing frozen lots from the climatology counts; retiring or recalibrating
-`find_frozen_lots`; compressing the daily metadata snapshots (2.17 MB a day, ~90% of the cold store).
+`find_frozen_lots`; compressing the daily metadata snapshots (2.17 MB a day — measured 2026-09-21 at
+**89% of the cold store**, and near-identical from one day to the next, so writing one only when it
+changes would cut the cold store by roughly 85%).
+
+**Only Taipei has a dated metadata history.** `snapshot_metadata` is called exactly once, on
+`config.METADATA_URL`, so `cold/meta/` holds Taipei's roster per day and nothing else. The other five
+cities carry their rosters in the tick itself (`rosters[city] = r.lots`), held in memory and never
+written dated. So for those five, a historical observation can only be joined against *today's*
+capacity, type and area — and a lot that has since disappeared from the feed has none at all. Stage B
+ships Taipei first, where the history exists, so this is not a blocker; it becomes one when the model
+extends to the other cities, and the fix is the same change as the compression above.
 **The support-aware blend proposed on 09-10 is deprioritised** — the loss it targeted did not show up
 again.
 

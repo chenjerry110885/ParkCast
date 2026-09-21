@@ -362,9 +362,20 @@ anywhere; credentials stay with the user and are never handled by tooling.
   ~09-04) is the only city with real depth. `scripts/corpus-coverage.py --city <city>` is the check,
   and it was only made per-city on 2026-09-21 — before that it reported the union of six cities and
   one feed's healthy night filled in another's outage.
-- **Disk is still unmeasured** (`docs/state-of-play.md`, step 5). If cold storage outruns the disk,
-  collection stops, and the corpus is the one asset that cannot be recreated. This should be measured
-  before a trainer starts writing models beside it.
+- ~~**Disk is still unmeasured.**~~ **Measured 2026-09-21**: 65.4 MB/month projected, ~0.78 GB/year,
+  against the nationwide spec's 150–400 MB/month — about a third of the low end. **Disk does not
+  block Stage B.** The hot store is a separate, permanent ~312 MB floor, bounded by the 48-hour
+  window and not growing with the corpus. Model files are negligible beside either.
+
+- **Historical lot metadata exists for Taipei only.** `snapshot_metadata` is called once, on
+  `config.METADATA_URL`, so `cold/meta/` dates Taipei's roster per day; the other five cities carry
+  their rosters in the tick and never write them dated. For those five, a training row from three
+  weeks ago can only be joined against *today's* `capacity_car`, `lot_type` and `area` — a mild
+  look-ahead, since capacity moves rarely, but a real one, and a lot that has since left the feed has
+  no metadata at all. §7 ships Taipei first, where the history exists, so this constrains the *rollout
+  order* rather than the design. Extending to another city requires dating its roster first, which is
+  the same change as compressing the snapshots (they are 89% of the cold store and near-identical day
+  to day).
 - **`ts_kind` is not persisted.** `feed.py` says a fetch-time stamp "is an assumption, not a reading,
   and a backtest must be able to exclude it" — but nothing records which is which. Kaohsiung and
   Taoyuan are inferable from the city; Tainan, New Taipei and Hsinchu fall back to fetch time **per
