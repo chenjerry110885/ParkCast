@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from parkcast import ids
-from parkcast.feed import FeedSnapshot
-from parkcast.quality import validate
+from parkcast.feed import TS_FETCH, FeedSnapshot
+from parkcast.quality import Q, validate
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS observations (
@@ -72,6 +72,12 @@ def insert_snapshot(
         capacity = capacities.get(obs.lot_id)
         free_car, flags = validate(obs.free_car, capacity)
         free_motor, _ = validate(obs.free_motor, None)
+        # OR-ed in rather than returned by `validate`, because nothing about the
+        # count is wrong here: this is provenance, not validity. It has to be
+        # recorded at insert or not at all -- three adapters decide it per
+        # record, so neither the city nor anything else can recover it later.
+        if obs.ts_kind == TS_FETCH:
+            flags |= Q.ASSUMED_TS
         rows.append(
             (obs.lot_id, snapshot.city, obs.data_ts, snapshot.observed_at,
              free_car, free_motor, int(flags))

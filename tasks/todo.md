@@ -1,172 +1,376 @@
-# ParkCast — ranking preferences: cheaper, balanced, closer
+# ParkCast — Stage B prerequisites
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-The Stage A todo is archived at `docs/superpowers/plans/2026-09-17-stage-a-archive.md`.
+The ranking-preferences todo is archived at `docs/superpowers/plans/2026-09-18-ranking-preferences-archive.md`.
 
-**Goal:** Let a driver say whether they would rather walk less or pay less, without ever letting that preference make the app recommend a car park it believes is full.
+**Goal:** Land the two things that must exist *before* the corpus deepens, so that Stage B — and the evaluation it will be judged by — can be built on a corpus that records what it needs to.
 
-**Architecture:** `rank.ts`'s `TIME_VALUE` splits into `WALK_VALUE` (the preset moves it) and `DELAY_VALUE` (floor-coupled: `max(5, WALK_VALUE)`). Three presets set the pair. The list's cap becomes distance-bounded with the tail behind an expander. `probe-ranker.py` gains a sweep that measures the safety invariant instead of asserting it.
+**Architecture:** Both are small and independent. One adds a quality bit so the corpus records which timestamps are the feed's and which are our fetch clock. The other adds a script that measures cold-store growth against the spec's estimate, because the corpus is the one asset that cannot be recreated and nobody has checked whether it fits.
 
-**Tech Stack:** TypeScript/React, Python 3.13+ (stdlib only). No new dependency.
+**Tech Stack:** Python 3.13+, stdlib plus the pyarrow already present. No new dependency.
 
-**Spec:** [`docs/superpowers/specs/2026-09-18-ranking-preferences-design.md`](../docs/superpowers/specs/2026-09-18-ranking-preferences-design.md) — **read §3 and §5 first**; they record two designs the measurement overturned.
+**Spec:** [`docs/superpowers/specs/2026-09-21-stage-b-trained-model-design.md`](../docs/superpowers/specs/2026-09-21-stage-b-trained-model-design.md) — §10 (risks) is where both of these come from.
 
 ## Global Constraints
 
-- **The honesty rules bind every task.** A `null` probability never renders as a number; `0` is a real reading, never "not reporting"; the observed count `f` is never presented as a forecast; a lot whose feed has stopped still says so; **the ranker's expected-cost score is never shown** — this plan adds a control that changes that score and must still never display it.
-- **The safety invariant, measured not asserted:** no preset may put an inversion at **#1**. "No inversions" is already false — the shipped ranker has 11, worst at #3 (88 on realistic destinations). The line is position, per `probe-ranker.py`'s own argument: a likely-full lot deep in a list is a trade-off the driver can see and reject; one at the top is the app recommending a car park it believes is full.
-- **`DELAY_VALUE = max(5, WALK_VALUE)`.** Never below 5, so a preference cannot erode the penalty for being sent away. Pinning it outright makes Closer unsafe (35 inversions, worst #2); coupling it symmetrically makes Cheaper unsafe (19 from 0). Both were measured; do not "simplify" this rule.
-- **Balanced must reproduce today's ordering exactly.** It is the shipped pair (5, 5). A driver who never opens the control sees no change. This is the regression that matters most.
-- Both layouts first-class (phone bottom sheet < 768 px, desktop side panel ≥ 768 px); every tap target ≥ 44 px; `prefers-reduced-motion` honoured; nothing animates at rest.
-- No new runtime dependency. Nothing leaves the device: the preference lives in `localStorage`, like the language toggle.
-- **Never read or write anything under `data/`** — a live collector owns it, six cities deep. Use `web/.dev-artifacts/` (git-ignored) for artifact-driven work.
-- **`git checkout --` is unsafe in this repo** (`core.autocrlf=true` rewrites LF→CRLF). Revert experiments with byte-exact backups verified by `cmp`.
-- Tests: `cd web && npx vitest run` (**440** at the start of this plan) · `./.venv/Scripts/python.exe -m pytest -q` (**616**, but see below) · `cd worker && npm test` (**121**) · `node --test scripts/tests/*.test.mjs` (**55**).
-- **Known flaky test, not yours:** `tests/test_artifacts_integration.py::test_end_to_end_over_real_observations` reads the **live** corpus and races the collector's writes — measured 2 failures in 4 consecutive runs on identical code. If it fails, re-run it; if it fails repeatedly *and* your change touches Python, investigate. Do not "fix" it by loosening its assertion.
-- **Never commit** unless a task's final step says to. No AI attribution of any kind in any commit message (`CLAUDE.md:18`).
+- **Never read or write anything under `data/`.** A live collector owns it. Scripts written here take paths as arguments and are run by the user; tests use `tmp_path`.
+- **The corpus stays a faithful record of the feed.** `liveness.py`: "The readings are still collected and stored exactly as the feed sent them." Nothing here rewrites a collected row.
+- **`0` is a real reading**, distinct from absent, everywhere.
+- **No new dependency.**
+- **No `Co-Authored-By:` trailers and no AI attribution of any kind in commit messages** (CLAUDE.md).
+- Tests run via the project's container: `docker run --rm --user 0:0 -v "D:/Projects/ParkCast/src:/repo/src:ro" -v "D:/Projects/ParkCast/tests:/repo/tests:ro" -v "D:/Projects/ParkCast/scripts:/repo/scripts:ro" -v "D:/Projects/ParkCast/web/tests:/repo/web/tests:ro" -v "D:/Projects/ParkCast/pyproject.toml:/repo/pyproject.toml:ro" -w /repo -e PYTHONDONTWRITEBYTECODE=1 docker-collector:latest sh -c "pip install -q pytest 2>/dev/null; python -m pytest -q -p no:cacheprovider tests/"`
 
 ---
 
-## File structure
+### Task 1: Record which timestamps are assumptions
 
-| Path | Responsibility |
-|---|---|
-| `web/src/rank.ts` | `WALK_VALUE`/`DELAY_VALUE`, the `Preference` type, preset table, threading the pair through `rankLots` |
-| `web/src/preference.ts` | reading and writing the stored preference, guarded like `places.ts` does storage |
-| `web/src/components/PreferencePicker.tsx` | the three-option control |
-| `web/src/App.tsx` | holding the preference, passing it to `rankLots`, the distance-bounded list |
-| `web/src/i18n.ts` | the control's strings, both languages |
-| `scripts/probe-ranker.py` | the split constants, and the preference sweep that measures the invariant |
-| `CLAUDE.md`, `docs/state-of-play.md` | the split, the presets, the measured safety table |
+`feed.py` already says of `ts_kind`: "A fetch-time stamp is an assumption, not a reading, and a backtest must be able to exclude it." Nothing persists it. Kaohsiung and Taoyuan are inferable from the city, but Tainan, New Taipei and Hsinchu fall back to fetch time **per record**, so for those three it is lost the moment the row is written.
 
----
-
-### Task 1: split the constant
+No schema change: `Q` is a per-observation `IntFlag` "written at insert time", already stored as an `INTEGER` in the hot store and a per-slot `int16` list in Parquet. Bits 1/2/4 are in use and 8 is reserved for `FROZEN`; **16 is free**.
 
 **Files:**
-- Modify: `web/src/rank.ts`
-- Test: `web/tests/rank.test.ts`
+- Modify: `src/parkcast/quality.py` (the `Q` flag)
+- Modify: `src/parkcast/store.py:70-78` (`insert_snapshot`'s row construction)
+- Test: `tests/test_quality.py`, `tests/test_store.py`, `tests/test_compact.py`
 
 **Interfaces:**
-- Produces: `export const WALK_VALUE = 5`, `export const DELAY_VALUE = 5`. `TIME_VALUE` is **deleted**, not aliased.
+- Consumes: `feed.TS_FETCH`, `feed.Observation.ts_kind`
+- Produces: `quality.Q.ASSUMED_TS` (value 16), set on any observation whose `ts_kind` is `TS_FETCH`
 
-- [x] **Step 1: Write the failing test.** Assert the walk term uses `WALK_VALUE` and the failure branch uses `DELAY_VALUE`, by giving them different values in a fixture and checking each side moves independently. A test that sets both to 5 proves nothing, because that is today's behaviour.
-- [x] **Step 2: Run it and watch it fail.**
-- [x] **Step 3: Implement.** `certain = walkMin * WALK_VALUE + fee`; the circling penalty and the drive both take `DELAY_VALUE`. **Delete `TIME_VALUE`** rather than leaving an alias — `scripts/probe-ranker.py`'s `load_constants()` parses it by name out of the TypeScript, so its disappearance must break the probe loudly. That is the design working; Task 5 repairs it.
-- [x] **Step 4: Run the web suite.** Every existing ranker test must pass unchanged — with both constants at 5 the arithmetic is identical.
-- [x] **Step 5: Commit** — `git commit -m "refactor(rank): price the walk and the delay separately"`.
+- [ ] **Step 1: Write the failing test**
 
----
+In `tests/test_store.py`:
 
-### Task 2: the preference and its presets
+```python
+def test_a_fetch_stamped_observation_is_flagged_as_an_assumption(conn):
+    store.insert_snapshot(conn, FeedSnapshot("tainan", 1_700_000_100, (
+        Observation("tainan:A", 5, None, 1_700_000_000, TS_RECORD),
+        Observation("tainan:B", 5, None, 1_700_000_100, TS_FETCH),
+    )), {"tainan:A": 50, "tainan:B": 50})
 
-**Files:**
-- Modify: `web/src/rank.ts`
-- Create: `web/src/preference.ts`, `web/tests/preference.test.ts`
-- Test: `web/tests/rank.test.ts`
+    flags = dict(conn.execute("SELECT lot_id, quality FROM observations"))
+    assert not flags["tainan:A"] & Q.ASSUMED_TS, "the feed stamped this one itself"
+    assert flags["tainan:B"] & Q.ASSUMED_TS, "this data_ts is our clock, not the feed's"
 
-**Interfaces:**
-- Produces: `export type Preference = "cheaper" | "balanced" | "closer"`; `export const PREFERENCES: Record<Preference, { walk: number; delay: number }>`; `rankLots` takes `preference` in its input object, defaulting to `"balanced"`. `preference.ts` exports `readPreference(storage)` / `writePreference(storage, p)`.
 
-- [x] **Step 1: Write the failing tests.**
+def test_the_assumption_flag_does_not_disturb_the_other_quality_bits(conn):
+    # NO_CAPACITY and ASSUMED_TS are independent facts and must both survive.
+    store.insert_snapshot(conn, FeedSnapshot("hsinchu", 1_700_000_100, (
+        Observation("hsinchu:A", 5, None, 1_700_000_100, TS_FETCH),
+    )), {})
 
-```ts
-it("prices the delay at the walk's value only when that is the higher of the two", () => {
-  // DELAY_VALUE = max(5, WALK_VALUE). Never below 5, so a preference cannot make
-  // being turned away cheap; above it when walking is dear, so making the walk
-  // expensive does not relatively cheapen failure. Both halves were measured:
-  // pinning breaks Closer, symmetric coupling breaks Cheaper. See the spec, section 5.
-  expect(PREFERENCES.cheaper).toEqual({ walk: 2, delay: 5 });
-  expect(PREFERENCES.balanced).toEqual({ walk: 5, delay: 5 });
-  expect(PREFERENCES.closer).toEqual({ walk: 12, delay: 12 });
-});
-
-it("ranks identically to the shipped constants when balanced", () => {
-  // The regression that matters most: a driver who never opens the control
-  // must see no change whatsoever.
-  expect(rankLots({ ...input, preference: "balanced" })).toEqual(rankLots(input));
-});
+    quality = conn.execute("SELECT quality FROM observations").fetchone()[0]
+    assert quality & Q.ASSUMED_TS
+    assert quality & Q.NO_CAPACITY
 ```
 
-- [x] **Step 2: Run them and watch them fail.**
-- [x] **Step 3: Implement.** `preference.ts` guards storage the way `places.ts` does — a private window, blocked site data or a thrown accessor must leave the app working on the default. An unrecognised stored value reads as `"balanced"`, never as a crash.
-- [x] **Step 4: Run the web suite.**
-- [x] **Step 5: Commit** — `git commit -m "feat(rank): three preferences, and the floor that keeps them safe"`.
+- [ ] **Step 2: Run them to verify they fail**
 
----
+Run the container command above with `tests/test_store.py -k assumption`.
+Expected: FAIL with `AttributeError: ASSUMED_TS`.
 
-### Task 3: the control
+- [ ] **Step 3: Add the flag**
 
-**Files:**
-- Create: `web/src/components/PreferencePicker.tsx`, `web/tests/preferencePicker.test.tsx`
-- Modify: `web/src/App.tsx`, `web/src/i18n.ts`, `web/src/styles/components.css`
+In `src/parkcast/quality.py`, inside `Q`, after `FROZEN`:
 
-- [x] **Step 1: Write the failing tests.** Each option sets the preference and re-ranks; the choice survives a reload; every control is keyboard-reachable and labelled; the group has an accessible name; changing it does **not** scroll the list, re-centre the map or move the arrival. Assert the rendered order actually changes between `cheaper` and `closer` for a fixture where it should — a test that only checks the button's state would pass against a control wired to nothing.
-- [x] **Step 2: Run them and watch them fail.**
-- [x] **Step 3: Implement.** It sits with `ArrivalPicker`: both answer "what am I asking for", against the list's "here is what we found". **The score is never shown** — the control names a preference, and no card gains a NT$ figure. Copy is comparative ("cheaper", not "cheapest") because the ranker will still put a likely space above an unlikely bargain; read `i18n.ts` for register and keep the Chinese natural Taiwanese usage rather than a gloss.
-- [x] **Step 4: Run the web suite.**
-- [x] **Step 5: Commit** — `git commit -m "feat(web): choose whether to walk less or pay less"`.
-
----
-
-### Task 4: the distance-bounded list
-
-**Files:**
-- Modify: `web/src/rank.ts` (`listRows`), `web/src/App.tsx`, `web/src/components/LotList.tsx`, `web/src/i18n.ts`
-- Test: `web/tests/rank.test.ts`, `web/tests/lotList.test.tsx`
-
-**Interfaces:**
-- Produces: `export const NEARBY_RADIUS_M = 1500`; and `listRows` changes shape:
-
-```ts
-export interface ListRows { head: Ranked[]; nearby: Ranked[] }
-export function listRows(ranked: readonly Ranked[], limit: number): ListRows
+```python
+    ASSUMED_TS = 16   # data_ts is our fetch clock: the feed stamped nothing
 ```
 
-`head` is what the list draws today (the cap, plus the existing `UNKNOWN_RESERVE` rescue).
-`nearby` is every remaining lot within `NEARBY_RADIUS_M`, in the ranker's order, disjoint from
-`head`. **This is a breaking change to a returned type, and `App.tsx:842`'s `listed` is its only
-caller** — move it in the same commit or the tree does not build.
+And extend the class docstring, which currently explains only why `FROZEN` is the exception:
 
-- [x] **Step 1: Write the failing tests.** Every lot within `NEARBY_RADIUS_M` is reachable; the tail keeps the ranker's order and is not re-sorted; the ranked head is unchanged with the expander closed; a lot already in the head never appears twice.
-- [x] **Step 2: Run them and watch them fail.**
-- [x] **Step 3: Implement.** **Measured, so size it honestly:** 1.5 km reaches a median of 64 Taipei lots and up to 157, which is why the tail sits behind a "show more nearby" expander rather than rendering with the head — 157 cards laid out at once is exactly the cost this project has already been told about once. Keep the existing `UNKNOWN_RESERVE` rescue working.
-- [x] **Step 4: Run the web suite.**
-- [x] **Step 5: Commit** — `git commit -m "feat(web): reach every car park worth walking to"`.
+```python
+    ASSUMED_TS is the opposite case and genuinely belongs here: whether a feed
+    stamped a record is known at the instant it is parsed, about that one
+    observation, and is never revised. Three adapters (Tainan, New Taipei,
+    Hsinchu) fall back to fetch time PER RECORD, so the city cannot answer it
+    and nothing else can recover it afterwards.
+```
+
+- [ ] **Step 4: Set it at insert**
+
+In `src/parkcast/store.py`, in `insert_snapshot`'s loop:
+
+```python
+    for obs in snapshot.observations:
+        capacity = capacities.get(obs.lot_id)
+        free_car, flags = validate(obs.free_car, capacity)
+        free_motor, _ = validate(obs.free_motor, None)
+        # Provenance, not validity, which is why it is OR-ed in rather than
+        # returned by `validate`: nothing about the count is wrong here. It
+        # cannot be recovered later -- three adapters decide it per record.
+        if obs.ts_kind == TS_FETCH:
+            flags |= Q.ASSUMED_TS
+        rows.append(
+            (obs.lot_id, snapshot.city, obs.data_ts, snapshot.observed_at,
+             free_car, free_motor, int(flags))
+        )
+```
+
+Add `TS_FETCH` to the existing `from parkcast.feed import ...` and `Q` to the `from parkcast.quality import ...`.
+
+- [ ] **Step 5: Run them to verify they pass**
+
+Expected: PASS.
+
+- [ ] **Step 6: Prove it survives compaction**
+
+Parquet already carries `quality` per slot, so this should need no code — the test exists to prove it rather than assume it. In `tests/test_compact.py`:
+
+```python
+def test_the_assumption_flag_reaches_the_cold_store(conn, tmp_path):
+    day = date(2026, 9, 6)
+    start, _ = day_bounds(day)
+    store.insert_snapshot(conn, FeedSnapshot("taoyuan", start + 180, (
+        Observation("taoyuan:A", 4, None, start + 180, TS_FETCH),
+    )), {"taoyuan:A": 50})
+
+    compact_day(conn, day, tmp_path)
+    row = pq.read_table(tmp_path / "2026-09-06.parquet").to_pylist()[0]
+    assert row["quality"][0] & Q.ASSUMED_TS, (
+        "provenance that does not outlive the 48-hour hot window is no use to a "
+        "backtest over months"
+    )
+```
+
+- [ ] **Step 7: Run it; implement only if it fails**
+
+If it fails, the cause is in `compact_day`'s quality list, not in this task's design.
+
+- [ ] **Step 8: Record the discontinuity**
+
+The bit is only meaningful for rows written after this ships, so the corpus divides in two. Add to `docs/sources.md`, under the per-city notes:
+
+```markdown
+**Timestamp provenance.** `Q.ASSUMED_TS` (quality bit 16) marks an observation whose `data_ts` is
+our fetch clock rather than the feed's stamp. Kaohsiung and Taoyuan set it on every row; Tainan, New
+Taipei and Hsinchu set it per record, whenever `update_time` is missing or unparseable; Taipei never
+does. **The bit is only meaningful from 2026-09-21 forward** — rows collected before it shipped carry
+0 for "not recorded", which is indistinguishable from "the feed stamped it". Any analysis that
+excludes assumed timestamps must bound itself to data collected after that date, or it is treating an
+unknown as a known.
+```
+
+- [ ] **Step 9: Run the whole suite, then commit**
+
+```bash
+git add src/parkcast/quality.py src/parkcast/store.py tests/test_store.py tests/test_compact.py docs/sources.md
+git commit -m "feat(quality): record which timestamps are ours, not the feed's"
+```
+
+- [ ] **Step 10: Tell the user the collector needs a rebuild**
+
+The live collector runs from a built image, so the flag starts being written only after:
+
+```bash
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
+This is the user's action, not the implementer's. Every slot before it is a slot of unrecorded provenance, which is the whole reason this task is first.
 
 ---
 
-### Task 5: teach the probe the split, and measure the invariant
+### Task 2: Measure whether the corpus fits on the disk
+
+`docs/state-of-play.md` step 5 has been open since 2026-09-17: read `data/cold/`'s growth after a full day of six cities and compare it against the spec's 150–400 MB/month estimate. The corpus is the one asset that cannot be recreated, and Stage B is about to start writing model files beside it.
+
+A script rather than a one-off `du`, because the question recurs every time a city is added and the answer has to be comparable across runs.
 
 **Files:**
-- Modify: `scripts/probe-ranker.py`
-- Test: `scripts/tests/` if a harness fits there; otherwise the probe's own output is the artifact
+- Create: `scripts/disk-growth.py`
+- Test: `tests/test_disk_growth.py`
 
-- [x] **Step 1: Repair `load_constants()`.** It parses `TIME_VALUE` by name and Task 1 deleted it, so the probe is broken right now — that is deliberate. Parse `WALK_VALUE` and `DELAY_VALUE` instead. **Keep parsing out of the TypeScript; never copy the numbers**, which is why the probe can be trusted at all.
-- [x] **Step 2: Add the preference sweep.** For each preset, over both samples — every lot's own position (adversarial: the risky lot sits at 0 m) and destinations drawn from the offline place index at least 50 m from any lot (realistic) — report inversion count, worst position, whether any reaches **#1**, and the LIST REACH columns.
-- [x] **Step 3: Check it against the measurement already taken.** The figures in the spec's §5 came from a harness that reused this probe's own `Ranker` and `count_inversions`. Your sweep should reproduce them: Cheaper 0 / Balanced 11 / Closer 8 on lot positions, and no preset at #1 in either sample. **If your numbers disagree, say so loudly rather than adjusting anything** — one of the two is wrong and it matters which.
-- [x] **Step 4: Run the probe and the Python suite.**
-- [x] **Step 5: Commit** — `git commit -m "feat(probe): measure the safety of every preference"`.
+**Interfaces:**
+- Consumes: nothing from other tasks
+- Produces: `disk_growth.summarise(sizes: dict[date, int], *, hot_bytes: int) -> Report` with fields `days`, `total_bytes`, `mean_bytes_per_day`, `projected_bytes_per_month`, `newest_day_bytes`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test_disk_growth.py`. The arithmetic is the part worth testing; the filesystem walk is not.
+
+```python
+from datetime import date
+import importlib.util, pathlib, sys
+
+spec = importlib.util.spec_from_file_location(
+    "disk_growth", pathlib.Path(__file__).resolve().parent.parent / "scripts" / "disk-growth.py")
+disk_growth = importlib.util.module_from_spec(spec)
+sys.modules["disk_growth"] = disk_growth
+spec.loader.exec_module(disk_growth)
+
+
+def test_a_month_is_projected_from_the_mean_day():
+    report = disk_growth.summarise(
+        {date(2026, 9, 18): 1_000_000, date(2026, 9, 19): 3_000_000}, hot_bytes=0)
+    assert report.mean_bytes_per_day == 2_000_000
+    assert report.projected_bytes_per_month == 2_000_000 * 30
+
+
+def test_the_newest_day_is_reported_separately_from_the_mean():
+    # Cities were added over time, so the mean understates the current rate --
+    # the number that matters for "will this fit" is the newest full day.
+    report = disk_growth.summarise(
+        {date(2026, 9, 16): 200_000, date(2026, 9, 20): 1_800_000}, hot_bytes=0)
+    assert report.newest_day_bytes == 1_800_000
+    assert report.mean_bytes_per_day == 1_000_000
+
+
+def test_an_empty_cold_store_projects_nothing_rather_than_zero():
+    # Zero would read as "it costs nothing", which is a different claim.
+    report = disk_growth.summarise({}, hot_bytes=0)
+    assert report.mean_bytes_per_day is None
+    assert report.projected_bytes_per_month is None
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Expected: FAIL at module load — the file does not exist.
+
+- [ ] **Step 3: Write the script**
+
+```python
+#!/usr/bin/env python
+"""How fast the cold store is growing, and what that means for a month.
+
+    python scripts/disk-growth.py
+    python scripts/disk-growth.py --cold data/cold --hot data/hot.sqlite
+
+Open since 2026-09-17: the nationwide spec estimated 150-400 MB/month for six
+cities and the plan deliberately left it unmeasured. The corpus is the only
+asset in this project that cannot be recreated -- a feed serves the present, so
+a day not collected is gone -- which makes "does it fit" a question worth a
+script rather than a one-off `du`.
+
+The newest full day matters more than the mean. Cities were added over two
+weeks, so the mean is an average over a corpus that was smaller for most of its
+life, and it understates today's rate.
+"""
+import argparse
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+
+DAYS_PER_MONTH = 30
+
+
+@dataclass(frozen=True)
+class Report:
+    days: int
+    total_bytes: int
+    hot_bytes: int
+    mean_bytes_per_day: float | None
+    projected_bytes_per_month: float | None
+    newest_day_bytes: int | None
+
+
+def summarise(sizes: dict[date, int], *, hot_bytes: int) -> Report:
+    """Turn per-day byte counts into the numbers the question needs.
+
+    None rather than 0 for an empty corpus: 0 would read as "it costs nothing",
+    which is a claim, where None is the absence of one.
+    """
+    if not sizes:
+        return Report(0, 0, hot_bytes, None, None, None)
+    total = sum(sizes.values())
+    mean = total / len(sizes)
+    return Report(
+        days=len(sizes),
+        total_bytes=total,
+        hot_bytes=hot_bytes,
+        mean_bytes_per_day=mean,
+        projected_bytes_per_month=mean * DAYS_PER_MONTH,
+        newest_day_bytes=sizes[max(sizes)],
+    )
+
+
+def day_sizes(cold_dir: Path) -> dict[date, int]:
+    """One entry per compacted day. A stem that is not an ISO date is not ours."""
+    sizes: dict[date, int] = {}
+    for path in sorted(cold_dir.glob("*.parquet")):
+        try:
+            day = date.fromisoformat(path.stem)
+        except ValueError:
+            continue
+        sizes[day] = path.stat().st_size
+    return sizes
+
+
+def mb(value: float | None) -> str:
+    return "--" if value is None else f"{value / 1_000_000:,.1f} MB"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--cold", default="data/cold")
+    ap.add_argument("--hot", default="data/hot.sqlite")
+    ap.add_argument("--estimate-low", type=float, default=150.0,
+                    help="the spec's low estimate, MB/month")
+    ap.add_argument("--estimate-high", type=float, default=400.0,
+                    help="the spec's high estimate, MB/month")
+    args = ap.parse_args()
+
+    cold = Path(args.cold)
+    if not cold.exists():
+        raise SystemExit(f"no cold store at {cold}")
+    hot = Path(args.hot)
+    report = summarise(day_sizes(cold), hot_bytes=hot.stat().st_size if hot.exists() else 0)
+
+    print(f"COLD STORE  {args.cold}")
+    print(f"  compacted days     {report.days}")
+    print(f"  total              {mb(report.total_bytes)}")
+    print(f"  mean day           {mb(report.mean_bytes_per_day)}")
+    print(f"  newest full day    {mb(report.newest_day_bytes)}   <- today's rate")
+    print(f"  hot store          {mb(report.hot_bytes)}  (bounded: 48h window)")
+    if report.newest_day_bytes is not None:
+        at_current = report.newest_day_bytes * DAYS_PER_MONTH / 1_000_000
+        print(f"\nprojected from the newest day: {at_current:,.1f} MB/month")
+        print(f"the spec estimated {args.estimate_low:,.0f}-{args.estimate_high:,.0f} MB/month")
+        if at_current > args.estimate_high:
+            print(f"  OVER the high estimate by {at_current - args.estimate_high:,.1f} MB/month")
+        elif at_current < args.estimate_low:
+            print(f"  UNDER the low estimate by {args.estimate_low - at_current:,.1f} MB/month")
+        else:
+            print("  inside the estimate")
+        print(f"\na year at this rate: {at_current * 12 / 1000:,.2f} GB")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Expected: PASS, 3 tests.
+
+- [ ] **Step 5: Verify the script end-to-end on a fixture, never on `data/`**
+
+Build a throwaway cold directory with two `.parquet` files of known size in `tmp`, run the script against it with `--cold`, and check the printed mean and projection match the bytes written. The live `data/` directory is never an argument here.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/disk-growth.py tests/test_disk_growth.py
+git commit -m "feat(ops): measure whether the corpus fits on the disk"
+```
+
+- [ ] **Step 7: Hand the measurement to the user**
+
+Only the user may run this against the live store:
+
+```bash
+python scripts/disk-growth.py
+```
+
+Record the result in `docs/state-of-play.md` step 5 and close it.
 
 ---
 
-### Task 6: documentation
+## After these two
 
-**Files:**
-- Modify: `CLAUDE.md`, `docs/state-of-play.md`, `README.md`
+Stage B's own plan is written once these have landed and the disk number is known — the trainer's memory and fit-time budgets depend on it, and a plan that guessed them would be a plan with placeholders in it. The corpus also needs the depth §10 describes: six-city collection began 2026-09-17, and the evaluation's own bar is every half-hour-of-week bucket having three days behind it, targeted around 2026-10-01.
 
-- [x] **Step 1:** `CLAUDE.md` — the split constants and what each prices; the floor rule and why pinning and symmetric coupling were both rejected; that Balanced is the shipped pair. Correct the existing `TIME_VALUE` reference at `CLAUDE.md:208`. Record the spec's §9 boundary too, because it is the part most likely to be undone by accident: **the trained model must not learn preferences.** It predicts how likely a space is; the ranker decides what that probability is worth. That separation is what lets one `grid.bin` and one `week.bin` serve every driver — preferences inside the model would mean a model per combination, which the free tier cannot carry — and it keeps the Brier score a statement about calibration rather than about taste.
-- [x] **Step 2:** `docs/state-of-play.md` — a section with the **measured** safety table from your own probe run, not copied from the spec, and the list-density figures.
-- [x] **Step 3:** `README.md` — the app paragraph.
-- [x] **Step 4: Commit** — `git commit -m "docs: record the ranking preferences"`.
+Not prerequisites, and deliberately not in this plan:
 
----
-
-## Verification before the branch is finished
-
-- Every suite green: web, Python, Worker, scripts. Re-run the known-flaky integration test rather than trusting one failure.
-- The probe's sweep run and its output recorded — **no preset at #1 in either sample**.
-- Balanced's ordering proven identical to the pre-branch ranker on a real roster, not only in a unit test.
-- A browser pass at 375 px and desktop, light and dark: switch presets and confirm the list reorders, nothing scrolls or re-centres, the expander works, and no NT$ score appears anywhere.
-- `npm run deploy:check --prefix worker` clean **from the repo root**. The release itself is the user's.
+- **Frozen readings out of `Counts`.** Long deferred, and it moves every published probability for every city. `NOT_UPDATING_AFTER_SEC` is 24 hours, so a run spans day boundaries, while `load_history`'s scan is deliberately unordered — the `ORDER BY` it avoids costs 11.19 s against 0.16 s. It needs its own spec and its own before/after measurement. Stage B does not depend on it: excluding frozen rows from the *training set* is the trainer's own business (spec §4.2), and the support features in §3.3 exist partly so the model can learn to distrust a frozen bucket by itself.

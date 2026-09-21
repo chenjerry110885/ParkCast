@@ -163,12 +163,38 @@ At ~20 float32 features that is ~350 MB materialised, which is why the dataset i
 chunks and handed to LightGBM incrementally rather than assembled whole. Sampling denser is a knob;
 the plan should measure fit time and memory at 48/day before turning it.
 
-**Frozen lots are excluded from training.** A lot whose feed has stuck repeats one number forever;
-trained on, it teaches the model that lot is perfectly predictable, and the model learns to be
-confident exactly where the data is fictional. The app already withholds these at serving time
-(`liveness.not_updating`) and the backtest already withholds them from scoring. Training is the third
-place that has to, and this promotes "removing frozen lots from the climatology counts" from the
-deferred list to a prerequisite.
+**Frozen lots are excluded from training — at read time, never by touching the corpus.** A lot whose
+feed has stuck repeats one number forever; trained on, it teaches the model that lot is perfectly
+predictable, and the model learns to be confident exactly where the data is fictional. The app
+already withholds these at serving time (`liveness.not_updating`) and the backtest already withholds
+them from scoring. Training is the third place that has to, and this promotes "removing frozen lots
+from the climatology counts" from the deferred list to a prerequisite.
+
+How it must **not** be done is already written down. `liveness.py` states the rule: "The readings are
+still collected and stored exactly as the feed sent them. Judging a lot frozen is a decision about
+what to *publish*, and the corpus has to stay a faithful record of the feed." `Q.FROZEN` exists but
+is explicitly "detected, not stored", because freezing is a property of a *run* of readings rather
+than of any one of them, and persisting it would mean mutating rows already collected. So the
+exclusion is a filter applied where the counts and the training rows are built, and a reading dropped
+from training is still a reading in the store.
+
+**Two different changes, and only one of them belongs to Stage B.** An earlier draft of this spec
+conflated them:
+
+* **Excluding frozen readings from the training set** is Stage B's, and it is local to the trainer.
+  The trainer reads the corpus itself, nightly, out of process, with no 300-second budget — so it can
+  afford the ordered two-pass that run detection needs, and nothing outside it is affected. This is a
+  task in the Stage B plan, not a prerequisite.
+* **Excluding frozen readings from `Counts`** — the long-deferred item — is a different change with
+  real blast radius: it moves every published probability, climatology and blend alike, for every
+  city. It is also genuinely hard in the place it would have to live. `NOT_UPDATING_AFTER_SEC` is 24
+  hours, so a frozen run spans day boundaries; `load_history`'s scan is deliberately unordered (the
+  `ORDER BY` it avoids costs 11.19 s against 0.16 s), and run detection needs order. It therefore
+  wants its own spec and its own before/after measurement, and it stays deferred.
+
+Stage B does not depend on the second. A model told *how much support is behind each prediction*
+(§3.3) can learn to distrust a thin or frozen bucket on its own, which is a large part of why those
+features are there.
 
 ### 4.3 Where it runs
 
@@ -258,23 +284,75 @@ Unchanged and non-negotiable, restated because a model is the easiest place to b
 - A `0` amenity count still differs from an absent one.
 - No skill number is ever reported without its support alongside it.
 
-## 9. Dependency footprint (measured, 2026-09-21)
+## 9. Security and cost
 
-The collector image `docker-collector:latest` today holds: `pyarrow 25.0.1`, `pyproj 3.8.0`,
-`requests`, `certifi`, `charset-normalizer`, `idna`, `urllib3`. **`numpy` is not present** — pyarrow
-25 no longer requires it.
+### 9.1 Cost: nothing recurring, and one thing that could become a cost
 
-So LightGBM costs `numpy` (~20 MB) + `lightgbm` (~1.5 MB) ≈ **22 MB**, using the native API.
+- **LightGBM is MIT, numpy is BSD-3.** No licence cost, no account, no registration.
+- **Training runs on hardware already owned and already running.** No hosted training, no GPU, no
+  inference endpoint.
+- **No external feature APIs.** This is why weather is excluded in §10 rather than merely deferred:
+  every usable source is paid or rate-limited below six cities × 5 minutes, and this project takes no
+  recurring cost.
+- **The published artifacts do not change** — same `grid.bin` format, same size, same number of KV
+  writes. Cloudflare Workers Free is unaffected; Stage B adds no bandwidth and no request volume.
+- **The one resource that can grow into a bill is disk**, and the model files are negligible beside
+  the corpus (a LightGBM text model is measured in MB). That is why measuring cold-store growth is a
+  prerequisite, not because the models are large.
 
-For comparison, and why the native API matters: scikit-learn's `HistGradientBoostingClassifier` would
-cost numpy + scipy + scikit-learn ≈ 90 MB, and XGBoost's wheel is larger still. Only the trainer
-image needs them; whether the collector image also carries LightGBM depends on whether inference runs
-in-process, which §6 assumes and the plan should confirm.
+Net: **zero recurring cost**, and the only hardware is the laptop already collecting.
+
+### 9.2 Dependency footprint (measured, 2026-09-21)
+
+`docker-collector:latest` today holds `pyarrow 25.0.1`, `pyproj 3.8.0`, `requests`, `certifi`,
+`charset-normalizer`, `idna`, `urllib3`. **`numpy` is not present** — pyarrow 25 dropped the
+requirement.
+
+So LightGBM via the native API costs `numpy` (~20 MB) + `lightgbm` (~1.5 MB) ≈ **22 MB**. For
+comparison, scikit-learn's `HistGradientBoostingClassifier` would cost numpy + scipy + scikit-learn
+≈ 90 MB, and XGBoost's wheel is larger still. Both new packages are pinned with hashes and installed
+`--require-hashes`, as the existing dependencies are.
+
+### 9.3 Security
+
+**Never unpickle a model.** The model file is written by a background job and read by the collector,
+which makes it the one artifact whose format is a code-execution decision. `pickle` and `joblib`
+deserialise to arbitrary code and are forbidden here; LightGBM's own `save_model` / `Booster(model_file=…)`
+text format is a plain dump with no executable content. This is a hard rule, not a preference, and a
+test asserts the loader is never handed a pickle.
+
+**The trainer is isolated and offline.**
+
+- Its own compose service, with `network_mode: none` — training makes no network call, so it needs
+  no egress, and denying it removes the entire class of exfiltration and supply-chain-at-runtime
+  concerns.
+- The corpus is mounted **read-only**. The trainer's only write access is `data/models/`.
+- It receives neither the Cloudflare deploy key nor the upload secret. It has no reason to hold
+  either, and the deploy pipeline's existing rule — third-party code never runs in a shell holding
+  the deploy key — extends to it.
+- Memory and wall-clock caps, so a runaway fit cannot starve the collector sharing the laptop.
+  (The collector itself deliberately has no memory limit; the trainer is the component that could
+  run away, so it is the one that gets bounded.)
+
+**The model never leaves the machine.** Inference runs in the collector; only `grid.bin` is
+published. No model artifact is uploaded to KV, and no training data — nor anything derived from it
+beyond the published probabilities — leaves the laptop.
+
+**Integrity on load.** The manifest carries a SHA-256 of the model file, and the collector verifies
+it before loading. The atomic write-then-rename already prevents a half-written file being read; the
+digest makes a corrupted or substituted one detectable rather than silently served. On mismatch the
+collector falls back to `Blend` and publishes anyway (§6).
+
+**No new inbound surface.** The trainer listens on nothing and exposes no port.
+
+**Unchanged and still binding:** no `verify=False`, no `CERT_NONE`, no `check_hostname=False`
+anywhere; credentials stay with the user and are never handled by tooling.
 
 ## 10. Risks
 
-- **Frozen lots poison training.** Mitigated in §4.2, and it is the reason a deferred item became a
-  prerequisite.
+- **Frozen lots poison training.** Mitigated in §4.2 inside the trainer, where run detection is
+  affordable. The separate, long-deferred question of frozen readings in `Counts` stays deferred and
+  is not a Stage B dependency.
 - **Nightly self-degradation.** Mitigated by §5. The gate is the load-bearing part of this design; if
   any part of the plan gets cut, it is not this one.
 - **Nondeterminism silently invalidates the backtest.** Mitigated by the pinned config in §3.1 and a
@@ -288,11 +366,19 @@ in-process, which §6 assumes and the plan should confirm.
   collection stops, and the corpus is the one asset that cannot be recreated. This should be measured
   before a trainer starts writing models beside it.
 - **`ts_kind` is not persisted.** `feed.py` says a fetch-time stamp "is an assumption, not a reading,
-  and a backtest must be able to exclude it" — but the `observations` table has no such column.
-  Kaohsiung and Taoyuan are inferable from the city; Tainan, New Taipei and Hsinchu fall back to
-  fetch time **per record** (`tainan.py:105` and its counterparts), so which rows are assumptions is
-  unrecoverable afterwards. A column added later only helps data collected later, so if the model
-  should be able to exclude assumed timestamps, this wants to land **before** the corpus deepens.
+  and a backtest must be able to exclude it" — but nothing records which is which. Kaohsiung and
+  Taoyuan are inferable from the city; Tainan, New Taipei and Hsinchu fall back to fetch time **per
+  record** (`tainan.py:105` and its counterparts), so for those three it is unrecoverable afterwards.
+
+  **No schema change is needed.** `Q` in `quality.py` is a per-observation `IntFlag` "written at
+  insert time", already persisted in both stores — an `INTEGER` column in the hot store and a
+  per-slot `int16` list in Parquet. Bits 1/2/4 are used and 8 is reserved for `FROZEN`; **16 is
+  free**. So this is one new flag, one `|=` in `insert_snapshot`, and tests — not a migration of
+  either store, and every existing reader keeps working.
+
+  It remains time-sensitive for the reason a column would be: the bit is only meaningful for rows
+  written after it ships, so the corpus divides into "before, provenance unknown" and "after, known".
+  The sooner it lands, the smaller the unknown half.
 - **Weather is the obvious missing feature** and is deliberately excluded: every source is either paid
   or rate-limited beyond what six cities × 5 minutes needs, and this project takes no recurring cost.
 

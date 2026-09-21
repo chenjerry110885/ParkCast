@@ -19,6 +19,20 @@ class Q(IntFlag):
     lots without rewriting their history. Persisting it would mean mutating
     already-collected rows, which is a deliberate design decision and not one
     to make as a side effect of a daily report.
+
+    ASSUMED_TS is the opposite case, and belongs here for the reason FROZEN does
+    not: whether the feed stamped a record is known at the instant it is parsed,
+    is a fact about that one observation, and is never revised. It is also the
+    only place it can be known. Kaohsiung and Taoyuan stamp `data_ts = now` on
+    every row, so for them the city would answer it -- but Tainan, New Taipei
+    and Hsinchu fall back to fetch time PER RECORD, whenever `update_time` is
+    missing or unparseable, so for those three nothing else can.
+
+    It records provenance, not validity. Every other bit here says something is
+    wrong with the count; this one says the count is fine and the *timestamp* is
+    our clock rather than the feed's. `feed.py` states the consequence: "A
+    fetch-time stamp is an assumption, not a reading, and a backtest must be
+    able to exclude it."
     """
 
     OK = 0
@@ -26,6 +40,7 @@ class Q(IntFlag):
     CLAMPED = 2       # free count exceeded capacity; clamped down
     NO_CAPACITY = 4   # capacity unknown, so no bound could be checked
     FROZEN = 8        # reserved: detected by report.find_frozen_lots, never written
+    ASSUMED_TS = 16   # data_ts is our fetch clock: the feed stamped nothing
 
 
 def clean_count(raw: object) -> int | None:

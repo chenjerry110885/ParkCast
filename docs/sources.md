@@ -262,6 +262,29 @@ asserts it was taken now, which then publishes as the lot's current observed cou
 wrong time-of-week climatology bucket. A lot with no reading is something `liveness` already handles
 honestly.
 
+### Which timestamps are the feed's, and which are ours
+
+`Q.ASSUMED_TS` (quality bit 16, `quality.py`) marks an observation whose `data_ts` is our fetch clock
+rather than anything the feed said. `feed.py` states why it matters: "A fetch-time stamp is an
+assumption, not a reading, and a backtest must be able to exclude it."
+
+| city | sets it |
+|---|---|
+| Taipei | never — the payload carries `updatetime` |
+| Kaohsiung, Taoyuan | on **every** row; their feeds carry no per-record timestamp at all |
+| Tainan, New Taipei, Hsinchu | **per record**, whenever that record's own timestamp is missing or unparseable |
+
+The last row is the reason this is a stored bit rather than a lookup by city: for those three, two
+rows from the same fetch can differ, and nothing but the row itself can say which was which.
+
+**The bit is only meaningful from 2026-09-21 forward.** Rows collected before it shipped carry 0,
+which means "not recorded" and is indistinguishable from "the feed stamped it". Any analysis that
+excludes assumed timestamps must bound itself to data collected after that date — otherwise it is
+treating an unknown as a known, which is the one thing the flag exists to prevent.
+
+It rides in `quality`, which both stores already carry — an `INTEGER` column in the hot store and a
+per-slot `int16` list in Parquet — so provenance survives compaction and outlives the 48-hour window.
+
 ## Known limits — read before trusting a number
 
 Four things that are **true today and easy to trip over**. The first three are deliberately not
