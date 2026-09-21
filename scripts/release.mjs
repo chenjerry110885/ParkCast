@@ -20,6 +20,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { measure, readStamp, staleness } from "./build-stamp.mjs";
 import { checkBundle, pruneDryRunArtifacts } from "./check-deploy-bundle.mjs";
 import { smoke } from "./smoke-live.mjs";
 
@@ -84,6 +85,20 @@ async function main() {
   if (placeholders.length > 0) fail(`worker/wrangler.jsonc still has setup sentinels: ${placeholders.join(", ")}`);
   const config = JSON.parse(configText);
   if (!existsSync(join(WORKER, ".wrangler", "dry"))) fail("run the check phase first (npm run deploy:check --prefix worker)");
+
+  // `dry` existing only says some check phase once finished. It says nothing
+  // about WHICH tree, and a check that aborts at any gate leaves the previous
+  // run's `dry` and `web/dist` in place -- which this script then uploaded and
+  // reported as a success. Twice. The stamp is the answer to "is this bundle
+  // the one that passed?", and a mismatch stops the release rather than
+  // shipping bytes nobody checked.
+  const stale = staleness(readStamp(ROOT), measure(ROOT));
+  if (stale.length > 0) {
+    fail(`${stale.join("; ")}. Nothing was uploaded and the live site is unchanged. ` +
+      `Run \`npm run deploy:check --prefix worker\` from ${ROOT} (NOT from worker/ -- ` +
+      "--prefix is relative to the cwd, so from inside worker/ npm looks for worker/worker/package.json " +
+      "and exits before running anything), then release again.");
+  }
   const pruneProblems = pruneDryRunArtifacts(join(WORKER, ".wrangler", "dry"), config);
   if (pruneProblems.length > 0) fail(pruneProblems.join("; "));
 

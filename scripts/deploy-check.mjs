@@ -11,13 +11,21 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkBundle, listFiles, pruneDryRunArtifacts } from "./check-deploy-bundle.mjs";
+import { writeStamp } from "./build-stamp.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOST_ROOT = ROOT.replaceAll("\\", "/"); // Docker Desktop takes forward slashes
 // --user 0:0: the image runs as uid 10001, which cannot pip-install pytest. This
 // throwaway container's mounts are all read-only; never do this to the live collector.
+// scripts/ and web/tests/ are mounted because tests/test_seam_fixture.py reads
+// both: the committed fixture under web/tests/fixtures, and the generator under
+// scripts/ that it re-runs to prove the fixture is still byte-identical. Without
+// them those 9 tests fail on a missing path -- and since python is the FIRST
+// gate here, the whole check aborts before it ever builds, leaving a stale
+// web/dist for the release phase to upload. See scripts/build-stamp.mjs.
 const PYTHON_TESTS =
   `docker run --rm --user 0:0 -v "${HOST_ROOT}/src:/repo/src:ro" -v "${HOST_ROOT}/tests:/repo/tests:ro" ` +
+  `-v "${HOST_ROOT}/scripts:/repo/scripts:ro" -v "${HOST_ROOT}/web/tests:/repo/web/tests:ro" ` +
   `-v "${HOST_ROOT}/pyproject.toml:/repo/pyproject.toml:ro" -w /repo -e PYTHONDONTWRITEBYTECODE=1 ` +
   'docker-collector:latest sh -c "pip install -q pytest 2>/dev/null; python -m pytest -q -p no:cacheprovider tests/"';
 
@@ -65,6 +73,13 @@ if (problems.length > 0) {
   process.exit(1);
 }
 console.log(`\nbundle check passed: ${listFiles(join(ROOT, "web", "dist")).length} files`);
+
+// Last, and only now: the stamp attests that every gate above passed over
+// exactly these bytes. `release.mjs` refuses to upload without a stamp that
+// still matches, so a check that aborts anywhere earlier can no longer leave a
+// stale web/dist behind for the release phase to ship as though it were new.
+const stamp = writeStamp(ROOT);
+console.log(`build stamped ${stamp.builtAt} (sources ${stamp.sources.slice(0, 12)})`);
 
 console.log("\n=== npm audit (review the output; not a pass/fail gate)");
 spawnSync("npm audit", { cwd: join(ROOT, "web"), shell: true, stdio: "inherit" });
