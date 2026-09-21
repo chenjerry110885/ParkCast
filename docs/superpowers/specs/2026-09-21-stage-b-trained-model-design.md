@@ -308,9 +308,25 @@ Net: **zero recurring cost**, and the only hardware is the laptop already collec
 `charset-normalizer`, `idna`, `urllib3`. **`numpy` is not present** — pyarrow 25 dropped the
 requirement.
 
-So LightGBM via the native API costs `numpy` (~20 MB) + `lightgbm` (~1.5 MB) ≈ **22 MB**. For
-comparison, scikit-learn's `HistGradientBoostingClassifier` would cost numpy + scipy + scikit-learn
-≈ 90 MB, and XGBoost's wheel is larger still.
+**Estimated ~22 MB. Measured +303 MB** (image 460 MB → 763 MB), and the estimate was wrong for a
+reason worth recording rather than rounding away.
+
+LightGBM 4.7's *core* requirements, read off the installed metadata rather than guessed, are
+`narwhals>=1.15`, `numpy>=1.21.3` and **`scipy`**. scikit-learn is only an extra
+(`extra == "scikit-learn"`). So the native API does avoid scikit-learn, and that argument stands —
+but **scipy was never avoidable**, and the earlier figure assumed it was. Installed: lightgbm 4.7.0,
+numpy 2.5.3, scipy 1.18.1, narwhals 2.26.0.
+
+The image also needs `libgomp1` (the GNU OpenMP runtime) from apt: LightGBM's manylinux wheel links
+against it and `python:3.13-slim` does not ship it. Without it `import lightgbm` fails inside
+`ctypes` — not at install time, where it would be obvious, but at import, which in the collector
+would look like the Stage B forecaster quietly falling back to `Blend`.
+
+The conclusion does not change — LightGBM remains the lightest credible GBT, since
+`HistGradientBoostingClassifier` needs all of this *plus* scikit-learn, and XGBoost's wheel is larger
+still — but the cost is an order of magnitude above what this section first claimed. It buys a
+one-off 303 MB on a laptop whose corpus grows at 65 MB/month, which is acceptable; it would not be on
+a metered registry, and anyone porting this should know the real number.
 
 **Correcting an earlier draft of this section:** it said the new packages would be hash-pinned "as
 the existing dependencies are". They are not. `pyproject.toml` declares version *ranges*

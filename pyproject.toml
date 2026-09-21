@@ -7,7 +7,22 @@ requires-python = ">=3.13"
 # `sources.http` now imports it directly (to load the same roots into the two
 # per-source SSLContexts), and an undeclared direct import would break the day
 # `requests` stopped depending on it.
-dependencies = ["requests>=2.32", "certifi", "pyarrow>=17", "pyproj>=3.6"]
+#
+# `lightgbm` and `numpy` are Stage B's, and both are genuinely new. The NATIVE
+# lightgbm API is what this project uses -- `train`, `Dataset`, `Booster` -- never
+# the scikit-learn wrapper, which would pull scikit-learn and scipy in for
+# nothing we call: roughly 90 MB against 22 MB. `numpy` did not arrive with
+# anything else either; pyarrow 25 dropped its numpy requirement, so it has to be
+# named here or the day pyarrow changes again the collector stops importing.
+#
+# Both belong to the COLLECTOR, not only the trainer, because inference runs
+# in-process at publish time. That does put a C++ extension in the process that
+# talks to six external feeds, which is why the model file it loads is a text
+# dump whose digest is verified and never, under any circumstance, a pickle.
+dependencies = [
+    "requests>=2.32", "certifi", "pyarrow>=17", "pyproj>=3.6",
+    "lightgbm>=4.5", "numpy>=2.1",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

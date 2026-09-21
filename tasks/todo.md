@@ -123,6 +123,8 @@ docker run --rm docker-collector:latest python -c "import parkcast, lightgbm, nu
 
 Measure before and after (`docker images docker-collector:latest`), and put the delta in the commit message. The spec predicts ~22 MB; a number far off that means something else came along and should be looked at, not accepted.
 
+**It was far off, and something had.** Measured **460 MB → 763 MB, +303 MB**. LightGBM 4.7's core requirements are `narwhals`, `numpy` and **`scipy`** — scikit-learn is only an extra, so the native API avoids scikit-learn but never avoided scipy, which is what the estimate assumed. The image also needs `libgomp1` from apt, because the manylinux wheel links against the GNU OpenMP runtime that `python:3.13-slim` omits; without it `import lightgbm` fails inside `ctypes`, at import rather than install, which in the collector reads as the forecaster quietly falling back to `Blend`. Both are recorded in spec §9.2. The choice stands — `HistGradientBoostingClassifier` needs all of this plus scikit-learn — but the real number is an order of magnitude above the estimate.
+
 - [ ] **Step 7: Commit**
 
 ```bash
