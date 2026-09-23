@@ -79,6 +79,19 @@ def frozen_spans(
     return spans
 
 
+def spans_for(reading_series: Mapping[str, tuple[Sequence[int], Sequence[int]]]) -> dict:
+    """Every lot's frozen runs, computed once.
+
+    `frozen_spans` walks a lot's whole series, so recomputing it per call is
+    fine when one call covers every origin -- and ruinous when a caller loops
+    origins to rebuild the history at each one. Scoring a validation day that
+    way is 1,082 lots x 48 origins x ~5,500 readings; hoisting it makes that
+    one pass instead of forty-eight.
+    """
+    return {lot_id: frozen_spans(stamps, values)
+            for lot_id, (stamps, values) in reading_series.items()}
+
+
 def _inside(spans: Sequence[tuple[int, int]], ts: int) -> bool:
     return any(first <= ts <= last for first, last in spans)
 
@@ -105,6 +118,7 @@ def iter_rows(
     labels: Mapping[int, Mapping[str, int]] | None = None,
     neighbours: Mapping[str, Sequence[str]] | None = None,
     reading_series: Mapping[str, tuple[Sequence[int], Sequence[int]]] | None = None,
+    spans: Mapping[str, Sequence[tuple[int, int]]] | None = None,
     exclude_frozen: bool = True,
 ) -> list[Row]:
     """Rows for every (lot, origin, horizon), minus anything frozen, one at a time.
@@ -120,7 +134,9 @@ def iter_rows(
     is missing is the shape of bug that produces a confidently wrong model and
     no failure anywhere -- so the serving path, which genuinely wants no
     filtering because `liveness` has already withheld the frozen lots, says
-    `exclude_frozen=False` and says it out loud.
+    `exclude_frozen=False` and says it out loud. `spans` is the same
+    information precomputed by `spans_for`, for a caller that loops origins and
+    would otherwise pay for the walk once per origin.
 
     A generator, not a list: see `rows` for what materialising one costs.
 
@@ -130,7 +146,7 @@ def iter_rows(
     the target alone would keep rows that teach the model a stuck lot is
     predictable.
     """
-    if exclude_frozen and reading_series is None:
+    if exclude_frozen and reading_series is None and spans is None:
         raise ValueError(
             "exclude_frozen needs reading_series (evaluate.reading_series gives it); "
             "pass exclude_frozen=False to build rows without the filter"
@@ -138,18 +154,20 @@ def iter_rows(
     neighbours = neighbours or {}
 
     for lot in lots:
-        spans = ()
-        if exclude_frozen and lot.id in reading_series:
-            stamps, values = reading_series[lot.id]
-            spans = frozen_spans(stamps, values)
+        frozen = ()
+        if exclude_frozen:
+            if spans is not None:
+                frozen = spans.get(lot.id, ())
+            elif lot.id in reading_series:
+                frozen = frozen_spans(*reading_series[lot.id])
         near = tuple(neighbours.get(lot.id, ()))
 
         for origin_ts in origins:
-            if spans and _inside(spans, origin_ts):
+            if frozen and _inside(frozen, origin_ts):
                 continue
             for horizon_min in horizons:
                 target_ts = origin_ts + horizon_min * 60
-                if spans and _inside(spans, target_ts):
+                if frozen and _inside(frozen, target_ts):
                     continue
                 free = None if labels is None else labels.get(target_ts, {}).get(lot.id)
                 yield Row(
