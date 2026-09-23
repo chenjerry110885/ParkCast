@@ -81,10 +81,21 @@ def run(conn, tmp_path, **kw):
                          model_dir=tmp_path / "models", lots=LOTS, **kw)
 
 
+#: Scores where the candidate clears every bar. The adoption-path tests below
+#: use these rather than hoping a GBT beats persistence on six synthetic lots
+#: over six days. What those tests are about is the gate's machinery -- write,
+#: digest, rotate, record -- and driving it with real scores would mean tuning
+#: the fixture until it produced the answer the test wanted, which is fitting
+#: the evidence to the conclusion. Whether a model actually wins is a question
+#: for real data, and `test_a_real_fit_is_scored_honestly` is where the honest
+#: path is exercised without prejudging which way it goes.
+WINS = {"candidate": 0.02, "persistence": 0.10, "climatology": 0.09, "incumbent": None}
+
+
 def test_a_first_model_is_adopted_when_it_clears_the_baselines(conn, tmp_path):
     fill(conn)
 
-    decision = run(conn, tmp_path)
+    decision = run(conn, tmp_path, _force_scores=WINS)
 
     assert decision.adopted, decision.reason
     assert (tmp_path / "models" / "current.txt").exists()
@@ -117,7 +128,7 @@ def test_a_candidate_worse_than_the_incumbent_is_not_adopted(conn, tmp_path):
 
 def test_a_rejection_leaves_the_incumbent_byte_for_byte(conn, tmp_path):
     fill(conn)
-    run(conn, tmp_path)                                   # adopt a first model
+    run(conn, tmp_path, _force_scores=WINS)               # adopt a first model
     current = tmp_path / "models" / "current.txt"
     before, manifest_before = current.read_bytes(), train.manifest(tmp_path / "models")
 
@@ -136,7 +147,7 @@ def test_the_artifact_validated_is_the_artifact_written(conn, tmp_path):
     nobody ever scored."""
     fill(conn)
 
-    decision = run(conn, tmp_path)
+    decision = run(conn, tmp_path, _force_scores=WINS)
 
     assert decision.adopted
     assert decision.digest == train.manifest(tmp_path / "models")["sha256"]
@@ -146,7 +157,7 @@ def test_the_written_model_was_trained_through_the_validated_cutoff(conn, tmp_pa
     fill(conn)
     cutoff, _, _ = train.validation_window(DAY)
 
-    run(conn, tmp_path)
+    run(conn, tmp_path, _force_scores=WINS)
 
     assert train.manifest(tmp_path / "models")["trained_through"] == cutoff
 
@@ -158,7 +169,7 @@ def test_every_decision_is_recorded_where_the_report_can_read_it(conn, tmp_path)
     """A run of rejections is itself a signal. A log line nobody reads is not
     where it belongs."""
     fill(conn)
-    run(conn, tmp_path)
+    run(conn, tmp_path, _force_scores=WINS)
     run(conn, tmp_path, _force_scores={"candidate": 0.9, "persistence": 0.1,
                                        "climatology": 0.1, "incumbent": 0.05})
 
@@ -216,3 +227,105 @@ def test_brier_of_nothing_is_none_not_zero():
 
 def test_brier_is_mean_squared_error():
     assert train.brier([0.9, 0.9], [1, 0]) == pytest.approx((0.01 + 0.81) / 2)
+
+
+# --- the leak the first real run exposed ------------------------------------
+
+
+def _tick(conn, ts, pairs):
+    store.insert_snapshot(
+        conn, FeedSnapshot("taipei", ts + 5,
+                           tuple(Observation(lid, free, None, ts, TS_FEED) for lid, free in pairs)),
+        {l.id: 50 for l in LOTS})
+
+
+def _corpus(conn, *, afternoon_free):
+    """Four training days, then a validation day whose afternoon is a parameter."""
+    for d in range(5, 1, -1):
+        for slot in range(0, 288, 3):
+            ts = START - d * 86400 + slot * 300 + 180
+            _tick(conn, ts, [(l.id, (slot + i) % 7) for i, l in enumerate(LOTS)])
+    for slot in range(0, 288, 3):
+        ts = START - 86400 + slot * 300 + 180
+        morning = slot < 144
+        _tick(conn, ts, [(l.id, (slot + i) % 7 if morning else afternoon_free)
+                         for i, l in enumerate(LOTS)])
+
+
+def _morning_scores(conn):
+    from parkcast.evaluate import load_labels, reading_series
+
+    labels = load_labels(conn, None, city="taipei")
+    _, val_start, _ = train.validation_window(DAY)
+    origins = [t for t in train.sample_origins(labels)
+               if val_start <= t < val_start + 10 * 3600]
+    assert origins, "the fixture produced no morning origins to score"
+    return train.score_at_origins(
+        conn, None, city="taipei", lots=LOTS, origins=origins, horizons=[15],
+        labels=labels, series=reading_series(labels))
+
+
+def test_scoring_an_origin_never_sees_later_readings_from_the_same_day(tmp_path):
+    """The defect the first real run against live data exposed.
+
+    The gate scored every forecaster from ONE history cut at the end of the
+    validation day -- so every label being scored was already inside the
+    history doing the scoring. `evaluate.backtest` has always cut per origin;
+    this did not.
+
+    It showed up as an inverted result rather than an error. Climatology had
+    counted the outcomes it was graded on and came out at 0.0263 where the
+    recorded citywide run had it at 0.0680; persistence answered every origin
+    from one end-of-day reading and came out at 0.0654 against a recorded
+    0.0557; and blend, which mixes them, landed worse than climatology alone --
+    the reverse of every run on record. The candidate, whose climatology
+    feature carried the same leak, beat all three.
+
+    Two corpora identical all morning and different all afternoon. Scored on
+    morning origins only, the answers must be identical: nothing after an
+    origin may reach the forecaster answering it.
+    """
+    honest = store.connect(tmp_path / "a.sqlite")
+    honest.execute("PRAGMA synchronous=OFF")
+    _corpus(honest, afternoon_free=0)
+
+    tempted = store.connect(tmp_path / "b.sqlite")
+    tempted.execute("PRAGMA synchronous=OFF")
+    _corpus(tempted, afternoon_free=9)
+
+    a, b = _morning_scores(honest), _morning_scores(tempted)
+    honest.close()
+    tempted.close()
+
+    assert a["rows"] == b["rows"], "the morning is identical, so the row count must be"
+    for name in ("persistence", "climatology", "blend"):
+        assert a[name] == b[name], f"{name} saw the afternoon"
+
+
+def test_a_real_fit_is_scored_honestly_whichever_way_it_goes(conn, tmp_path):
+    """The honest path, with no forced scores and no assertion about who wins.
+
+    It asserts only that every forecaster was measured on the same rows and
+    that the verdict follows from those numbers. Asserting the candidate wins
+    would mean tuning the fixture until it did -- and on this one it does not:
+    persistence is strong on an autocorrelated series, exactly as
+    `docs/state-of-play.md` warned, and six synthetic lots over six days is not
+    a corpus a gradient-boosted model can beat it on.
+
+    That it loses here is the test working. The leaky version of this gate had
+    the candidate winning on the same fixture.
+    """
+    fill(conn)
+
+    decision = run(conn, tmp_path)
+    scores = decision.scores
+
+    assert scores["rows"] > 0
+    for name in ("candidate", "persistence", "climatology", "blend"):
+        assert scores[name] is not None, f"{name} scored nothing"
+        assert 0.0 <= scores[name] <= 1.0
+
+    beats_both = (scores["candidate"] < scores["persistence"]
+                  and scores["candidate"] < scores["climatology"])
+    assert decision.adopted == beats_both, decision.reason
+    assert decision.adopted == (tmp_path / "models" / "current.txt").exists()

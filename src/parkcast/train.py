@@ -42,7 +42,7 @@ from parkcast import features
 from parkcast.compact import day_bounds
 
 log = logging.getLogger(__name__)
-from parkcast.trainset import Row, iter_rows, sample_origins
+from parkcast.trainset import Row, iter_rows, sample_origins, spans_for
 
 #: How many previous models stay on disk. A rollback reaches back about a week;
 #: keeping every one would grow without bound beside a corpus measured in tens
@@ -303,6 +303,92 @@ def _record(model_dir: Path, day: date, decision: Decision) -> Decision:
     return decision
 
 
+def score_at_origins(
+    conn,
+    cold_dir,
+    *,
+    city: str,
+    lots: Sequence,
+    origins: Sequence[int],
+    horizons: Sequence[int],
+    labels,
+    series,
+    candidate=None,
+    model_dir=None,
+    now: int | None = None,
+) -> dict:
+    """Brier per forecaster over `origins`, rebuilding the history at each one.
+
+    **One history per origin, not one per day.** This is the contract
+    `evaluate.backtest` has always kept and that the first version of this gate
+    broke: it scored a whole validation day from a single history cut at the
+    day's END, so every label being graded was already inside the history doing
+    the grading.
+
+    It did not fail; it inverted. On the first real run, climatology -- which
+    had counted the outcomes it was scored on -- came out at 0.0263 against
+    0.0680 on the last citywide run; persistence, answering every origin from
+    one end-of-day reading, came out at 0.0654 against 0.0557; and blend landed
+    worse than climatology alone, the reverse of every result on record. The
+    candidate, whose `clim_p` feature carried the same leak, beat all three by
+    a margin that looked like success.
+
+    The cost is one `load_history` per origin -- 48 for a day, which is what
+    the backtest already pays per origin and what the nightly budget can
+    afford. `spans_for` hoists the frozen-run detection out of the loop,
+    because that walks a lot's whole series and would otherwise be repeated per
+    origin.
+    """
+    from parkcast import model as model_module
+    from parkcast.forecast import Blend, Climatology, Persistence, by_city, load_history
+
+    roster = {l.id: l for l in lots}
+    spans = spans_for(series)
+    booster = None if model_dir is None else model_module.load(model_dir, now=now)
+    collected: dict[str, tuple[list, list]] = {
+        name: ([], []) for name in
+        ("candidate", "persistence", "climatology", "blend", "incumbent")
+    }
+    total = 0
+
+    for origin in origins:
+        history = by_city(load_history(conn, cold_dir=cold_dir, before_ts=origin + 1)).get(city)
+        if history is None:
+            continue
+        clim = Climatology(history)
+        rows = [r for r in iter_rows(history, clim, lots, origins=[origin],
+                                     horizons=horizons, labels=labels, spans=spans)
+                if r.label is not None]
+        if not rows:
+            continue
+        total += len(rows)
+
+        if candidate is not None:
+            x = np.array([[np.nan if v is None else v for v in r.values] for r in rows],
+                         dtype=np.float32)
+            collected["candidate"][0].extend(candidate.predict(x))
+            collected["candidate"][1].extend(r.label for r in rows)
+
+        answering = {
+            "persistence": Persistence(history),
+            "climatology": clim,
+            "blend": Blend(history),
+        }
+        if booster is not None:
+            answering["incumbent"] = model_module.Trained(
+                history, model_dir=model_dir, lots=roster, clim=clim, now=now,
+                booster=booster)
+
+        for name, forecaster in answering.items():
+            probabilities, outcomes = _scored(forecaster, rows)
+            collected[name][0].extend(probabilities)
+            collected[name][1].extend(outcomes)
+
+    scores = {name: brier(*pair) for name, pair in collected.items()}
+    scores["rows"] = total
+    return scores
+
+
 def nightly(
     conn,
     cold_dir,
@@ -330,9 +416,8 @@ def nightly(
     and nothing else -- the fit, the write and the bookkeeping all still happen
     exactly as they would.
     """
-    from parkcast import model as model_module
     from parkcast.evaluate import load_labels, reading_series
-    from parkcast.forecast import Blend, Climatology, Persistence, by_city, load_history
+    from parkcast.forecast import Climatology, by_city, load_history
 
     model_dir = Path(model_dir)
     cutoff, val_start, val_end = validation_window(day)
@@ -354,26 +439,13 @@ def nightly(
 
     candidate = fit(x, y)
 
-    # Validation: one history for every forecaster, cut at the end of the day
-    # the candidate did NOT train on, so they all answer from identical inputs.
-    val_history = by_city(load_history(conn, cold_dir=cold_dir, before_ts=val_end)).get(city)
-    val_clim = Climatology(val_history)
+    # Validation: a history rebuilt at EVERY origin, never one for the whole
+    # day. See `score_at_origins` for what the single-history version did, and
+    # for why it inverted the result rather than failing.
     val_origins = [t for t in sample_origins(labels) if val_start <= t < val_end]
-    val_rows = [r for r in iter_rows(val_history, val_clim, lots, origins=val_origins,
-                                     horizons=horizons, labels=labels, reading_series=series)
-                if r.label is not None]
-
-    roster = {l.id: l for l in lots}
-    incumbent = model_module.Trained(val_history, model_dir=model_dir, lots=roster,
-                                     clim=val_clim, now=now)
-    scores = {
-        "candidate": _candidate_brier(candidate, val_rows),
-        "persistence": brier(*_scored(Persistence(val_history), val_rows)),
-        "climatology": brier(*_scored(Climatology(val_history), val_rows)),
-        "blend": brier(*_scored(Blend(val_history), val_rows)),
-        "incumbent": brier(*_scored(incumbent, val_rows)) if incumbent.available else None,
-        "rows": len(val_rows),
-    }
+    scores = score_at_origins(conn, cold_dir, city=city, lots=lots, origins=val_origins,
+                              horizons=horizons, labels=labels, series=series,
+                              candidate=candidate, model_dir=model_dir, now=now)
     if _force_scores is not None:
         scores.update(_force_scores)
 

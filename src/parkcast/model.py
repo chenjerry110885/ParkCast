@@ -120,12 +120,17 @@ class Trained:
         clim,
         neighbours: Mapping[str, Sequence[str]] | None = None,
         now: int | None = None,
+        booster: lgb.Booster | None = None,
     ) -> None:
         self._history = history
         self._lots = lots
         self._clim = clim
         self._neighbours = neighbours or {}
-        self._booster = load(model_dir, now=now)
+        # `booster` skips the load for a caller that already did it -- scoring a
+        # validation day rebuilds the history at every origin, and re-reading
+        # and re-hashing the model file 48 times would be waste, not diligence.
+        # The file is still verified, once, by whoever passed it in.
+        self._booster = load(model_dir, now=now) if booster is None else booster
 
     @property
     def available(self) -> bool:
