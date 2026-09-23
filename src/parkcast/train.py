@@ -279,7 +279,13 @@ def _verdict(scores: dict, *, beat_baselines: bool) -> str | None:
         return f"worse than the incumbent ({candidate:.4f} against {incumbent:.4f})"
     if not beat_baselines:
         return None
-    for name in ("persistence", "climatology"):
+    # Blend is in this list because blend is what SHIPS. Persistence and
+    # climatology are only its components, and a blend routinely beats both of
+    # them -- which is the whole reason it is the one serving. Checking the
+    # parts and not the whole is how the first honest run against live data
+    # adopted a model 16.2% worse than what visitors were already getting,
+    # while beating persistence by +12.9% and climatology by +15.9%.
+    for name in ("persistence", "climatology", "blend"):
         reference = scores.get(name)
         if reference is not None and candidate >= reference:
             return f"does not beat {name} ({candidate:.4f} against {reference:.4f})"

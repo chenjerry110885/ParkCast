@@ -329,3 +329,37 @@ def test_a_real_fit_is_scored_honestly_whichever_way_it_goes(conn, tmp_path):
                   and scores["candidate"] < scores["climatology"])
     assert decision.adopted == beats_both, decision.reason
     assert decision.adopted == (tmp_path / "models" / "current.txt").exists()
+
+
+def test_a_candidate_that_loses_to_blend_is_not_adopted(conn, tmp_path):
+    """Blend is what actually ships, so it is the bar -- not persistence and
+    climatology, which are only its components.
+
+    The first honest run against live data found this hole. The candidate beat
+    persistence by +12.9% and climatology by +15.9%, so the gate adopted it --
+    while sitting 16.2% WORSE than the blend already serving every visitor.
+    Beating the parts is not beating the whole: a blend routinely beats both
+    its components, which is the entire reason it is what ships.
+    """
+    fill(conn)
+
+    decision = run(conn, tmp_path, _force_scores={
+        "candidate": 0.0348, "persistence": 0.0400,
+        "climatology": 0.0414, "blend": 0.0299, "incumbent": None,
+    })
+
+    assert not decision.adopted
+    assert "blend" in decision.reason
+    assert not (tmp_path / "models" / "current.txt").exists()
+
+
+def test_a_candidate_that_beats_blend_is_adopted(conn, tmp_path):
+    """The same bar, cleared."""
+    fill(conn)
+
+    decision = run(conn, tmp_path, _force_scores={
+        "candidate": 0.0250, "persistence": 0.0400,
+        "climatology": 0.0414, "blend": 0.0299, "incumbent": None,
+    })
+
+    assert decision.adopted, decision.reason
