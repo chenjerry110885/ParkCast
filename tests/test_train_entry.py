@@ -103,16 +103,51 @@ def test_no_snapshot_at_all_is_empty_rather_than_an_error(tmp_path):
 # --- declining is not failing -----------------------------------------------
 
 
-def test_the_entry_point_exits_zero_when_it_has_nothing_to_train_on(tmp_path, caplog):
-    """Declining is a normal outcome. A non-zero exit would make a restart
-    policy fight a healthy gate, and a nightly job that looks broken every
-    night is one nobody reads."""
+def test_the_entry_point_reports_a_missing_roster(tmp_path):
+    """No roster at all is a real misconfiguration, not a quiet decline."""
     (tmp_path / "cold").mkdir()
-    store.connect(tmp_path / "hot.sqlite").close()
 
     code = train.main([
-        "--day", "2026-09-20", "--hot", str(tmp_path / "hot.sqlite"),
-        "--cold", str(tmp_path / "cold"), "--models", str(tmp_path / "models"),
+        "--day", "2026-09-20", "--cold", str(tmp_path / "cold"),
+        "--models", str(tmp_path / "models"),
     ])
 
-    assert code == 1, "no roster at all is the one case worth a non-zero exit"
+    assert code == 1
+
+
+def test_the_entry_point_refuses_when_the_validation_day_is_not_compacted(tmp_path):
+    """There is nothing to score a candidate on until the day it will be
+    validated against has been written to Parquet. `run_forever` compacts a
+    completed day on the first tick of the next one, so this is only false
+    within minutes of midnight -- or when compaction is failing, which is worth
+    saying out loud rather than training around."""
+    meta = tmp_path / "cold" / "meta"
+    snapshot(meta, date(2026, 9, 18), [entry("A")])
+
+    code = train.main([
+        "--day", "2026-09-20", "--cold", str(tmp_path / "cold"),
+        "--models", str(tmp_path / "models"),
+    ])
+
+    assert code == 1
+    assert not (tmp_path / "models").exists()
+
+
+# --- the trainer needs no database ------------------------------------------
+
+
+def test_an_empty_in_memory_store_stands_in_for_the_hot_one():
+    """The trainer reads the cold Parquet corpus and nothing else.
+
+    Not tidiness: the live hot store is WAL, SQLite must write its `-shm`
+    sidecar even to READ a WAL database, and a read-only mount of it therefore
+    fails outright with "attempt to write a readonly database" -- which is what
+    the first version of the trainer service would have done every night.
+    Everything before the training cutoff is in Parquet, so the hot store was
+    never needed, and not mounting it removes the trainer's last point of
+    contact with a writable database.
+    """
+    conn = store.connect_empty()
+
+    assert conn.execute("SELECT count(*) FROM observations").fetchone()[0] == 0
+    conn.close()

@@ -32,7 +32,7 @@ import json
 import logging
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import lightgbm as lgb
@@ -438,7 +438,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--city", default=ids.LEGACY_CITY)
     parser.add_argument("--day", type=date.fromisoformat, default=None,
                         help="the day to serve; defaults to today in Taipei")
-    parser.add_argument("--hot", default=str(config.DB_PATH))
     parser.add_argument("--cold", default=str(config.PARQUET_DIR))
     parser.add_argument("--models", default=str(config.DATA_DIR / "models"))
     args = parser.parse_args(argv)
@@ -453,7 +452,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                   cutoff, args.city)
         return 1
 
-    conn = store.connect_readonly(args.hot)
+    # The validation day has to have been compacted, or there is nothing to
+    # score the candidate on. `scheduler.run_forever` archives a completed day
+    # on the first tick of the next one, so this is only ever false when the
+    # trainer runs within minutes of midnight, or when compaction is failing --
+    # and the second is worth saying out loud rather than training around.
+    validation_day = day - timedelta(days=1)
+    if not (Path(args.cold) / f"{validation_day.isoformat()}.parquet").exists():
+        log.error("%s is not compacted yet; nothing to validate a candidate on",
+                  validation_day)
+        return 1
+
+    # Cold only, deliberately. See `store.connect_empty`: the live hot store is
+    # WAL, SQLite must write its -shm sidecar even to read it, and a read-only
+    # mount of it therefore fails outright. Everything before the training
+    # cutoff is in Parquet anyway, so the trainer needs no database at all --
+    # which is why its container has no write access to the corpus in any form.
+    conn = store.connect_empty()
     try:
         decision = nightly(conn, Path(args.cold), city=args.city, day=day,
                            model_dir=Path(args.models) / args.city, lots=list(lots))
