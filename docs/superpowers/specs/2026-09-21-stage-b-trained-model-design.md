@@ -228,9 +228,16 @@ Each night, for city C:
 1. **Fit** a candidate on everything strictly before day boundary `D−1`.
 2. **Validate** it on `[D−1, D)` — a full day the candidate has never seen — against three
    references: the incumbent model, `Blend`, and `Persistence`.
-3. **Adopt** only if the candidate's Brier is no worse than the incumbent's, **and** it beats both
-   `Persistence` and `Climatology`, **and** no calibration band with n ≥ 1,000 is off by more than
-   0.05.
+3. **Adopt** only if the candidate's Brier is no worse than the incumbent's, **and** it beats
+   `Persistence`, `Climatology` **and `Blend`**, **and** no calibration band with n ≥ 1,000 is off by
+   more than 0.05.
+
+   **`Blend` is in that list because `Blend` is what ships.** An earlier draft of this section named
+   only persistence and climatology, which are its *components* — and a blend routinely beats both of
+   them, which is the entire reason it is the one serving. The first honest run against live data
+   caught it: the candidate beat persistence by +12.9% and climatology by +15.9%, cleared the gate as
+   written, and sat **16.2% worse than the blend every visitor was already getting**. Beating the
+   parts is not beating the whole.
 4. **Otherwise keep the incumbent** and log it loudly enough to show up in `report.py`. A run of
    consecutive rejections is itself a signal worth surfacing.
 
@@ -274,7 +281,8 @@ label it is scored on, not merely a second.
 **The gate for shipping at all** — distinct from the nightly adoption gate — is the one Stage A
 inherited from spec §8, on the hard subset, per horizon, per city:
 
-- beats `Persistence` **and** `Climatology` on Brier at every horizon, and
+- beats `Persistence`, `Climatology` **and `Blend`** on Brier at every horizon — `Blend` because it
+  is the incumbent in the published grid, not merely another reference (§5), and
 - closes the mid-band calibration defect in §1 rather than moving it, and
 - does not regress the 0.9–1.0 band, where 85% of the mass lives.
 
