@@ -31,6 +31,27 @@ CREATE TABLE IF NOT EXISTS sources (
 """
 
 
+def connect_empty() -> sqlite3.Connection:
+    """An in-memory store with the schema and no rows.
+
+    For a reader that wants only the cold Parquet corpus. `load_history` and
+    `evaluate.load_labels` both take a hot connection and a cold directory and
+    merge them; handing them an empty hot store is how a caller says "cold
+    only" without either function growing a special case.
+
+    The trainer is that caller, and the reason is not tidiness. The live hot
+    store is in WAL mode, and SQLite needs to WRITE the `-shm` sidecar even to
+    read a WAL database -- so a read-only mount of it fails outright with
+    "attempt to write a readonly database", which is exactly what the first
+    version of the trainer service did. It never needed the hot store anyway:
+    it trains through the start of the previous day, and everything before that
+    has been compacted into Parquet.
+    """
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.executescript(_SCHEMA)
+    return conn
+
+
 def connect_readonly(path: Path | str) -> sqlite3.Connection:
     """Open the store without being able to change it.
 

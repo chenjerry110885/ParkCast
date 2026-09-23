@@ -64,12 +64,20 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # The corpus is read-only, enforced by the mount AND by
-    # store.connect_readonly's `mode=ro`. A bug in the trainer can cost a bad
-    # model; it must never cost the one asset that cannot be recreated.
+    # The cold corpus, read-only, and the model directory. That is the whole
+    # filesystem it can see of data/.
+    #
+    # The hot store is deliberately NOT mounted. An earlier version mounted it
+    # read-only and would have crashed on its first night: the live store is in
+    # WAL mode, and SQLite must WRITE the `-shm` sidecar even to read a WAL
+    # database, so `mode=ro` on a read-only mount fails with "attempt to write
+    # a readonly database" (reproduced, 2026-09-23). It was never needed --
+    # training stops at the start of the previous day and everything before
+    # that has been compacted into Parquet -- so removing it fixed the crash
+    # and removed the trainer's last point of contact with a writable database
+    # at the same time. See store.connect_empty.
     volumes:
       - ../data/cold:/app/data/cold:ro
-      - ../data/hot.sqlite:/app/data/hot.sqlite:ro
       - ../data/models:/app/data/models
     # The collector deliberately has no memory limit, because an OOM kill of
     # the one irreplaceable process costs ticks that cannot be re-fetched. The

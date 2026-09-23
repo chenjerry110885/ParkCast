@@ -302,9 +302,15 @@ egress removes the whole exfiltration and runtime-supply-chain class rather than
 docker compose -f docker/docker-compose.yml run --rm trainer sh -c "touch /app/data/cold/probe"
 ```
 
-That must **fail too**. The corpus is mounted read-only, and `store.connect_readonly` opens the hot
-store with SQLite's own `mode=ro` on top of that. A bug in the trainer can cost a bad model; it must
-never cost the one asset here that cannot be recreated.
+That must **fail too**. The cold corpus is mounted read-only, and the hot store is not mounted at all
+— the trainer reads Parquet and opens no database (`store.connect_empty`). A bug in it can cost a bad
+model; it must never cost the one asset here that cannot be recreated.
+
+That the hot store is absent is a fix, not an omission. Mounting it read-only, as the first version
+did, would have crashed the trainer on its first night: the live store is in WAL mode, and SQLite must
+**write** the `-shm` sidecar even to *read* a WAL database, so `mode=ro` over a read-only mount fails
+with `attempt to write a readonly database` (reproduced 2026-09-23). It was never needed — training
+stops at the start of the previous day, and everything before that is already compacted.
 
 ```bash
 docker compose -f docker/docker-compose.yml run --rm trainer sh -c "touch /app/data/models/probe && echo writable"
