@@ -144,6 +144,44 @@ Blend's Brier skill over persistence:
 The 09-14 run: 231,536 predictions per forecaster, 26,335 labels withheld, base rate 0.899;
 citywide Brier persistence 0.0557, climatology 0.0680, blend 0.0462.
 
+### Stage B's first five nights — 2026-09-29
+
+The nightly gate, run over five consecutive validation days on 26 days of Taipei corpus.
+`python scripts/model-trend.py`:
+
+| served | rows | candidate | blend | vs blend | vs persistence | verdict |
+|---|---|---|---|---|---|---|
+| 09-25 | 206,888 | 0.0347 | 0.0306 | −13.5% | +14.7% | declined |
+| 09-26 | 131,952 | 0.0511 | 0.0352 | **−45.3%** | **−23.1%** | declined |
+| 09-27 | 227,189 | 0.0301 | 0.0281 | −7.1% | +7.8% | declined |
+| 09-28 | 226,369 | 0.0270 | 0.0271 | **+0.6%** | +18.8% | ADOPTED |
+| 09-29 | 220,333 | 0.0258 | 0.0251 | −2.8% | +7.3% | declined |
+
+**Won one night of five, by 0.00015 Brier** — 0.55% of blend's error, on predictions that are heavily
+correlated across 1,082 lots × 48 origins × 5 horizons. Mean −13.6% over all five, −5.7% excluding
+09-26. Clean-day trend: −13.5% → −7.1% → +0.6% → −2.8%: converging on parity with blend, not past it.
+
+**Not deployed**, and three reasons in order of weight:
+
+1. **The model is fragile where blend is not.** 09-26 validates 2026-09-25, the day the collector
+   covered only 58% of slots. On that day the model lost to blend by 45% *and to plain persistence by
+   23%*, while blend barely moved. Corpus coverage is 79.3% overall and the gaps are time-correlated,
+   so this is a normal operating condition, not an edge case. A forecaster marginally better on good
+   days and dramatically worse on bad ones is a worse forecaster to ship.
+2. **The margin does not buy its cost** — 300 MB of dependencies, an 8m36s nightly job and a new
+   failure mode, for at best parity.
+3. **The ship gate in the spec has not been run at all.** It asks for the hard subset, per horizon,
+   plus calibration; the nightly gate computes one citywide Brier. That needs Stage B task 7.
+
+**And the metric above is the one this document already warned against.** `evaluate.py`'s second
+refusal is "no citywide-only headline": ~85–90% of lots have a space at any moment, so the aggregate
+is dominated by easy cases, and the spec's §1 names the opportunity as the *hard subset* (where
+blend's advantage over persistence collapses to +5.4% at 60 min) and *mid-band calibration* (0.8–0.9
+says 0.862, happens 0.791). The nightly gate measures none of that. **So these five nights do not
+establish that the model is worse where it would matter — only that it is not better on the average,
+which was never the claim.** Measuring the hard subset is the next step, before any more corpus is
+waited for.
+
 ### The reversal, and what it is not
 
 **The 09-10 finding — blend worse than persistence beyond 30 minutes — did not reproduce.** The test
