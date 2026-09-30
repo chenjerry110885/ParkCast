@@ -57,7 +57,12 @@ from parkcast.forecast import (Blend, Climatology, Persistence, by_city,
 # slot. Verified against the hot store, not assumed -- see the module docstring.
 FEED_PHASE_SEC = 180
 
-#: (name, factory) for every forecaster under test. A trained model joins here.
+#: (name, factory) for the three baselines, each built from a history alone.
+#:
+#: The trained model is NOT here, and deliberately: it needs a model directory
+#: and a roster, which a `cls(history)` factory cannot express. `backtest` adds
+#: it to `Result.by_model` under "trained" when `model_dir` and `lots` are
+#: given, so a reader of the results iterates `by_model` rather than this tuple.
 FORECASTERS = (
     ("persistence", Persistence),
     ("climatology", Climatology),
@@ -254,6 +259,12 @@ class Result:
     #: (origin, horizon, lot) labels skipped because the app showed the lot as
     #: not updating at that origin: no forecast was published, so none is scored.
     withheld: int = 0
+    #: Origins dropped because they precede the trained model's cutoff. Scoring
+    #: it there would score it on its own training data, so the whole origin
+    #: goes -- baselines included, or the report would compare different
+    #: samples. Reported because silently shrinking the test period makes a
+    #: report about a shorter span than its header claims.
+    origins_before_cutoff: int = 0
 
     @property
     def n_predictions(self) -> int:
@@ -282,6 +293,9 @@ def backtest(
     origins: Iterable[int],
     horizons: Sequence[int],
     withhold_not_updating: bool = True,
+    model_dir=None,
+    lots: Sequence | None = None,
+    now: int | None = None,
 ) -> Result:
     """Score every forecaster at every origin, on identical inputs.
 
@@ -324,7 +338,29 @@ def backtest(
     stamps = sorted(labels)
     series = reading_series(labels) if withhold_not_updating else {}
 
+    # The trained model, when one is asked for and actually loads. An absent or
+    # refused model costs its own row, never the report: `model.load` returns
+    # None on anything it cannot account for, and the three baselines carry on.
+    booster, trained_through, roster = None, None, {}
+    if model_dir is not None and lots is not None:
+        from parkcast import model as model_module
+
+        booster = model_module.load(model_dir, now=now)
+        if booster is not None:
+            trained_through = model_module.train.manifest(model_dir).get("trained_through")
+            roster = {l.id: l for l in lots}
+            result.by_model["trained"] = []
+
     for origin in origins:
+        # A model trained through T, scored at an origin before T, is scored on
+        # its own training data -- and would come back looking extraordinary.
+        # The whole origin is dropped rather than just the trained model's turn
+        # at it: dropping one forecaster would leave the others scored on
+        # origins it never saw, and every comparison in the report would then be
+        # between different samples.
+        if trained_through is not None and origin <= trained_through:
+            result.origins_before_cutoff += 1
+            continue
         # +1 so the reading *at* the origin is inside the history -- it is the
         # forecaster's input, not one of its labels. Everything scored below is
         # strictly later.
@@ -337,6 +373,12 @@ def backtest(
             window_start = _hot_window_start(stamps, origin)
             withheld = withheld_at(series, origin=origin, window_start=window_start)
         models = [(name, cls(history)) for name, cls in FORECASTERS]
+        if booster is not None:
+            from parkcast import model as model_module
+
+            models.append(("trained", model_module.Trained(
+                history, model_dir=model_dir, lots=roster,
+                clim=Climatology(history), now=now, booster=booster)))
         result.origins.append(origin)
 
         for horizon in horizons:
