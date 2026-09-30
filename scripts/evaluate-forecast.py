@@ -108,9 +108,18 @@ def main() -> int:
                     help="which city's shard to score (default taipei)")
     ap.add_argument("--models", default=None,
                     help="score the trained model in data/models too (e.g. --models data/models)")
+    ap.add_argument("--cold-only", action="store_true",
+                    help="read only the compacted Parquet corpus, ignoring the hot store")
     args = ap.parse_args()
 
-    conn = store.connect(config.DB_PATH)
+    # `--cold-only` exists so this can run inside the collector image, which is
+    # the only place lightgbm is installed -- scoring the trained model needs it,
+    # and putting an ML stack on the host to read a report is the wrong trade.
+    # In a container the hot store cannot be opened at all: it is in WAL mode,
+    # and SQLite must WRITE the `-shm` sidecar even to read a WAL database, so a
+    # read-only mount fails outright (see store.connect_empty). The cost is the
+    # current, uncompacted day: everything older has been written to Parquet.
+    conn = store.connect_empty() if args.cold_only else store.connect(config.DB_PATH)
     labels = load_labels(conn, config.PARQUET_DIR, city=args.city)
     if not labels:
         raise SystemExit(f"no observations for {args.city} -- nothing to evaluate")
