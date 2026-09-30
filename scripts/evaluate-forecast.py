@@ -38,18 +38,61 @@ def fmt(value, width=7, places=4):
     return f"{'--':>{width}}" if value is None else f"{value:{width}.{places}f}"
 
 
-def table(title, subsets):
-    """One block: Brier per forecaster over a named set of predictions."""
+#: Row order. Not `FORECASTERS`, which no longer names the trained model: it
+#: needs a model directory and a roster, so `backtest` adds it to `by_model`
+#: instead. Iterating what was actually scored also means an absent model shows
+#: no row at all, rather than a row of `--` that reads as a forecaster which had
+#: nothing to say.
+ROW_ORDER = ("persistence", "climatology", "blend", "trained")
+
+
+def rows_of(by_model):
+    return [n for n in ROW_ORDER if n in by_model]
+
+
+def by_horizon(title, by_model):
+    """Brier per forecaster at each horizon, with blend as the reference.
+
+    Blend rather than persistence: persistence is blend's component, and the
+    product question turns on whether anything beats the forecaster currently
+    serving -- at the horizons the app actually opens on.
+    """
+    names = rows_of(by_model)
     print(f"\n{title}")
-    print(f"  {'':14s}{'n':>9}{'Brier':>9}{'vs persist':>12}{'vs clim':>10}")
+    header = f"  {'horizon':>8}{'n':>9}" + "".join(f"{n[:9]:>10}" for n in names)
+    if "trained" in names:
+        header += f"{'trained vs blend':>18}"
+    print(header)
+    for h in HORIZONS:
+        at_h = {n: [p for p in preds if p.horizon_min == h] for n, preds in by_model.items()}
+        scores = {n: brier(at_h[n]) for n in names}
+        row = f"  {h:>6} min{len(at_h[names[0]]):>9,}"
+        row += "".join(fmt(scores[n], 10) for n in names)
+        if "trained" in names:
+            row += fmt(skill(scores["trained"], scores.get("blend")), 18)
+        print(row)
+
+
+def table(title, subsets):
+    """One block: Brier per forecaster over a named set of predictions.
+
+    `vs blend` is the column that decides anything. Blend is what ships;
+    persistence and climatology are its components, and a blend routinely beats
+    both -- so a model can look strong against the parts while losing to the
+    whole. That is not hypothetical: the nightly gate let exactly that through
+    on 2026-09-23, before blend was added to the bar it has to clear.
+    """
+    print(f"\n{title}")
+    print(f"  {'':14s}{'n':>9}{'Brier':>9}{'vs persist':>12}{'vs clim':>10}{'vs blend':>10}")
     for label, by_model in subsets:
         scores = {name: brier(preds) for name, preds in by_model.items()}
-        for name, _ in FORECASTERS:
+        for name in rows_of(by_model):
             preds = by_model[name]
             row = f"  {(label + ' ' + name) if label else name:14s}"
             row += f"{len(preds):>9,}{fmt(scores[name], 9)}"
             row += fmt(skill(scores[name], scores['persistence']), 12) if name != "persistence" else f"{'--':>12}"
             row += fmt(skill(scores[name], scores['climatology']), 10) if name != "climatology" else f"{'--':>10}"
+            row += fmt(skill(scores[name], scores.get('blend')), 10) if name != "blend" else f"{'--':>10}"
             print(row)
 
 
@@ -63,6 +106,8 @@ def main() -> int:
                     help="also score lots the app shows as not updating (to compare)")
     ap.add_argument("--city", default=ids.LEGACY_CITY,
                     help="which city's shard to score (default taipei)")
+    ap.add_argument("--models", default=None,
+                    help="score the trained model in data/models too (e.g. --models data/models)")
     args = ap.parse_args()
 
     conn = store.connect(config.DB_PATH)
@@ -87,11 +132,38 @@ def main() -> int:
     hard = hard_lots(conn, config.PARQUET_DIR, before_ts=cutoff, threshold=HARD_THRESHOLD)
     print(f"  hard set {len(hard)} lots free <{HARD_THRESHOLD:.0%} of the time in training")
 
+    # The trained model, and the roster as it stood at the training cutoff --
+    # `train.latest_roster` rather than today's, so a lot that has since left
+    # the feed is not described as though it were still there.
+    model_dir, lots = None, None
+    if args.models:
+        from parkcast import train
+
+        model_dir = Path(args.models) / args.city
+        lots = list(train.latest_roster(config.PARQUET_DIR / "meta",
+                                        before_ts=cutoff, city=args.city))
+        if not lots:
+            raise SystemExit(f"no dated roster at or before the cutoff for {args.city}")
+
     result = backtest(conn, config.PARQUET_DIR, city=args.city, origins=origins,
                       horizons=HORIZONS,
-                      withhold_not_updating=not args.include_not_updating)
+                      withhold_not_updating=not args.include_not_updating,
+                      model_dir=model_dir, lots=lots)
     if not any(result.by_model.values()):
         raise SystemExit("no predictions scored -- the test period has no paired labels")
+
+    if result.origins_before_cutoff:
+        # Said out loud, because a report about a shorter span than its header
+        # claims is the kind of number that gets quoted later.
+        print(f"\n  NOTE  {result.origins_before_cutoff} of "
+              f"{len(origins)} origins precede the model's training cutoff and were "
+              f"dropped from EVERY forecaster -- scoring the model there would score "
+              f"it on its own training data, and dropping it alone would compare the "
+              f"rest on a different sample. {len(result.origins)} origins remain.")
+    if args.models and "trained" not in result.by_model:
+        print("\n  NOTE  no trained model was scored: none loaded from "
+              f"{model_dir} (see the log above for why). The baselines below are "
+              "unaffected.")
 
     base = sum(p.outcome for p in result.by_model["blend"]) / len(result.by_model["blend"])
     print(f"\n  scored   {len(result.by_model['blend']):,} predictions per forecaster")
@@ -115,36 +187,30 @@ def main() -> int:
     else:
         print("\nHARD SUBSET: no predictions -- no hard lot had a paired label.")
 
-    # Persistence is the bar the spec gates on, so it gets its own column here:
-    # a blend that never overtakes it at any horizon is not a better forecast,
-    # it is a worse one with more machinery.
-    print("\nBY HORIZON")
-    print(f"  {'horizon':>8}{'n':>9}{'persist':>9}{'blend':>9}{'blend vs persist':>18}{'vs clim':>10}")
-    for h in HORIZONS:
-        at_h = {n: [p for p in preds if p.horizon_min == h] for n, preds in result.by_model.items()}
-        b, c = brier(at_h["blend"]), brier(at_h["climatology"])
-        pe = brier(at_h["persistence"])
-        print(f"  {h:>6} min{len(at_h['blend']):>9,}{fmt(pe, 9)}{fmt(b, 9)}"
-              f"{fmt(skill(b, pe), 18)}{fmt(skill(b, c), 10)}")
+    by_horizon("BY HORIZON", result.by_model)
 
     # The product question, isolated: on the lots a driver actually needs help
     # with, at the horizons the app actually opens on, does the probability beat
     # "is it free right now?" Neither aggregate above answers it -- the citywide
     # one is drowned in easy lots, the by-horizon one in easy horizons.
     if any(hard_only.values()):
-        print("\nHARD SUBSET BY HORIZON  -- the question the app exists to answer")
-        print(f"  {'horizon':>8}{'n':>9}{'persist':>9}{'blend':>9}{'blend vs persist':>18}")
-        for h in HORIZONS:
-            at_h = {n: [p for p in preds if p.horizon_min == h] for n, preds in hard_only.items()}
-            b, pe = brier(at_h["blend"]), brier(at_h["persistence"])
-            print(f"  {h:>6} min{len(at_h['blend']):>9,}{fmt(pe, 9)}{fmt(b, 9)}{fmt(skill(b, pe), 18)}")
+        by_horizon("HARD SUBSET BY HORIZON  -- the question the app exists to answer",
+                   hard_only)
 
-    print("\nCALIBRATION (blend)  -- does '21%' happen 21% of the time?")
-    print(f"  {'band':>12}{'n':>9}{'said':>8}{'happened':>10}{'gap':>8}")
-    for b in calibration(result.by_model["blend"]):
-        gap = b.observed_rate - b.mean_predicted
-        print(f"  {b.low:.1f}-{b.high:.1f}{'':>4}{b.count:>9,}{b.mean_predicted:>8.3f}"
-              f"{b.observed_rate:>10.3f}{gap:>+8.3f}")
+    # Every forecaster that ran, because mid-band overconfidence is one of the
+    # two defects Stage B exists to fix -- 0.8-0.9 said 0.862 and happened 0.791
+    # on the last citywide run -- and a trained model that MOVED the gap rather
+    # than closing it would be invisible in a Brier column.
+    for name in rows_of(result.by_model):
+        if name not in ("blend", "trained"):
+            continue
+        print()
+        print(f"CALIBRATION ({name})  -- does '21%' happen 21% of the time?")
+        print(f"  {'band':>12}{'n':>9}{'said':>8}{'happened':>10}{'gap':>8}")
+        for b in calibration(result.by_model[name]):
+            gap = b.observed_rate - b.mean_predicted
+            print(f"  {b.low:.1f}-{b.high:.1f}{'':>4}{b.count:>9,}{b.mean_predicted:>8.3f}"
+                  f"{b.observed_rate:>10.3f}{gap:>+8.3f}")
 
     print("\nSUPPORT  -- training observations behind each prediction's climatology bucket")
     print(f"  {'bucket n':>12}{'predictions':>13}{'blend Brier':>13}")
