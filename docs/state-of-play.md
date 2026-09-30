@@ -144,6 +144,63 @@ Blend's Brier skill over persistence:
 The 09-14 run: 231,536 predictions per forecaster, 26,335 labels withheld, base rate 0.899;
 citywide Brier persistence 0.0557, climatology 0.0680, blend 0.0462.
 
+### Stage B measured where it was supposed to win — 2026-09-30
+
+`python scripts/evaluate-forecast.py --city taipei --models data/models --cold-only`, run in the
+collector image (the only place lightgbm is installed). Model trained through 2026-09-27 00:00; test
+period 09-27 04:43 → 09-29 04:13, 96 origins, **460,604 predictions per forecaster**, 65,397 labels
+withheld for not-updating lots, base rate 0.945.
+
+| | citywide Brier | vs blend | hard subset (524 lots, base 0.804) | vs blend |
+|---|---|---|---|---|
+| **blend** | **0.0256** | — | **0.0758** | — |
+| trained | 0.0272 | **−6.1%** | 0.0819 | **−8.0%** |
+| persistence | 0.0300 | −16.9% | 0.0826 | −9.0% |
+| climatology | 0.0392 | −53.0% | 0.1231 | −62.4% |
+
+**The hard subset did not rescue it — it is slightly worse there.** That was the hypothesis the last
+entry raised, and this is the answer. Worse, on the hard subset the model beats *persistence* by only
+**+0.9%**: on the lots the product exists for, a gradient-boosted model with 26 features is a tie with
+"however many spaces there were a moment ago".
+
+**One real finding, and it is about horizons.** `trained vs blend`, hard subset in brackets:
+
+| 5 min | 15 min | 30 min | 60 min | 120 min |
+|---|---|---|---|---|
+| −23.3% (−34.4%) | −3.4% (−8.4%) | −22.1% (−27.5%) | −3.5% (−3.7%) | **+5.7% (+6.8%)** |
+
+The model wins at two hours, on both populations, and loses badly up close. That is mechanical rather
+than lucky: `Blend`'s persistence weight is `0.5 ** (horizon/30)`, so at 120 minutes it is 6%
+persistence and 94% climatology — and climatology is the weakest baseline here, which the model beats
+by +31% citywide. Where blend *is* climatology, the model gets ahead. **But the pattern zigzags**
+(−23, −3, −22, −3, +6), and a monotonic mechanism should not. At this sample size that smells of
+noise, so the 120-minute result needs replicating on another window before it is built on.
+
+**The defect Stage B was designed to fix is not there any more.** §1 of the spec names "mid-band
+overconfidence", from the 09-14 run where 0.8–0.9 said 0.862 and happened 0.791 — a gap of −0.071.
+In this window **every one of blend's ten bands is *under*confident**, 0.8–0.9 now +0.035. The sign
+has flipped. Whatever is true of blend's calibration, "it is overconfident in the middle" is not a
+fact about it today.
+
+The model *is* better calibrated where the ranker reads it — weighted |gap| across 0.2–0.9 of
+**0.0457 against blend's 0.0657** — and much worse at the bottom: **0.1219 against 0.0297** over
+0.0–0.2, saying 2.4% where 13.4% happened. That is a driver told to skip a lot with a one-in-seven
+chance.
+
+**Not deployed**, and the reasons have not moved: blend wins overall and on the hard subset, the model
+ties persistence where it matters, and the nightly runs found it 45% worse than blend — and 23% worse
+than persistence — on a day with 58% collector coverage.
+
+Read the window's limits before quoting any of it: **two days**, a base rate of 0.945 against the
+0.899 of the 09-14 run (an easier period, which compresses every difference), and a hard set that has
+grown from 256 lots to 524 at the same threshold — so it is a different population, not a longer
+measurement of the same one.
+
+**What this argues for is not replacing blend.** It is a horizon-dependent combination, or the model
+as a third component inside the blend rather than instead of it — a far smaller change, and one this
+table supports rather than merely permits. The next step is replication on a wider window, which is
+now one command.
+
 ### Stage B's first five nights — 2026-09-29
 
 The nightly gate, run over five consecutive validation days on 26 days of Taipei corpus.

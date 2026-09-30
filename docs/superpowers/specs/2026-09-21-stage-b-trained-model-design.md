@@ -31,6 +31,13 @@ headline is not the opportunity. Two measured defects are:
    band says 0.657 and happens 0.520. The top band is sound (198,024 of 231,536 predictions, says
    0.986 against 0.976 observed) — so the app is honest about the easy cases and overconfident about
    exactly the ones a driver is deciding on.
+
+   **Measured again 2026-09-30, and the sign has flipped.** Over 09-27 → 09-29, every one of blend's
+   ten bands is *under*confident: 0.8–0.9 says 0.856 and happens 0.891. So this defect is a property
+   of the 09-14 window, not of `Blend`. What survives is the weaker claim that blend's mid-band
+   calibration is poor in *some* direction — weighted |gap| 0.0657 across 0.2–0.9, against the
+   trained model's 0.0457 — and "fix the overconfidence" is no longer an accurate goal. See
+   `docs/state-of-play.md`, "Stage B measured where it was supposed to win".
 2. **The hard subset is where the gain collapses.** On the 256 lots that actually fill up, blend's
    advantage over persistence falls from +16.3% to **+5.4%** at 60 minutes. That is the lot the
    product exists for.
