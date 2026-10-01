@@ -9,6 +9,17 @@
  * repeating it twenty times down the page. The tile slot it occupied now
  * carries the amenity tiles below, which say something new per car park.
  *
+ * It survives in exactly one place, and the exception earns itself. A lot whose
+ * fare depends on the hour shows the rate in force at the arrival time, and the
+ * price label names that hour -- `NT$50 per hour at 21:00`. Without the clock,
+ * a resolved rate is indistinguishable from a flat one, so NT$50 reads as what
+ * this car park charges rather than what it charges at the hour the driver
+ * picked: a money claim that is false at every other hour, which is the exact
+ * harm the fare work exists to remove. It appears only on the ~7% of lots whose
+ * rate actually varies, never on the 73.4% that charge one flat rate, so it is
+ * not a number repeated down the page -- it is a qualifier on a number that
+ * differs per card. See `../format`'s `formatPrice`.
+ *
  * The card carries forward the same three arguments `LotRow` used to make,
  * because none of them stopped being true when the row became a card:
  *
@@ -56,6 +67,17 @@ export interface LotCardProps {
   ageMin: number;
   /** Minutes from the reading to the chosen arrival, for the confidence pill. */
   horizonFromReadingMin: number;
+  /**
+   * The chosen arrival, in epoch **seconds** -- the moment the price tile's rate
+   * applies to.
+   *
+   * It must be the same value `rankLots` was given, because `row.rateAtArrival`
+   * was resolved against that one and this names it on screen: handed a
+   * different moment, the card would print a correct rate under the wrong
+   * clock. App takes both from a single render of its `arrivalTs`, which is
+   * also in the `useMemo` that produces these rows.
+   */
+  arrivalTs: number;
   /**
    * Observations behind this lot's half-hour-of-week cell in `week.bin`
    * (`week.ts`'s `probabilityAt`), for the confidence pill.
@@ -152,6 +174,7 @@ export function LotCard({
   baseDataTs,
   ageMin,
   horizonFromReadingMin,
+  arrivalTs,
   support,
   fromHistory,
   best,
@@ -190,7 +213,7 @@ export function LotCard({
     updating: row.lot.u === undefined,
     probability: row.probability,
   });
-  const [priceValue, priceLabel] = splitPrice(formatPrice(row, s));
+  const [priceValue, priceLabel] = splitPrice(formatPrice(row, s, arrivalTs));
   const f = row.lot.f;
   const spaces =
     typeof f === "number"
@@ -245,6 +268,19 @@ export function LotCard({
               <>
                 {" · "}
                 <span data-testid="lot-stalled">{stalledNote}</span>
+              </>
+            )}
+            {/* Beside the district and the operator, not inside the money tile.
+                This car park prices public holidays as its own category and the
+                app has no holiday calendar, so the note is a standing fact about
+                the lot rather than a hedge on the number in the tile -- the same
+                distinction, and the same slot, as the not-updating note above.
+                The rate shown is still correct for an ordinary day; what nobody
+                here knows is whether *this* day is a holiday. */}
+            {row.pricesHolidays && (
+              <>
+                {" · "}
+                <span data-testid="lot-holiday-price">{s.priceHolidayNote}</span>
               </>
             )}
           </p>
