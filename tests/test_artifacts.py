@@ -487,3 +487,70 @@ def test_encode_week_names_the_missing_lot():
 def test_week_name_follows_the_shard_convention():
     assert artifacts.week_name("taipei") == "week.bin"
     assert artifacts.week_name("tainan") == "week-tainan.bin"
+
+
+# --- the published fare schedule --------------------------------------------
+
+
+def _published(text):
+    """The `p` object for one fare string, as a client would receive it."""
+    from parkcast.pricing import parse_fare, parse_tariff
+
+    return artifacts._price_field(parse_fare(text), parse_tariff(text))
+
+
+def test_a_varying_fare_publishes_its_schedule():
+    field = _published("計時:40元(08-22)、20元(22-08)，全程半小時計。")
+
+    assert field["t"] == [["all", 8, 22, 40], ["all", 22, 8, 20]]
+    assert field["lo"] == 20 and field["hi"] == 40, "the fallback stays authoritative"
+
+
+def test_a_scoped_schedule_carries_the_scope_the_client_needs():
+    field = _published(
+        "計時 週一至週五50元/時(08-20)，10元/時(20-08)，"
+        "週六、週日、行政機關放假之紀念日與民俗日60元/時(10-20)，10元/時(20-10)。")
+
+    assert ["weekday", 8, 20, 50] in field["t"]
+    assert ["weekend", 10, 20, 60] in field["t"]
+
+
+def test_a_single_rate_publishes_no_schedule():
+    """73.4% of the roster. A schedule saying one thing would be noise in every
+    artifact, repeated 1,285 times."""
+    field = _published("小型車：計時 30元/時，停車全程以半小時計。")
+
+    assert "t" not in field
+    assert field == {"k": "exact", "lo": 30, "hi": 30}
+
+
+def test_an_unparsed_schedule_publishes_no_key_so_the_client_can_tell():
+    """Absence is how the client knows to fall back, rather than having to infer
+    it from a schedule that happens not to cover the time it asked about."""
+    field = _published("計時 50元/時(08-20)，30元/時(10-18)。")   # conflicting
+
+    assert field["k"] == "range"
+    assert "t" not in field
+
+
+def test_an_unknown_fare_still_publishes_no_numbers_at_all():
+    """The existing rule, unchanged: no key to misread rather than a null."""
+    assert _published("詳見現場公告") == {"k": "unknown"}
+
+
+def test_a_schedule_is_a_list_of_four_element_rows():
+    """The wire format, pinned. A client reads these positionally, so a reorder
+    would resolve every rate against the wrong hours and still look plausible."""
+    field = _published("計時:40元(08-22)、20元(22-08)。")
+
+    for row in field["t"]:
+        scope, start, end, rate = row
+        assert scope in ("all", "weekday", "weekend", "holiday")
+        assert isinstance(start, int) and isinstance(end, int)
+        assert isinstance(rate, int)
+
+
+def test_the_published_schedule_survives_a_json_round_trip():
+    field = _published("計時:40元(08-22)、20元(22-08)。")
+
+    assert json.loads(json.dumps(field))["t"] == field["t"]
