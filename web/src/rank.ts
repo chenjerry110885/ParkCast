@@ -29,7 +29,7 @@
  * row individually.
  */
 import { haversineMeters, walkMinutes, type LatLon } from "./geo";
-import type { Lot, Price } from "./types";
+import type { FareScope, FareSegment, Lot, Price } from "./types";
 
 /* ------------------------------------------------------------------ *
  * The cost model. Every number here is a judgment call rather than a
@@ -275,6 +275,20 @@ export interface Ranked {
   perEntry: number | null;
   /** False only when we have no usable price at all -- not merely no *hourly* one. */
   priceKnown: boolean;
+  /**
+   * The hourly rate in force at the arrival time, or `null` when it could not be
+   * resolved. This is what the card shows -- what the sign at the entrance says
+   * -- and it is deliberately not the same quantity as the fee the score
+   * charges, which integrates across the whole assumed stay. At 21:00 on a
+   * 50-by-day/10-by-night lot the rate is 50 and the two-hour fee is 60.
+   */
+  rateAtArrival: number | null;
+  /**
+   * Whether this lot prices public holidays as their own category, so the card
+   * can tell a driver on one to check the sign rather than trust the ordinary
+   * rate. 95 of the 219 varying lots do, and no calendar here can detect the day.
+   */
+  pricesHolidays: boolean;
   /** Straight-line metres from the destination. */
   meters: number;
   /** Whole minutes to walk `meters`, rounded up. */
@@ -302,6 +316,28 @@ export interface RankInput {
    * taken. See `probabilityForLot` in `App.tsx`.
    */
   horizonMin: number;
+  /**
+   * The wall-clock moment of arrival, **epoch seconds**, for pricing only.
+   *
+   * Seconds, like every other timestamp in this project (`arrival.ts`, `week.ts`,
+   * the artifacts). Milliseconds here would be a silent factor of a thousand:
+   * the hour would resolve to whatever 1970 was, and every lot would price the
+   * same, which looks like a feature that quietly does nothing.
+   *
+   * **Not interchangeable with `horizonMin`**, which is measured from the
+   * *reading* the forecast was built on and so drifts from the clock by however
+   * stale that reading is. A fare depends on the actual hour in Taipei, so it
+   * needs the clock; a probability depends on how far ahead of the reading it is
+   * being asked about, so it needs the offset. Passing one where the other
+   * belongs would price a 21:00 arrival at the 19:00 rate on a two-hour-old
+   * reading, and nothing would say so.
+   *
+   * Optional, and absence is not a silent downgrade: without it, pricing falls
+   * back to the midpoint, which is exactly what the app did before this field
+   * existed. A caller with no clock genuinely cannot resolve a time-of-day rate,
+   * and the honest answer there is the range.
+   */
+  arrivalTs?: number;
   /** Candidates, in grid-row order. */
   lots: readonly Lot[];
   /**
@@ -338,7 +374,136 @@ interface Money {
   priceKnown: boolean;
   /** NT$ this lot is charged in the score for one visit. */
   fee: number;
+  /**
+   * The hourly rate in force at the arrival time, or `null` when it could not be
+   * resolved -- no schedule, an hour none of it covers, or a rate that depends on
+   * whether the day is a public holiday.
+   *
+   * Kept separate from `priceKnown`, which still means "there is a usable number
+   * to show" and stays true for a `range`. Folding the two together would turn
+   * the ~100 lots whose schedule cannot be read from "shows a range" into "price
+   * unknown", which is less information, not more honesty.
+   */
+  rateAtArrival: number | null;
+  /**
+   * Whether this lot prices public holidays as their own category, so the card
+   * can tell a driver on one to check the sign rather than trust the ordinary
+   * rate shown. 95 of the 219 varying lots do.
+   */
+  pricesHolidays: boolean;
 }
+
+/**
+ * Taipei is UTC+8 with no DST, so a wall-clock moment there is exact integer
+ * arithmetic from the epoch -- the same reasoning, and the same constant, as
+ * `arrival.ts`'s `TAIPEI_OFFSET_SEC`.
+ */
+const TAIPEI_OFFSET_SEC = 8 * 3600;
+
+/**
+ * The Taipei hour, minute-of-hour and whether it is a weekend, from an epoch
+ * millisecond.
+ *
+ * The weekday arithmetic is anchored on the epoch, and **1970-01-01 was a
+ * Thursday** -- the same fact `week_bucket` turns on, and the same one that has
+ * already caused one wrong assumption in this project. Epoch day 0 is therefore
+ * weekday index 3 with Monday at 0, which is why the `+ 3` is there and not a
+ * `+ 4` or a `0`. Saturday is 5 and Sunday 6.
+ */
+function taipeiParts(ts: number): { hour: number; minute: number; weekend: boolean } {
+  const sec = ts + TAIPEI_OFFSET_SEC;
+  const dayOfEpoch = Math.floor(sec / 86_400);
+  const secOfDay = sec - dayOfEpoch * 86_400;
+  const weekday = (((dayOfEpoch + 3) % 7) + 7) % 7;
+  return {
+    hour: Math.floor(secOfDay / 3600),
+    minute: Math.floor((secOfDay % 3600) / 60),
+    weekend: weekday >= 5,
+  };
+}
+
+/** How specific a scope is. A lot states its ordinary rate, then its exception. */
+const SCOPE_RANK: Record<FareScope, number> = { all: 0, weekday: 1, weekend: 1, holiday: 2 };
+
+function covers(segment: FareSegment, hour: number): boolean {
+  const [, start, end] = segment;
+  if (start < end) return hour >= start && hour < end;
+  if (start === end) return true; // a full day
+  return hour >= start || hour < end; // wraps midnight
+}
+
+/**
+ * The hourly rate a schedule states for a moment, or `null` when none can be
+ * claimed.
+ *
+ * `null` in three cases, and the third is a decision rather than a gap:
+ *
+ * - no segment covers the hour. Saturday 09:00 at a lot whose only weekend
+ *   segment is 10-20 has no stated rate, and the weekday rate is not it;
+ * - the schedule is absent, which is how the collector says "fall back";
+ * - **the only applicable segment is holiday-scoped.** Taipei car parks price
+ *   public holidays differently from ordinary weekends. Saturday and Sunday are
+ *   readable from the date; a public holiday is not, and this app has no holiday
+ *   calendar. A lot that *also* states weekday or weekend rates still resolves
+ *   an ordinary Tuesday -- 95 of the 219 varying lots price holidays, so
+ *   refusing all of them would cost most of the feature to protect ten days a
+ *   year. Mirrors `pricing.rate_at`.
+ */
+export function rateAt(segments: readonly FareSegment[], ts: number): number | null {
+  const { hour, weekend } = taipeiParts(ts);
+  const wanted: FareScope = weekend ? "weekend" : "weekday";
+  const applicable = segments.filter(
+    (s) => covers(s, hour) && (s[0] === wanted || s[0] === "all"),
+  );
+  if (applicable.length === 0) return null;
+  const best = Math.max(...applicable.map((s) => SCOPE_RANK[s[0]]));
+  return applicable.find((s) => SCOPE_RANK[s[0]] === best)![3];
+}
+
+/**
+ * What the stay the ranker assumes would actually cost, or `null` when any part
+ * of it has no stated rate.
+ *
+ * **The display and the score answer different questions**, and conflating them
+ * is the mistake this function exists to avoid. The card shows what it costs
+ * *here, now* -- the rate at the arrival time, which is what the sign at the
+ * entrance says. This is the other question: what the *stay* costs. With
+ * `EXPECTED_HOURS` at 2, a stay beginning at 21:00 crosses a 22:00 boundary, so
+ * charging two hours at the arrival rate would be as wrong as the midpoint it
+ * replaces -- just differently, and in the expensive direction.
+ *
+ * So it integrates, hour block by hour block: at most three lookups, because the
+ * stay spans at most `EXPECTED_HOURS + 1` of them. A minute-by-minute loop would
+ * be simpler and would do 120 lookups per lot on every scrub.
+ *
+ * `null` rather than a partial sum when a minute has no rate. A fee missing an
+ * hour is a different quantity, not a smaller one, and the caller falls back to
+ * the midpoint exactly as it does today.
+ *
+ * Some lots state their own crossing rule in prose -- "the crossing period is
+ * charged at the previous period's rate" -- which is deliberately not
+ * implemented: reading per-lot rules out of Chinese prose is a second parsing
+ * problem, and a straight integral is already far closer than a midpoint.
+ */
+export function feeForStay(price: Price | undefined, arrivalTs: number | undefined): number | null {
+  const segments = price?.t;
+  if (segments === undefined || segments.length === 0 || arrivalTs === undefined) return null;
+
+  const stayMin = EXPECTED_HOURS * 60;
+  let fee = 0;
+  let doneMin = 0;
+  while (doneMin < stayMin) {
+    const at = arrivalTs + doneMin * 60;
+    const rate = rateAt(segments, at);
+    if (rate === null) return null;
+    const { minute } = taipeiParts(at);
+    const chunk = Math.min(60 - minute, stayMin - doneMin);
+    fee += rate * (chunk / 60);
+    doneMin += chunk;
+  }
+  return fee;
+}
+
 
 /** The midpoint of a parsed fare, or `null` if it carries no usable number. */
 function midpoint(price: Price): number | null {
@@ -359,10 +524,12 @@ function midpoint(price: Price): number | null {
  * folded into `hourly`, so the UI never invents a per-hour rate that no sign at
  * the car park displays.
  */
-function priceOf(price: Price | undefined): Money {
+function priceOf(price: Price | undefined, arrivalTs?: number): Money {
+  const blank = { rateAtArrival: null, pricesHolidays: false };
   const mid = price === undefined ? null : midpoint(price);
   if (price === undefined || mid === null || price.k === "unknown") {
     return {
+      ...blank,
       hourly: null,
       perEntry: null,
       priceKnown: false,
@@ -370,9 +537,24 @@ function priceOf(price: Price | undefined): Money {
     };
   }
   if (price.k === "entry") {
-    return { hourly: null, perEntry: mid, priceKnown: true, fee: mid };
+    // A per-visit charge has no hourly rate to resolve, and inventing one would
+    // push all 31 such lots wrongly through every ranking.
+    return { ...blank, hourly: null, perEntry: mid, priceKnown: true, fee: mid };
   }
-  return { hourly: mid, perEntry: null, priceKnown: true, fee: mid * EXPECTED_HOURS };
+
+  // The stay, integrated across any rate boundary inside it -- not the arrival
+  // rate held for two hours, and not the midpoint. `null` means some minute of
+  // the stay has no stated rate, and the midpoint is then the honest fallback,
+  // exactly as before this existed.
+  const stay = feeForStay(price, arrivalTs);
+  return {
+    hourly: mid,
+    perEntry: null,
+    priceKnown: true,
+    fee: stay ?? mid * EXPECTED_HOURS,
+    rateAtArrival: arrivalTs === undefined ? null : rateAt(price.t ?? [], arrivalTs),
+    pricesHolidays: (price.t ?? []).some((s) => s[0] === "holiday"),
+  };
 }
 
 /**
@@ -567,7 +749,7 @@ export function rankLots(input: RankInput): Ranked[] {
     const position = { lat: lot.y, lon: lot.x };
     const meters = haversineMeters(input.destination, position);
     const walkMin = walkMinutes(meters);
-    const money = priceOf(lot.p);
+    const money = priceOf(lot.p, input.arrivalTs);
     const probability = usableProbability(input.probability(index, input.horizonMin));
     // What parking *here* costs once you are in: the whole story for a lot whose
     // probability is unknown, and the sort key within that group.
@@ -592,6 +774,8 @@ export function rankLots(input: RankInput): Ranked[] {
       hourly: s.money.hourly,
       perEntry: s.money.perEntry,
       priceKnown: s.money.priceKnown,
+      rateAtArrival: s.money.rateAtArrival,
+      pricesHolidays: s.money.pricesHolidays,
       meters: s.meters,
       walkMin: s.walkMin,
       cost:

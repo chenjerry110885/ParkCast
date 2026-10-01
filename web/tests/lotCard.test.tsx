@@ -9,7 +9,7 @@ import type { Lot } from "../src/types";
 const BASE = 1788677280;
 const lot = (over: Partial<Lot> = {}): Lot => ({ i: 0, id: "TPE1", n: "台北101停車場", a: "信義區", y: 25.03, x: 121.56, c: 400, t: "民營停車場", p: { k: "exact", lo: 60, hi: 60 }, f: 38, ...over });
 const row = (over: Partial<Ranked> = {}, lotOver: Partial<Lot> = {}): Ranked => ({
-  lot: lot(lotOver), id: lotOver.id ?? "TPE1", index: 0, probability: 0.86, hourly: 60, perEntry: null, priceKnown: true, meters: 320, walkMin: 4, cost: 100, ...over,
+  lot: lot(lotOver), id: lotOver.id ?? "TPE1", index: 0, probability: 0.86, hourly: 60, perEntry: null, priceKnown: true, rateAtArrival: 60, pricesHolidays: false, meters: 320, walkMin: 4, cost: 100, ...over,
 });
 // `support: 0` is the honest default, not a placeholder: a card the week table
 // has never been consulted for has no history behind this half-hour to cite.
