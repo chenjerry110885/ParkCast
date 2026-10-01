@@ -12,6 +12,9 @@ is `unknown`, which is a real answer and must never be filled in with a default.
 """
 import re
 from dataclasses import dataclass
+from datetime import datetime
+
+from parkcast import config
 
 PLAUSIBLE_MIN = 5
 PLAUSIBLE_MAX = 300
@@ -203,3 +206,235 @@ def parse_fare(payex: str | None) -> Price:
         return Price("entry", fees[0], fees[-1])
 
     return UNKNOWN
+
+
+# --- the schedule -----------------------------------------------------------
+#
+# `parse_fare` above answers "what does this lot charge?" with a number or a
+# span. What follows answers "what does it charge at 19:00 on a Tuesday?", which
+# the span cannot: ranking on a midpoint prices a 50/10 lot at 30, a number no
+# sign at that car park displays.
+#
+# Measured on tests/fixtures/desc_sample.json: of the 219 lots `parse_fare`
+# reports as `range`, 143 carry a rate with an explicit hour window and 137 a
+# weekday or weekend marker. The module docstring's claim that the conditions
+# are not exposed structurally describes the parser above, not the data.
+
+
+#: How specific a segment's day scope is. A lot states its ordinary rate and then
+#: its exception, so the exception wins where both could apply.
+_SCOPE_RANK = {"all": 0, "weekday": 1, "weekend": 1, "holiday": 2}
+
+#: `週一至週五`, `平日`, `非假日` -- the ordinary working week.
+_WEEKDAY_MARK = re.compile(r"週一?[至~～-]?週?五|週一|周一|平日|非假日")
+#: `週六`, `週日`, `假日`, `例假日` -- and `週六至週日`, which both halves match.
+_WEEKEND_MARK = re.compile(r"週六|週日|周六|周日|週末|周末|假日|例假")
+#: `行政機關放假之紀念日與民俗日` and its many spellings. Never resolvable: see
+#: `rate_at`.
+_HOLIDAY_MARK = re.compile(r"行政機關放假|紀念日|民俗")
+
+_HOUR_PART = r"(\d{1,2})\s*(?:時|:\d{2})?"
+_WINDOW = rf"[（(]\s*{_HOUR_PART}\s*[-~～至到]\s*{_HOUR_PART}\s*[）)]"
+_RATE = r"(\d[\d,]*)\s*元(?:\s*/\s*(?:小)?時)?"
+#: Both orders occur in the corpus, and a parser handling one collapses the
+#: other into a range: `50元/時(08-20)` and `(10時~22時)50元/時`.
+_RATE_THEN_WINDOW = re.compile(rf"{_RATE}\s*{_WINDOW}")
+_WINDOW_THEN_RATE = re.compile(rf"{_WINDOW}\s*{_RATE}")
+
+
+@dataclass(frozen=True, slots=True)
+class Segment:
+    """One rate, the hours it covers and the days it applies to.
+
+    `end_hour` may be less than or equal to `start_hour`, meaning the segment
+    wraps midnight. That is the normal case, not an edge one -- `22時~08時` is how
+    the corpus writes an overnight rate, and a rule assuming `start < end` would
+    drop every one of them.
+    """
+    scope: str        # "all" | "weekday" | "weekend" | "holiday"
+    start_hour: int   # 0-23, inclusive
+    end_hour: int     # 0-23, exclusive; <= start_hour means it wraps midnight
+    rate: int         # NT$ per hour
+
+    def covers(self, hour: int) -> bool:
+        if self.start_hour < self.end_hour:
+            return self.start_hour <= hour < self.end_hour
+        # Wrapping, or a full day when the two are equal.
+        if self.start_hour == self.end_hour:
+            return True
+        return hour >= self.start_hour or hour < self.end_hour
+
+
+@dataclass(frozen=True, slots=True)
+class Tariff:
+    segments: tuple[Segment, ...]
+
+
+def prices_holidays(tariff: Tariff | None) -> bool:
+    """Whether any segment is holiday-scoped.
+
+    The display needs this. 95 of the fixture's 219 varying lots price public
+    holidays as their own category, and a driver on one of those days should be
+    told the rate shown is the ordinary one rather than trust it.
+    """
+    return tariff is not None and any(s.scope == "holiday" for s in tariff.segments)
+
+
+def _scope_of(clause: str, carried: str) -> str:
+    """The day scope a clause states, or the one carried into it.
+
+    Scope is **sticky**. In `週一至週五50元/時(08-20)，10元/時(20-08)` the second
+    clause carries no marker and is still a weekday rate. A parser that scoped
+    only the marked clause would file half the corpus under `all` and then
+    resolve the wrong rate at every hour of the day.
+
+    `週六、週日、行政機關放假之紀念日與民俗日60元/時(10-20)` is the corpus's
+    standard phrasing for a weekend rate, and `_CLAUSE` splits it on the
+    enumerating `、` -- so the rate lands in a clause naming only the holiday.
+    That rate genuinely applies to Saturdays, which a date can settle, so a
+    holiday marker **never overrides a weekend or weekday scope already carried
+    into the clause**; it only sets the scope where nothing else has.
+
+    That rule misattributes one shape: `週一至週五20元/時，行政機關放假之紀念日
+    30元/時` would read the holiday clause as a weekday one. It is safe anyway,
+    because the result is two weekday segments claiming the same hours at
+    different rates -- which `_conflicts` rejects, so the lot falls back to its
+    range rather than publishing a wrong number. A misattribution that becomes a
+    fallback is the failure mode to aim for.
+    """
+    if _WEEKEND_MARK.search(clause):
+        return "weekend"
+    if _WEEKDAY_MARK.search(clause):
+        return "weekday"
+    if _HOLIDAY_MARK.search(clause):
+        return carried if carried in ("weekday", "weekend") else "holiday"
+    return carried
+
+
+def _hour(raw: str) -> int | None:
+    """`24` is midnight, and both `(10時~24時)` and `(24時~10時)` are real."""
+    value = int(raw)
+    return value % 24 if value <= 24 else None
+
+
+def _segments_in(clause: str, scope: str) -> list[Segment]:
+    found = []
+    for pattern, order in ((_RATE_THEN_WINDOW, "rate"), (_WINDOW_THEN_RATE, "window")):
+        for match in pattern.finditer(clause):
+            rate_raw, start_raw, end_raw = (
+                (match.group(1), match.group(2), match.group(3)) if order == "rate"
+                else (match.group(3), match.group(1), match.group(2)))
+            start, end = _hour(start_raw), _hour(end_raw)
+            rate = _amount(rate_raw)
+            if start is None or end is None:
+                continue
+            if not PLAUSIBLE_MIN <= rate <= PLAUSIBLE_MAX:
+                # The same bound `_span` applies. A monthly figure that escaped
+                # `_TIMING` must never become an hourly rate.
+                continue
+            found.append(Segment(scope, start, end, rate))
+    return found
+
+
+def _conflicts(segments: list[Segment]) -> bool:
+    """Whether two segments of the same scope claim the same hour.
+
+    Not a tie to break. Guessing which the sign means is precisely what this
+    feature exists to stop, so a conflict makes the whole tariff unusable and
+    the lot keeps the range `parse_fare` gave it.
+    """
+    for i, a in enumerate(segments):
+        for b in segments[i + 1:]:
+            if a.scope != b.scope:
+                continue
+            if any(a.covers(h) and b.covers(h) for h in range(24)):
+                return True
+    return False
+
+
+def parse_tariff(payex: str | None) -> Tariff | None:
+    """The lot's rate as a function of time, or None when there is no such thing.
+
+    None for a single flat rate (73.4% of the roster -- a schedule saying one
+    thing would be noise in every artifact), for a fare that cannot be read, and
+    for one whose clauses conflict. In every case the caller falls back to
+    `parse_fare`'s span, which is why absence is the signal rather than an empty
+    schedule.
+
+    Runs on the same cleaned text `parse_fare` builds, so monthly rentals,
+    surcharges and non-car clauses are excluded by the code that already
+    excludes them rather than by a second copy of that judgement.
+    """
+    if not payex:
+        return None
+
+    timing = _strip_non_car(_drop_surcharges(_TIMING.match(payex).group(1)))
+    segments: list[Segment] = []
+    scope = "all"
+    for i, clause in enumerate(_CLAUSE.split(timing)):
+        if i % 2:                       # a delimiter kept by the split
+            continue
+        if _CEILING.search(clause):     # 上限/最高/免費 -- not a tariff
+            continue
+        scope = _scope_of(clause, scope)
+        segments.extend(_segments_in(clause, scope))
+
+    unique = list(dict.fromkeys(segments))
+    if len(unique) < 2 or _conflicts(unique):
+        return None
+
+    # A tariff must agree with the span `parse_fare` reported, because the client
+    # uses `lo`/`hi` as its fallback and the two must never contradict each other
+    # on the same lot.
+    #
+    # One fixture lot fails this and shows why it is a guard rather than an
+    # assertion: `週一至週五50元/時(08-22)，…60元/時(08-22)，…每日(22-08)10元`
+    # reports 50-60, because `_HOURLY` sees the two `元/時` rates and the bare
+    # windowed `10元` is only a fallback that "never competes" with them. The
+    # tariff here is arguably the better reading, but widening `parse_fare` to
+    # agree would move the published range -- and the ranking -- for an unmeasured
+    # number of lots. So the lot keeps its range, and costs 1 of 219.
+    span = parse_fare(payex)
+    if span.low is None or span.high is None or span.kind != "range":
+        return None
+    if any(not span.low <= s.rate <= span.high for s in unique):
+        return None
+    return Tariff(tuple(unique))
+
+
+def rate_at(tariff: Tariff, when: datetime) -> int | None:
+    """The hourly rate in force at `when`, or None when none can be claimed.
+
+    None rather than a guess in three cases, and the third is a decision rather
+    than a limitation:
+
+    * No segment covers the hour. Saturday 09:00 at a lot whose only weekend
+      segment is 10-20 has no stated rate, and the weekday rate is not it.
+    * The tariff is unusable, which `parse_tariff` reports as None already.
+    * **The only applicable segment is holiday-scoped.** Taipei car parks price
+      `行政機關放假之紀念日與民俗日` differently from ordinary weekends. Saturday
+      and Sunday are readable from the date; a public holiday is not, and this
+      project has no holiday calendar and is not acquiring one for about ten days
+      a year. So that moment reports nothing and the UI shows the range.
+
+      Note what this does NOT refuse. A lot stating weekday, weekend AND holiday
+      rates resolves perfectly well at 14:00 on an ordinary Tuesday -- the
+      weekday segment applies and the date says it is a Tuesday. 95 of the
+      fixture's 219 varying lots price holidays, so refusing all of them would
+      cost 43% of the feature to protect about ten days a year.
+
+    A naive `when` raises. Which hour applies depends entirely on the zone, and
+    assuming Taipei would be right for this project's callers and silently wrong
+    for any future one that passed UTC.
+    """
+    if when.tzinfo is None:
+        raise ValueError("rate_at needs an aware datetime: the hour depends on the zone")
+
+    local = when.astimezone(config.TAIPEI_TZ)
+    wanted = "weekend" if local.weekday() >= 5 else "weekday"
+    applicable = [s for s in tariff.segments
+                  if s.covers(local.hour) and s.scope in (wanted, "all")]
+    if not applicable:
+        return None
+    best = max(_SCOPE_RANK[s.scope] for s in applicable)
+    return next(s.rate for s in applicable if _SCOPE_RANK[s.scope] == best)
