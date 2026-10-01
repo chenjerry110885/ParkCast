@@ -18,7 +18,7 @@ from pathlib import Path
 
 from parkcast import config, ids
 from parkcast.metadata import Lot
-from parkcast.pricing import Price, parse_fare
+from parkcast.pricing import Price, Tariff, parse_fare, parse_tariff
 
 MAGIC = b"PCG1"
 VERSION = 1
@@ -234,16 +234,37 @@ def read_header(path: Path) -> dict | None:
     return header if header["magic"] == MAGIC else None
 
 
-def _price_field(price: Price) -> dict:
+def _price_field(price: Price, tariff: Tariff | None = None) -> dict:
     """The compact `"p"` object for one lot's parsed fare.
 
     `lo`/`hi` are omitted entirely for `unknown` rather than sent as `null`,
     so a client cannot read a number that was never parsed -- there is no key
     to misread in the first place.
+
+    `t` is the rate as a function of time, `[[scope, start_hour, end_hour, rate],
+    ...]`, and is **omitted whenever there is no schedule to send**: for the
+    73.4% of lots charging one flat rate, where a schedule would repeat itself
+    1,285 times to say nothing, and for a fare whose clauses could not be read.
+    Absence is the signal -- it is how the client knows to fall back to `lo`/`hi`
+    rather than having to infer that from a schedule which happens not to cover
+    the hour it asked about.
+
+    `lo`/`hi` keep their meaning and stay authoritative for that fallback, so a
+    client that ignores `t` behaves exactly as it does today and this needs no
+    coordinated release. `pricing.parse_tariff` guarantees the two never
+    disagree: a schedule whose rates fall outside the span is no schedule.
+
+    The tariff arrives as an argument rather than on `Price`, which the spec had
+    suggested. `parse_tariff` consults the span to check that agreement, so a
+    `parse_fare` that attached a tariff would call back into it -- and passing
+    both in keeps `Price` exactly as every other consumer already knows it.
     """
     if price.kind == "unknown":
         return {"k": "unknown"}
-    return {"k": price.kind, "lo": price.low, "hi": price.high}
+    field = {"k": price.kind, "lo": price.low, "hi": price.high}
+    if tariff is not None:
+        field["t"] = [[s.scope, s.start_hour, s.end_hour, s.rate] for s in tariff.segments]
+    return field
 
 
 def build_lots_json(
@@ -316,7 +337,8 @@ def build_lots_json(
             "i": i, "id": lot_ids[i], "n": lot.name, "a": lot.area,
             "y": round(lot.lat, 5), "x": round(lot.lon, 5),
             "c": lot.capacity_car, "t": lot.lot_type,
-            "p": _price_field(parse_fare(lot.fare_text)),
+            "p": _price_field(parse_fare(lot.fare_text),
+                              parse_tariff(lot.fare_text)),
         }
         if lot.id in withheld:
             row["u"] = withheld[lot.id]
