@@ -21,7 +21,8 @@
  *     data": the car park is real, and "its numbers stopped moving a day ago"
  *     is something a driver can act on.
  */
-import type { Strings } from "./i18n";
+import { formatClock } from "./arrival";
+import { fillTemplate, type Strings } from "./i18n";
 import type { Ranked } from "./rank";
 
 /** U+2013, the range dash: `NT$20–40` reads as a span, `NT$20-40` as a subtraction. */
@@ -75,10 +76,41 @@ function amount(lo: number | null | undefined, hi: number | null | undefined): s
  * `priceKnown` is the ranker's verdict and this defers to it, so a lot the
  * ranker had to charge the median fallback to still says "price unknown" here.
  * The number that ranked a lot is never the number shown for it.
+ *
+ * Three shapes come out of here, and `k === "range"` gates the two new ones:
+ *
+ *   - **a flat fare** (`exact`, or `entry`) renders exactly as it did before
+ *     schedules existed -- `NT$60 per hour`. That is 73.4% of the roster plus
+ *     the 31 per-visit lots, and it is a guarantee rather than a side effect:
+ *     an `exact` lot has no schedule to resolve, so a time-of-day qualifier on
+ *     one would describe variation that does not exist;
+ *   - **a range the schedule resolved** becomes the single rate in force at the
+ *     arrival time, with that time named: `NT$50 per hour at 21:00`. This is the
+ *     number the sign at the entrance shows, where the midpoint never was;
+ *   - **a range the schedule could not resolve** keeps the range and says so:
+ *     `NT$10-50 per hour · rate varies`. The hour may be uncovered, the clauses
+ *     may have been unreadable, or the caller may have no clock -- all three are
+ *     the same answer to the driver, and none of them is a number.
+ *
+ * `rateAtArrival` carries the first two apart: `rank.ts` resolved it against
+ * `arrivalTs`, so this function must be handed the *same* moment the ranker
+ * was, or the clock in the label would name an hour the rate beside it does
+ * not belong to. `LotCard` takes both from one render of App's `arrivalTs`.
  */
-export function formatPrice(row: Ranked, s: Strings): string {
+export function formatPrice(row: Ranked, s: Strings, arrivalTs?: number): string {
   if (!row.priceKnown) return s.priceUnknown;
   const price = row.lot.p;
+  if (price.k === "range") {
+    if (row.rateAtArrival !== null && arrivalTs !== undefined) {
+      const exact = amount(row.rateAtArrival, row.rateAtArrival);
+      if (exact !== null) {
+        return `${exact} ${fillTemplate(s.perHourAtTemplate, { time: formatClock(arrivalTs) })}`;
+      }
+    }
+    const span = amount(price.lo, price.hi);
+    if (span === null) return s.priceUnknown;
+    return `${span} ${s.perHour} · ${s.priceVaries}`;
+  }
   const text = amount(price.lo, price.hi);
   if (text === null) return s.priceUnknown;
   return `${text} ${price.k === "entry" ? s.perEntry : s.perHour}`;

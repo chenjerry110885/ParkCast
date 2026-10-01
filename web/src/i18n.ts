@@ -38,6 +38,36 @@ export interface Strings {
    * would be a lie: their price is known, it is just not hourly.
    */
   perEntry: string;
+  /**
+   * Unit suffix for a rate read off the lot's own schedule, e.g. "per hour at
+   * 21:00" -- and in Chinese "21:00 每小時", because the clock comes first there.
+   *
+   * **The one place the arrival time is restated on a card**, and the exception
+   * is narrow on purpose. `LotCard`'s header records why the arrival tile was
+   * removed: a number the driver chose, repeated twenty times down the page,
+   * tells them nothing. This is not that. It appears only on the ~7% of lots
+   * whose rate actually depends on the hour, and it is the difference between
+   * "this car park charges NT$50" and "this car park charges NT$50 at the hour
+   * you picked" -- a money claim that is false at every other hour. Omitting it
+   * would leave a resolved rate indistinguishable from a flat one.
+   */
+  perHourAtTemplate: string;
+  /**
+   * Label suffix for a range whose rate could not be resolved for the arrival
+   * time: the range stays on screen and this says why no single number is
+   * offered. Never shown beside a resolved rate, and never on a flat fare.
+   */
+  priceVaries: string;
+  /**
+   * Sub-line note for a car park that prices public holidays as its own
+   * category -- 95 of the 219 varying lots do, and this app has no holiday
+   * calendar, so the honest move is to tell the driver to read the sign.
+   *
+   * It sits among the lot's own facts rather than in the money tile, for the
+   * same reason the not-updating note does: it is a fact about this car park,
+   * not a hedge on the number beside it.
+   */
+  priceHolidayNote: string;
   /** Shown instead of a price when the feed's free-text fare couldn't be parsed. */
   priceUnknown: string;
   /** Shown instead of a probability when the grid has no forecast for a lot. */
@@ -457,6 +487,9 @@ const en: Strings = {
   useMyLocation: "Use my location",
   perHour: "per hour",
   perEntry: "per entry",
+  perHourAtTemplate: "per hour at {time}",
+  priceVaries: "rate varies",
+  priceHolidayNote: "holiday rates differ",
   priceUnknown: "Price unknown",
   noData: "No data",
   notUpdating: "Not updating",
@@ -566,6 +599,9 @@ const zh: Strings = {
   useMyLocation: "使用目前位置",
   perHour: "每小時",
   perEntry: "每次",
+  perHourAtTemplate: "{time} 每小時",
+  priceVaries: "依時段變動",
+  priceHolidayNote: "假日費率不同",
   priceUnknown: "價格未知",
   noData: "無資料",
   notUpdating: "資料未更新",

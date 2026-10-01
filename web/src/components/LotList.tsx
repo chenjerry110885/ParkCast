@@ -40,6 +40,8 @@ export interface LotListProps {
   ageMin: number;
   /** Minutes from the reading to the chosen arrival, for each card's confidence pill. */
   horizonFromReadingMin: number;
+  /** The chosen arrival in epoch seconds, which each card's price tile is priced at. */
+  arrivalTs: number;
   /**
    * Observations behind each lot's half-hour-of-week cell (`week.ts`'s
    * `probabilityAt`), by lot id, for each card's confidence pill.
@@ -73,6 +75,7 @@ function LotListInner({
   baseDataTs,
   ageMin,
   horizonFromReadingMin,
+  arrivalTs,
   supportById,
   fromHistory,
   bestId,
@@ -139,6 +142,7 @@ function LotListInner({
           baseDataTs={baseDataTs}
           ageMin={ageMin}
           horizonFromReadingMin={horizonFromReadingMin}
+          arrivalTs={arrivalTs}
           support={supportById.get(row.id) ?? 0}
           fromHistory={fromHistory}
           best={row.id === bestId}

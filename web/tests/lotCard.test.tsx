@@ -14,7 +14,9 @@ const row = (over: Partial<Ranked> = {}, lotOver: Partial<Lot> = {}): Ranked => 
 // `support: 0` is the honest default, not a placeholder: a card the week table
 // has never been consulted for has no history behind this half-hour to cite.
 // Tests that want history say so themselves.
-const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, horizonFromReadingMin: 22, support: 0, fromHistory: false, onSelect: vi.fn(), index: 0 };
+// `arrivalTs` is the reading plus `horizonFromReadingMin`, so it is 15:10
+// Taipei -- the clock the test below checks never reaches the card.
+const props = { lang: "en" as const, baseDataTs: BASE, ageMin: 4, horizonFromReadingMin: 22, arrivalTs: BASE + 22 * 60, support: 0, fromHistory: false, onSelect: vi.fn(), index: 0 };
 
 beforeEach(() => vi.stubGlobal("matchMedia", vi.fn(() => ({ matches: true, addEventListener() {}, removeEventListener() {} }))));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -148,7 +150,13 @@ describe("LotCard", () => {
     rerender(<ol><LotCard row={row({ hourly: null, perEntry: 50 }, { p: { k: "entry", lo: 50, hi: 50 } })} {...props} best={false} selected={false} /></ol>);
     expect(screen.getByTestId("lot-price")).toHaveTextContent("NT$50");
     expect(screen.getByTestId("lot-price")).toHaveTextContent(t("en").perEntry);
-    rerender(<ol><LotCard row={row({ hourly: 30 }, { p: { k: "range", lo: 20, hi: 40 } })} {...props} best={false} selected={false} /></ol>);
+    // `rateAtArrival: null` is what a range with no readable schedule gets --
+    // 100 of the 219 varying lots -- and the range is then the display. The
+    // default `row()` resolves a rate because its fare is flat; leaving that
+    // 60 beside a 20-40 range would be a fixture `rank.ts` cannot produce,
+    // since the collector refuses to publish a schedule whose rates fall
+    // outside `lo`-`hi` (see `types.ts`).
+    rerender(<ol><LotCard row={row({ hourly: 30, rateAtArrival: null }, { p: { k: "range", lo: 20, hi: 40 } })} {...props} best={false} selected={false} /></ol>);
     expect(screen.getByTestId("lot-price")).toHaveTextContent("NT$20–40");
   });
 

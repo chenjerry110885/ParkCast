@@ -505,7 +505,10 @@ describe("price", () => {
   it("renders a range as the range, not as one of its bounds", async () => {
     await renderLocated();
     const price = within(rowFor("世貿一館站停車場")).getByTestId("lot-price");
-    expect(factText(price)).toBe(`NT$20–40 ${t("en").perHour}`);
+    // This lot's fare is a range whose clauses the parser could not read into a
+    // schedule, so no single hour resolves and the range stays on screen -- now
+    // with the note saying why one number is not offered.
+    expect(factText(price)).toBe(`NT$20–40 ${t("en").perHour} · ${t("en").priceVaries}`);
     // The ranker scores this lot at its NT$30 midpoint; the screen must not.
     expect(price.textContent).not.toContain("NT$30");
   });

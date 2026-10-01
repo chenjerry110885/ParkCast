@@ -1678,6 +1678,7 @@ export default function App() {
                   baseDataTs={artifacts.grid.baseDataTs}
                   ageMin={ageMin ?? 0}
                   horizonFromReadingMin={horizonFromReadingMin}
+                  arrivalTs={arrivalTs}
                   support={supportById.get(mapCard.id) ?? 0}
                   fromHistory={fromHistory}
                   best={mapCard.id === bestId}
@@ -1817,6 +1818,7 @@ export default function App() {
             baseDataTs={artifacts.grid.baseDataTs}
             ageMin={ageMin ?? 0}
             horizonFromReadingMin={horizonFromReadingMin}
+            arrivalTs={arrivalTs}
             supportById={supportById}
             fromHistory={fromHistory}
             bestId={bestId}
@@ -1877,6 +1879,7 @@ export default function App() {
                   baseDataTs={artifacts.grid.baseDataTs}
                   ageMin={ageMin ?? 0}
                   horizonFromReadingMin={horizonFromReadingMin}
+                  arrivalTs={arrivalTs}
                   supportById={supportById}
                   fromHistory={fromHistory}
                   bestId={bestId}
