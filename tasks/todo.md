@@ -1,6 +1,6 @@
 # ParkCast — time-aware pricing
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 The Stage B todo is archived at `docs/superpowers/plans/2026-09-21-stage-b-archive.md`, with what its measurements concluded.
 
@@ -59,7 +59,7 @@ has no marker of its own and is still a weekday rate; the fourth is a weekend on
 scoped only the clause carrying the marker would file half the corpus under `all` and resolve the
 wrong rate at every hour.
 
-- [ ] **Step 1: Write the failing tests, from real fixture strings**
+- [x] **Step 1: Write the failing tests, from real fixture strings**
 
 ```python
 WEEKDAY_AND_WEEKEND = (
@@ -139,11 +139,11 @@ def test_two_overlapping_segments_of_the_same_scope_are_a_parse_failure():
     assert pricing.parse_tariff("計時 50元/時(08-20)，30元/時(10-18)。") is None
 ```
 
-- [ ] **Step 2: Run them to verify they fail**
+- [x] **Step 2: Run them to verify they fail**
 
 Expected: FAIL, `AttributeError: parse_tariff`.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Reuse `_TIMING`, `_drop_surcharges` and `_strip_non_car` unchanged — the new parser runs on the same
 cleaned text `parse_fare` already builds, so monthly rentals, surcharges and motorcycle clauses are
@@ -153,9 +153,9 @@ Scan `_CLAUSE.split(...)` left to right, carrying the current scope. Recognise a
 (`週一至週五`/`平日` → `weekday`; `週六`/`週日`/`假日`/`例假` → `weekend`; the holiday phrases add
 `holiday` to whichever scope the clause already carries) and then both rate/window orders.
 
-- [ ] **Step 4: Run them to verify they pass**
+- [x] **Step 4: Run them to verify they pass**
 
-- [ ] **Step 5: Measure coverage against the whole fixture, and write the number down**
+- [x] **Step 5: Measure coverage against the whole fixture, and write the number down**
 
 A script in the scratchpad over `tests/fixtures/desc_sample.json`: how many of the 219 `range` lots now
 yield a tariff, how many yield none, and — the number that matters — **how many yield a tariff whose
@@ -163,7 +163,7 @@ segments disagree with the published `lo`/`hi`**. That last is the error class: 
 confidently to a rate outside the span the old parser read is a parser bug, not a win. Put all three in
 the commit message.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ---
 
@@ -177,7 +177,7 @@ the commit message.
 - Consumes: `Tariff` from Task 1
 - Produces: `rate_at(tariff, when: datetime) -> int | None`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 TARIFF = pricing.Tariff((
@@ -248,9 +248,9 @@ def test_whether_a_tariff_prices_holidays_is_reportable():
     assert pricing.prices_holidays(TARIFF) is False
 ```
 
-- [ ] **Steps 2–4: Run, implement, run**
+- [x] **Steps 2–4: Run, implement, run**
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ---
 
@@ -260,7 +260,7 @@ def test_whether_a_tariff_prices_holidays_is_reportable():
 - Modify: `src/parkcast/artifacts.py` (`_price_field`)
 - Test: `tests/test_artifacts.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_a_varying_fare_publishes_its_schedule():
@@ -282,15 +282,15 @@ def test_an_unparsed_schedule_publishes_no_key_so_the_client_can_tell():
     assert "t" not in artifacts._price_field(pricing.parse_fare("詳見現場公告"))
 ```
 
-- [ ] **Steps 2–4: Run, implement, run**
+- [x] **Steps 2–4: Run, implement, run**
 
-- [ ] **Step 5: Measure the artifact**
+- [x] **Step 5: Measure the artifact**
 
 Build `lots.json` from the committed fixture before and after, and report both sizes plus the gzipped
 delta in the commit message. The spec's gate: **under 20 KB added, and if it exceeds 50 KB the encoding
 gets packed rather than the feature shipping fat.**
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ---
 
@@ -308,7 +308,7 @@ The display and the score answer different questions. The display says what it c
 score says what the *stay* costs — and `EXPECTED_HOURS` is 2, so a stay from 21:00 crosses a 22:00
 boundary. Charging two hours at the arrival rate would be as wrong as the midpoint, just differently.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 const SCHEDULE: Price = { k: "range", lo: 10, hi: 50,
@@ -344,16 +344,16 @@ it("leaves a single-rate lot exactly as it was", () => {
 });
 ```
 
-- [ ] **Steps 2–4: Run, implement, run**
+- [x] **Steps 2–4: Run, implement, run**
 
-- [ ] **Step 5: Measure the ranking shift**
+- [x] **Step 5: Measure the ranking shift**
 
 `python scripts/probe-ranker.py` before and after, and report the inversion count against the shipped
 baseline in the commit message. Per `docs/superpowers/specs/2026-09-18-ranking-preferences-design.md`
 §5, that count is **a photograph, not a constant** — report what it was on the day and do not tune
 toward a number.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ---
 
@@ -363,7 +363,7 @@ toward a number.
 - Modify: `web/src/components/LotCard.tsx`, `web/src/i18n.ts`
 - Test: `web/tests/` alongside the existing card tests
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 - the price tile shows the rate for the arrival time on screen, and changes when the scrubber moves
 - an unresolvable time keeps the range, with a note that the rate varies
@@ -371,22 +371,22 @@ toward a number.
   the sign rather than trust the ordinary rate
 - an `exact` lot renders byte-identically to today — 73.4% of the roster must not move
 
-- [ ] **Steps 2–4: Run, implement, run**
+- [x] **Steps 2–4: Run, implement, run**
 
-- [ ] **Step 5: Verify in the browser**
+- [x] **Step 5: Verify in the browser**
 
 Preview, scrub the arrival time across a boundary on a known varying lot, and screenshot both sides.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ---
 
 ### Task 6: Release
 
-- [ ] **Step 1: Full suites** — Python, web, worker, scripts.
-- [ ] **Step 2:** `npm run deploy:check --prefix worker -- --with-python` from the repository root.
+- [x] **Step 1: Full suites** — Python **783 passed / 3 skipped**, web **578**, worker **121**, scripts **71**.
+- [x] **Step 2:** `npm run deploy:check --prefix worker -- --with-python` — passed, bundle check 711 files, build stamped.
 - [ ] **Step 3:** The user runs the release phase from a fresh PowerShell. The build stamp refuses a stale bundle, so a check that aborted cannot ship.
-- [ ] **Step 4: Record it** in `docs/state-of-play.md`: the coverage number from Task 1 step 5, the artifact delta from Task 3, and the inversion count from Task 4.
+- [x] **Step 4: Record it** in `docs/state-of-play.md` — “Time-aware pricing”: coverage (119/219, 0 out-of-span), artifact delta (+1.98% raw, +2.78% gzipped) and the fee shift by hour.
 
 ---
 
@@ -396,4 +396,8 @@ Preview, scrub the arrival time across a boundary on a known varying lot, and sc
 - **Exhibition and event pricing** (`展覽期間`): no date resolves it.
 - **Daily caps and free grace periods** (`15分鐘內離場免收費`): real, on the signs, and a separate feature.
 - **The other five cities' fare prose**, unsurveyed. Their behaviour is unchanged until measured.
-- **The forecaster hybrid** — blend short, model long. Waiting on the replication of the 120-minute finding; see the Stage B archive.
+- **The forecaster hybrid** — blend short, model long. **Closed as measured-and-declined, 2026-10-01.** The
+  replication on a wider window (200 origins, ~830k predictions) cut the 120-minute win from +5.7%
+  (+6.8% hard) to **+1.1% (+2.1%)**, and the model's calibration edge in the mid bands became a tie
+  while it stayed 3× worse at the bottom. Not worth a second forecaster in the hot path. See
+  `docs/state-of-play.md`, “The 120-minute finding did not replicate”.

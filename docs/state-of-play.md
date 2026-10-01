@@ -124,6 +124,104 @@ collector was not touched.
 
 ---
 
+## Time-aware pricing — built 2026-10-01 on `main`, deploy check passed, **not yet released**
+
+The price shown and the price charged are now both read off the car park's own published schedule
+for the arrival time on the picker, instead of the midpoint of its range. Spec:
+[`docs/superpowers/specs/2026-10-01-time-aware-pricing-design.md`](superpowers/specs/2026-10-01-time-aware-pricing-design.md);
+plan: `tasks/todo.md`.
+
+### Coverage, measured on the committed 1,751-lot fixture
+
+| | lots | share |
+|---|---|---|
+| one flat rate (`exact`) — untouched by all of this | 1,285 | 73.4% |
+| per entry (`entry`) — untouched; a visit has no hourly rate | 31 | 1.8% |
+| a range, resolved to a schedule | **119** | 54.3% of the 219 ranges |
+| a range, keeping its range | 100 | 45.7% of the 219 ranges |
+| a schedule whose rates fall outside the span `parse_fare` read | **0** | — |
+
+That last row is the one that matters, and it was **1** before a guard was added: a lot writing
+`每日(22-08)10元` beside two `元/時` rates. The rule is now that a tariff must agree with the published
+span or there is no tariff — **precision over coverage**, because a driver shown NT$10 and charged
+NT$60 has been misled, where a range would merely have been vague.
+
+**95 of the 219 (43%) price public holidays as their own category**, so a holiday is not a corner
+case to ignore. There is no holiday calendar here and inventing one would be wrong about ten days a
+year in the expensive direction, so a holiday scope never resolves, and a lot that prices holidays at
+all carries a note on its card telling the driver to read the sign.
+
+### What it cost on the wire
+
+`lots.json` 318,725 → 325,043 bytes raw (**+1.98%**), 52,738 → 54,204 gzipped (**+2.78%**). The spec
+gated this at 20 KB added with packing required above 50 KB; +6.3 KB is comfortably inside, so the
+encoding stays readable. `t` is omitted whenever there is no schedule, which is both the saving and
+the protocol: **absence is how a client knows to fall back to `lo`/`hi`**, rather than inferring it
+from a schedule that happens not to cover the hour it asked about. `lo`/`hi` keep their meaning, so a
+client that ignores `t` behaves exactly as today and no coordinated release is needed.
+
+### How much the fee actually moved
+
+The ranker charged the midpoint before; it now integrates the rate across the stay. Measured on the
+same fixture, by Taipei wall-clock hour — around 110 of the 119 scheduled lots move at any given hour:
+
+| | lots whose fee moves | mean shift | worst |
+|---|---|---|---|
+| Tuesday 03:00 | 110 | **−44.2%** | −71.4% |
+| Tuesday 09:00 | 104 | **+32.2%** | +71.4% |
+| Tuesday 14:00 | 107 | **+34.4%** | +71.4% |
+| Tuesday 21:00 | 79 | −15.7% | −71.4% |
+| Saturday 14:00 | 111 | **+43.3%** | +71.4% |
+
+**The midpoint was not merely imprecise.** It was wrong by a third to a half on average, in both
+directions depending on the hour, for one lot in eight.
+
+### Two decisions that are easy to undo by accident
+
+**The display and the score answer different questions and are deliberately kept apart.**
+`rateAtArrival` is what the sign at the entrance says. The fee is what the *stay* costs, and
+`EXPECTED_HOURS` is 2, so an arrival at 21:00 crosses a 22:00 boundary: on a 50-by-day/10-by-night lot
+the rate is 50 and the two-hour fee is 60. A test pins exactly that pair so nobody can collapse one
+into the other.
+
+**`priceKnown` was NOT repurposed**, though the spec and the plan both said to set it false when the
+fee falls back to the midpoint. Doing that would turn the ~100 lots whose schedule cannot be read from
+"shows a range" into "price unknown" — less information, not more honesty. It still means "there is a
+usable number to show". The spec was wrong on this point and the commit says so.
+
+### The clock on the card, which is an exception to an existing rule
+
+`LotCard`'s header records that the arrival time was removed from the card after the owner's colleague
+pointed out that a number the driver just chose, repeated twenty times down the page, tells them
+nothing. It is back in exactly one place: the price label of a lot whose rate depends on the hour
+(`NT$40 per hour at 21:00`). Without it a resolved NT$40 is indistinguishable from a flat NT$40, so it
+reads as what the car park charges rather than what it charges at the chosen hour — a money claim
+false at every other hour. It appears on ~7% of the roster, never on the 73.4% that cannot vary.
+
+### Verified in the browser, not only in tests
+
+103 lots of the dev artifact, re-derived through the real parser, on both sides of a 22:00 boundary at
+花博公園圓山地下停車場: **NT$40 at 21:00, NT$20 at 23:00**, with a flat lot directly below it unmoved at
+NT$20 per hour at both times. The holiday note and both unresolved shapes checked on real lots, in
+English and Chinese, no console errors.
+
+### Suites and the check
+
+Python **783 passed / 3 skipped**; web **578 passed**; worker **121 passed**; scripts **71 passed**.
+`npm run deploy:check --prefix worker -- --with-python` passed, bundle check 711 files, build stamped.
+
+**Not released.** The release phase needs the user, from a fresh PowerShell — see `docs/deploy.md`.
+
+### One thing the check surfaced that is not this work
+
+`npm audit` in `worker/` reports **3 advisories (1 high, 2 moderate)**, all in `undici`, reached only
+through `miniflare` → `wrangler`. Those are **dev dependencies**: the deploy CLI and the local test
+runtime. Nothing in them ships to the Worker or to a user's browser, so this is not a hole in the
+deployed site. It is still worth closing, because one of them (GHSA-w293-vg96-wgc3) is a TLS
+certificate-validation bypass and this project has a standing rule against ever weakening TLS. The fix
+is `wrangler@4.145.0`, which `npm audit fix --force` says is outside the stated range — a dependency
+bump with its own test run, and the user's call, not something to slip into a release.
+
 ## The evaluations — read this before touching the model
 
 `python scripts/evaluate-forecast.py` (withholding frozen lots by default; `--include-not-updating`
@@ -143,6 +241,41 @@ Blend's Brier skill over persistence:
 
 The 09-14 run: 231,536 predictions per forecaster, 26,335 labels withheld, base rate 0.899;
 citywide Brier persistence 0.0557, climatology 0.0680, blend 0.0462.
+
+### The 120-minute finding did not replicate — 2026-10-01
+
+Same command on a wider window: `--test-fraction 0.20 --origins 200`, roughly **830,000 predictions
+per forecaster** against the 460,604 of the 09-30 run. `trained vs blend`, hard subset in brackets:
+
+| | 15 min | 30 min | 60 min | 120 min |
+|---|---|---|---|---|
+| 09-30, 96 origins | −3.4% (−8.4%) | −22.1% (−27.5%) | −3.5% (−3.7%) | **+5.7% (+6.8%)** |
+| 10-01, 200 origins | −4.8% (−9.7%) | −20.0% (−25.4%) | −5.6% (−5.7%) | **+1.1% (+2.1%)** |
+
+**The win survives in sign and collapses in size** — a fifth to a third of what the narrower window
+showed, while every losing horizon stayed put. That is what a real-but-tiny effect looks like once
+the noise around it shrinks, and it is the outcome the 09-30 entry said to watch for when it called
+the zigzag (−23, −3, −22, −3, +6) a smell. The hard subset's 5-minute horizon is −26.9% here.
+
+(The run's citywide 5-minute row was cut off by a `tail -45` on the launching command and is not
+quoted; every other cell above is read from the output.)
+
+**So the horizon-dependent hybrid is not worth building.** The case for it was a 6–7% win at two
+hours; the measurement is 1–2%. Against that: a second forecaster in the Worker's hot path, a
+horizon-dependent switch that has to be right in two implementations, and a model file to ship and
+keep fresh — for a gain smaller than the week-to-week movement in these tables. The deferred item in
+`tasks/todo.md` is closed as measured-and-declined, not as untried.
+
+**The calibration argument went with it.** On 09-30 the model was clearly better where the ranker
+reads it — weighted |gap| across 0.2–0.9 of 0.0457 against blend's 0.0657. On this window that is
+**0.0457 against 0.0476**: a tie. What did *not* change is the bottom: over 0.0–0.2 the model is
+**0.122 against blend's 0.038**, saying 2.4% where 13.4% happened and 15.8% where 29.8% did. A
+driver told to skip a lot that is free one time in seven is the failure mode this project cares
+about most, and the model is three times worse at it than what ships.
+
+**Blend stays.** The nightly refit and the adoption gate stay too — they cost nothing, they are the
+only thing that would notice if this ever changed, and `decisions.jsonl` is now the longest-running
+honest record in the project.
 
 ### Stage B measured where it was supposed to win — 2026-09-30
 
