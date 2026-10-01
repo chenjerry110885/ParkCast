@@ -10,12 +10,37 @@
 /** Parsed form of a lot's free-text Chinese fare. */
 export type PriceKind = "exact" | "range" | "entry" | "unknown";
 
+/**
+ * One row of a lot's fare schedule: `[scope, startHour, endHour, rate]`.
+ *
+ * Read **positionally**, so a reorder would resolve every rate against the
+ * wrong hours and still look entirely plausible. `src/parkcast/artifacts.py`
+ * writes it and a test there pins the order.
+ *
+ * `endHour <= startHour` means the segment wraps midnight, which is the normal
+ * case rather than an edge one: `22-08` is how the corpus writes an overnight
+ * rate, and a reader assuming `start < end` would drop every one of them.
+ */
+export type FareScope = "all" | "weekday" | "weekend" | "holiday";
+export type FareSegment = [FareScope, number, number, number];
+
 export interface Price {
   /** `entry` prices are per entry, not per hour; `unknown` carries no numbers. */
   k: PriceKind;
   /** NT$/hour, or NT$/entry when `k === "entry"`. Absent when `k === "unknown"`. */
   lo?: number | null;
   hi?: number | null;
+  /**
+   * The rate as a function of time, **absent whenever there is no schedule**:
+   * for the 73.4% of lots charging one flat rate, and for a fare whose clauses
+   * could not be read.
+   *
+   * Absence is the signal to fall back to `lo`/`hi`, rather than something to
+   * infer from a schedule that happens not to cover the hour asked about. The
+   * collector guarantees the two never disagree: a schedule whose rates fall
+   * outside `lo`-`hi` is not published at all.
+   */
+  t?: FareSegment[];
 }
 
 /** One row of `lots.json`, index-aligned with row `i` of the grid. */

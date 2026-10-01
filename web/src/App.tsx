@@ -1030,6 +1030,10 @@ export default function App() {
     return rankLots({
       destination,
       horizonMin: horizonFromReadingMin,
+      // The wall clock, for pricing, which `horizonMin` cannot stand in for: that
+      // is measured from the reading and drifts from the clock by however stale
+      // it is. A fare depends on the actual hour in Taipei. See `RankInput`.
+      arrivalTs,
       lots: rows,
       // `rows[i]`, resolved through `Lot.i` inside: `rankLots` reports the array
       // position it scored, and the grid row is the lot's own business.
