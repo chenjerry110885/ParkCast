@@ -51,12 +51,27 @@ three. What the 219 carry, counted rather than estimated:
 | a rate with an explicit hour window — resolvable by hour | 143 | 65.3% |
 | a weekday / weekend marker | 137 | 62.6% |
 | both | 64 | 29.2% |
-| **a public-holiday category** | **95** | **43.4%** |
+| **a public-holiday category** | **87** | **39.7%** |
 | neither marker — must stay a range | 3 | 1.4% |
 
 ### The holiday share is large enough to shape the design
 
-**95 of the 219 price public holidays as their own category.** That is not a corner: it is 43% of the
+> **Corrected 2026-10-02.** This row read 95 (43.4%) until the shipped behaviour was measured.
+> That count matched `假日` and `例假日`, which are this corpus's ordinary words for *weekend*, not for
+> a national holiday. Counting only the public-holiday phrasings gives 87.
+>
+> **A second correction matters more, because it was a defect rather than a miscount.** §6 says a lot
+> that prices holidays carries a note. The first implementation derived that from the published
+> segments — and `_scope_of` deliberately folds a holiday marker into the weekend scope it is written
+> inside, which is nearly always, since the feed writes
+> `週六、週日、行政機關放假之紀念日與民俗日60元/時` as one clause. The segments keep the right rate and
+> lose the holiday. The note therefore fired on **1** of the 119 resolved tariffs where the prose names
+> one in **36** — and the other 35 showed a confident *weekday* rate on a midweek public holiday, which
+> is the exact harm §7 forbids. Fixed by carrying `Tariff.holidays` from the prose and publishing it as
+> `h: 1`, independent of the scope fold.
+
+
+**87 of the 219 price public holidays as their own category.** That is not a corner: it is 40% of the
 lots this spec touches, so how §3 treats them decides how much of the benefit survives.
 
 The resolution is the one taken on 2026-10-01, and it is narrower than "these lots cannot be
@@ -69,7 +84,7 @@ So: resolve by weekday and weekend from the date, and where the lot has a holida
 moment whose applicable segment is holiday-scoped and nothing else reports no rate.
 
 The strict alternative — refusing to resolve any day for a lot that mentions holidays, because any day
-might be one — would be defensible and would throw away 43% of the feature for about ten days a year.
+might be one — would be defensible and would throw away 40% of the feature for about ten days a year.
 Not taken, and recorded here so the choice is visible rather than implicit.
 
 ## 2. The tariff model
@@ -107,7 +122,7 @@ def rate_at(tariff: Tariff, when: datetime) -> int | None
 
 `None` where no segment covers the moment, and — the decision taken 2026-10-01 — **`None` when the
 only segment that could apply is holiday-scoped.** Not for every lot that mentions a holiday: see §1,
-where 95 of the 219 do, and where refusing all of them would cost 43% of the feature to protect about
+where 87 of the 219 do, and where refusing all of them would cost 40% of the feature to protect about
 ten days a year.
 
 Taipei car parks price `行政機關放假之紀念日與民俗日` differently from ordinary weekends. Saturday and

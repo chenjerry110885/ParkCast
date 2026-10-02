@@ -385,7 +385,21 @@ Preview, scrub the arrival time across a boundary on a known varying lot, and sc
 
 - [x] **Step 1: Full suites** — Python **783 passed / 3 skipped**, web **578**, worker **121**, scripts **71**.
 - [x] **Step 2:** `npm run deploy:check --prefix worker -- --with-python` — passed, bundle check 711 files, build stamped.
-- [ ] **Step 3:** The user runs the release phase from a fresh PowerShell. The build stamp refuses a stale bundle, so a check that aborted cannot ship.
+- [x] **Step 3:** The user runs the release phase from a fresh PowerShell. The build stamp refuses a stale bundle, so a check that aborted cannot ship. **Done 2026-10-02.**
+- [ ] **Step 3b: Rebuild and recreate the collector.** *Missing from this plan as written, and it cost a
+  false negative: the web release shipped the schedule READER while the collector kept running an image
+  built 2026-09-23, so it published no `t` at all and every range lot correctly fell back to its range.*
+  This feature spans both deploy paths — `pricing.py`/`artifacts.py` are the collector's, `rank.ts`/
+  `LotCard.tsx` are the web's — and shipping one half changes nothing on screen. Per `docs/deploy.md` §6,
+  recreate just after a tick (minute ≡ 1 mod 5, second ≈ 40) so no slot is lost:
+
+  ```
+  docker compose -f docker/docker-compose.yml up -d --build --force-recreate
+  ```
+
+  Then confirm the next two ticks log `published N lots ...` and `uploaded: status=204 ...`, and that
+  `/artifacts/lots.json` carries `t` keys. `lots.json` is `max-age=900`, so a browser may hold the old
+  copy for up to 15 minutes; the service worker is network-first for it, so a hard refresh is enough.
 - [x] **Step 4: Record it** in `docs/state-of-play.md` — “Time-aware pricing”: coverage (119/219, 0 out-of-span), artifact delta (+1.98% raw, +2.78% gzipped) and the fee shift by hour.
 
 ---

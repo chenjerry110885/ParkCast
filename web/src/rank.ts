@@ -286,7 +286,7 @@ export interface Ranked {
   /**
    * Whether this lot prices public holidays as their own category, so the card
    * can tell a driver on one to check the sign rather than trust the ordinary
-   * rate. 95 of the 219 varying lots do, and no calendar here can detect the day.
+   * rate. 87 of the 219 varying lots do, and no calendar here can detect the day.
    */
   pricesHolidays: boolean;
   /** Straight-line metres from the destination. */
@@ -388,7 +388,12 @@ interface Money {
   /**
    * Whether this lot prices public holidays as their own category, so the card
    * can tell a driver on one to check the sign rather than trust the ordinary
-   * rate shown. 95 of the 219 varying lots do.
+   * rate shown.
+   *
+   * Read from `Price.h`, which the collector sets from the fare PROSE. It is
+   * not the same question as "does `t` contain a holiday segment": the feed
+   * writes holidays inside the weekend clause and the scope fold erases them,
+   * so that scan finds 1 of the 119 resolved tariffs where the prose names 36.
    */
   pricesHolidays: boolean;
 }
@@ -445,7 +450,7 @@ function covers(segment: FareSegment, hour: number): boolean {
  *   public holidays differently from ordinary weekends. Saturday and Sunday are
  *   readable from the date; a public holiday is not, and this app has no holiday
  *   calendar. A lot that *also* states weekday or weekend rates still resolves
- *   an ordinary Tuesday -- 95 of the 219 varying lots price holidays, so
+ *   an ordinary Tuesday -- 87 of the 219 varying lots price holidays, so
  *   refusing all of them would cost most of the feature to protect ten days a
  *   year. Mirrors `pricing.rate_at`.
  */
@@ -553,7 +558,13 @@ function priceOf(price: Price | undefined, arrivalTs?: number): Money {
     priceKnown: true,
     fee: stay ?? mid * EXPECTED_HOURS,
     rateAtArrival: arrivalTs === undefined ? null : rateAt(price.t ?? [], arrivalTs),
-    pricesHolidays: (price.t ?? []).some((s) => s[0] === "holiday"),
+    // The wire flag first, and it is not a shortcut for scanning `t`: the
+    // collector folds a holiday marker into the `weekend` scope it is written
+    // inside, so the segments lose it. Scanning alone found 1 lot of 119 where
+    // the prose names 36 -- the other 35 resolved a confident weekday rate on
+    // Double Tenth Day and said nothing. The segment scan stays as the second
+    // arm, for a schedule that really does carry a holiday-only segment.
+    pricesHolidays: price.h === 1 || (price.t ?? []).some((s) => s[0] === "holiday"),
   };
 }
 

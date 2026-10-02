@@ -102,7 +102,7 @@ describe("the price tile at a chosen time", () => {
   });
 
   it("carries the holiday note as a fact about the car park, resolved or not", () => {
-    // 95 of the 219 varying lots price public holidays as their own category
+    // 87 of the 219 varying lots price public holidays as their own category
     // and this app has no holiday calendar, so a driver on Double Tenth Day is
     // told to check the sign -- including when the ordinary rate resolved
     // perfectly well, which is the case the note exists for.

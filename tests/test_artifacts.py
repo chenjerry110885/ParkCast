@@ -515,6 +515,32 @@ def test_a_scoped_schedule_carries_the_scope_the_client_needs():
     assert ["weekend", 10, 20, 60] in field["t"]
 
 
+def test_a_holiday_folded_into_the_weekend_scope_still_publishes_its_flag():
+    """`h` exists because this cannot be derived from `t`.
+
+    The clause above names a public holiday, and `_scope_of` folds that marker
+    into the `weekend` scope it is written inside -- correctly, because the rate
+    does apply to Saturdays. The segments then carry no trace of the holiday, so
+    a client scanning them would show a confident weekday rate on Double Tenth
+    Day. 36 of the fixture's 119 tariffs are this shape; exactly 1 is not.
+    """
+    field = _published(
+        "計時 週一至週五50元/時(08-20)，10元/時(20-08)，"
+        "週六、週日、行政機關放假之紀念日與民俗日60元/時(10-20)，10元/時(20-10)。")
+
+    assert not any(seg[0] == "holiday" for seg in field["t"]), "the fold still happens"
+    assert field["h"] == 1
+
+
+def test_a_weekend_rate_alone_publishes_no_holiday_flag():
+    """`假日` is this corpus's ordinary word for "weekend". Flagging it would put
+    the note on lots with nothing to warn about, which is how a note stops being
+    read at all."""
+    field = _published("計時 平日40元/時(08-22)，假日60元/時(08-22)，20元/時(22-08)。")
+
+    assert "h" not in field
+
+
 def test_a_single_rate_publishes_no_schedule():
     """73.4% of the roster. A schedule saying one thing would be noise in every
     artifact, repeated 1,285 times."""

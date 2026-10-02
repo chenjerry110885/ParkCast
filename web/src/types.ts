@@ -41,6 +41,24 @@ export interface Price {
    * outside `lo`-`hi` is not published at all.
    */
   t?: FareSegment[];
+  /**
+   * `1` when the lot prices **public holidays** as a category of their own.
+   * Absent otherwise — never `0`.
+   *
+   * **Not derivable from `t`, which is the whole reason it is on the wire.**
+   * The feed writes holidays inside the weekend clause (`週六、週日、行政機關
+   * 放假之紀念日與民俗日60元/時`), and the collector folds that marker into the
+   * `weekend` scope — correctly, because the rate really does apply to
+   * Saturdays, which a date can settle. The segments then carry no trace of the
+   * holiday. Scanning them finds 1 lot where the prose names 36.
+   *
+   * What it means on screen: the rate shown is the ORDINARY one for that
+   * weekday or weekend. This app has no holiday calendar and cannot tell
+   * whether today is Double Tenth Day, so the lot says so and the driver reads
+   * the sign. Without it the card shows the weekday rate on a holiday —
+   * confidently, and under what is charged.
+   */
+  h?: 1;
 }
 
 /** One row of `lots.json`, index-aligned with row `i` of the grid. */

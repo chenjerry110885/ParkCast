@@ -18,7 +18,7 @@ from pathlib import Path
 
 from parkcast import config, ids
 from parkcast.metadata import Lot
-from parkcast.pricing import Price, Tariff, parse_fare, parse_tariff
+from parkcast.pricing import Price, Tariff, parse_fare, parse_tariff, prices_holidays
 
 MAGIC = b"PCG1"
 VERSION = 1
@@ -254,6 +254,14 @@ def _price_field(price: Price, tariff: Tariff | None = None) -> dict:
     coordinated release. `pricing.parse_tariff` guarantees the two never
     disagree: a schedule whose rates fall outside the span is no schedule.
 
+    `h: 1` says the lot prices **public holidays** as something of their own, and
+    it is a separate key rather than something the client derives from `t`
+    precisely because it cannot be derived from `t`: the corpus writes holidays
+    inside the weekend clause, `_scope_of` folds the marker into `weekend`, and
+    the segments then carry no trace of it. Scanning them found 1 of the
+    fixture's 119 tariffs where the prose names a holiday in 36. Omitted when
+    false, like `t`, so it costs nothing on the 1,285 flat lots.
+
     The tariff arrives as an argument rather than on `Price`, which the spec had
     suggested. `parse_tariff` consults the span to check that agreement, so a
     `parse_fare` that attached a tariff would call back into it -- and passing
@@ -264,6 +272,8 @@ def _price_field(price: Price, tariff: Tariff | None = None) -> dict:
     field = {"k": price.kind, "lo": price.low, "hi": price.high}
     if tariff is not None:
         field["t"] = [[s.scope, s.start_hour, s.end_hour, s.rate] for s in tariff.segments]
+        if prices_holidays(tariff):
+            field["h"] = 1
     return field
 
 
