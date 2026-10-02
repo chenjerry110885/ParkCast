@@ -75,8 +75,8 @@ describe("rateAt", () => {
   });
 
   it("still resolves an ordinary Tuesday at a lot that also prices holidays", () => {
-    // 95 of the 219 varying lots price holidays as their own category. Refusing
-    // all of them would cost 43% of the feature to protect ten days a year.
+    // 87 of the 219 varying lots price holidays as their own category. Refusing
+    // all of them would cost 40% of the feature to protect ten days a year.
     const both: Price["t"] = [["weekday", 8, 20, 50], ["holiday", 8, 20, 80]];
     expect(rateAt(both!, on(TUESDAY, 14))).toBe(50);
   });
@@ -173,6 +173,40 @@ describe("the ranking responds to the arrival time", () => {
     }).map((r) => r.lot.id);
 
     expect(flats).toEqual(["a", "b"]);   // 73.4% of the roster, unmoved
+  });
+
+  it("reports a holiday lot whose marker the scope fold erased", () => {
+    // **The case the `h` flag exists for, and the one a segment scan misses.**
+    // The feed writes holidays inside the weekend clause, so the collector folds
+    // the marker into `weekend` -- correctly, the rate does apply to Saturdays.
+    // The segments then say nothing about holidays, which described 35 of the 36
+    // lots that name one: each resolved a confident weekday rate on Double Tenth
+    // Day with no warning at all.
+    const folded: Price = {
+      k: "range", lo: 10, hi: 60, h: 1,
+      t: [["weekday", 8, 20, 50], ["weekend", 8, 20, 60], ["all", 20, 8, 10]],
+    };
+    const ranked = rankLots({
+      destination, horizonMin: 15, arrivalTs: on(TUESDAY, 14),
+      lots: [lot("folded", 25.0502, folded)],
+      probability: () => 0.9,
+    });
+
+    expect(folded.t!.some((s) => s[0] === "holiday")).toBe(false);   // the fold stands
+    expect(ranked[0]!.pricesHolidays).toBe(true);
+    expect(ranked[0]!.rateAtArrival).toBe(50);   // still resolves the ordinary Tuesday
+  });
+
+  it("claims nothing about holidays for a lot the collector did not flag", () => {
+    // `假日` is the corpus's ordinary word for "weekend". A note on every lot
+    // that merely prices weekends is a note nobody reads.
+    const ranked = rankLots({
+      destination, horizonMin: 15, arrivalTs: on(TUESDAY, 14),
+      lots: [lot("plain", 25.0502, cheapAtNight)],
+      probability: () => 0.9,
+    });
+
+    expect(ranked[0]!.pricesHolidays).toBe(false);
   });
 
   it("reports the arrival rate separately from the fee", () => {

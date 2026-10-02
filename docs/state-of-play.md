@@ -146,10 +146,24 @@ That last row is the one that matters, and it was **1** before a guard was added
 span or there is no tariff — **precision over coverage**, because a driver shown NT$10 and charged
 NT$60 has been misled, where a range would merely have been vague.
 
-**95 of the 219 (43%) price public holidays as their own category**, so a holiday is not a corner
+**87 of the 219 (40%) price public holidays as their own category**, so a holiday is not a corner
 case to ignore. There is no holiday calendar here and inventing one would be wrong about ten days a
-year in the expensive direction, so a holiday scope never resolves, and a lot that prices holidays at
-all carries a note on its card telling the driver to read the sign.
+year in the expensive direction, so a holiday scope never resolves, and a lot that prices holidays
+carries a note on its card telling the driver to read the sign. **36 of the 119 resolved tariffs
+carry that note.**
+
+> **That note was broken when first shipped, and the bug is worth remembering because the code was
+> not wrong — the two halves were each right and the seam between them lost the fact.** The note was
+> derived by scanning the published segments for a `holiday` scope. But `_scope_of` folds a holiday
+> marker into the weekend scope it is written inside, which is how this feed writes it almost every
+> time (`週六、週日、行政機關放假之紀念日與民俗日60元/時` is one clause). The fold is correct about the
+> rate and it erases the holiday. So the scan found **1** lot where the prose names **36**, and the
+> other 35 resolved a confident *weekday* rate on a midweek public holiday — NT$50 where the sign
+> says NT$60, with no warning. Strictly worse than the range it replaced, which was vague but never
+> wrong. Caught on 2026-10-02 before the collector shipped it, by measuring how often the note
+> actually fires instead of trusting that it would. Fixed with `Tariff.holidays`, read from the prose
+> and published as `h: 1`, so the display no longer depends on surviving a parser decision made for
+> an unrelated reason.
 
 ### What it cost on the wire
 

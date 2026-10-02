@@ -168,8 +168,8 @@ def test_a_holiday_only_segment_is_never_resolved():
 
 
 def test_a_lot_that_also_prices_holidays_still_resolves_an_ordinary_tuesday():
-    """95 of the 219 price holidays as their own category. Refusing all of them
-    would cost 43% of the feature to protect about ten days a year; what is
+    """87 of the 219 price holidays as their own category. Refusing all of them
+    would cost 40% of the feature to protect about ten days a year; what is
     refused is only the moment whose SOLE applicable segment is holiday-scoped.
     """
     tariff = pricing.Tariff((pricing.Segment("weekday", 8, 20, 50),
@@ -184,6 +184,42 @@ def test_whether_a_tariff_prices_holidays_is_reportable():
     assert pricing.prices_holidays(
         pricing.Tariff((pricing.Segment("holiday", 8, 20, 80),))) is True
     assert pricing.prices_holidays(TARIFF) is False
+
+
+def test_a_holiday_folded_into_the_weekend_scope_is_still_reported():
+    """**The bug this flag exists for.** The corpus writes holidays inside the
+    weekend clause -- `週六、週日、行政機關放假之紀念日與民俗日60元/時` -- and
+    `_scope_of` deliberately folds that marker into `weekend`, because the rate
+    genuinely applies to Saturdays and a date can settle those.
+
+    That fold erased the only evidence the display had. Reading holidays off the
+    SEGMENTS reported 1 lot of the fixture's 119 tariffs; reading the prose
+    reports 36. The other 35 resolved a rate and said nothing, so a midweek
+    public holiday rendered the WEEKDAY rate -- 50 where the sign says 60 --
+    confidently and with no warning. A range would merely have been vague.
+    """
+    payex = ("計時：小型車週一至週五50元/時(10-22)，10元/時(22-10)，"
+             "週六、週日、行政機關放假之紀念日與民俗日60元/時(10-22)，10元/時(22-10)。")
+    tariff = pricing.parse_tariff(payex)
+
+    assert tariff is not None
+    # The fold still happened -- this test does not undo it, it survives it.
+    assert not any(s.scope == "holiday" for s in tariff.segments)
+    assert tariff.holidays is True
+    assert pricing.prices_holidays(tariff) is True
+
+
+def test_an_ordinary_weekend_rate_is_not_a_holiday_claim():
+    """`假日` and `例假日` are how this corpus writes "weekend", and a lot that
+    only ever says that is making no claim about national holidays. Flagging it
+    would put a warning on lots that have nothing to warn about, which is how a
+    warning stops being read at all."""
+    tariff = pricing.parse_tariff(
+        "計時：小型車平日50元/時(10-22)，10元/時(22-10)，假日60元/時(10-22)，10元/時(22-10)。")
+
+    assert tariff is not None
+    assert tariff.holidays is False
+    assert pricing.prices_holidays(tariff) is False
 
 
 def test_a_naive_datetime_is_refused_rather_than_guessed():

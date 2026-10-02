@@ -60,7 +60,7 @@ export interface Strings {
   priceVaries: string;
   /**
    * Sub-line note for a car park that prices public holidays as its own
-   * category -- 95 of the 219 varying lots do, and this app has no holiday
+   * category -- 87 of the 219 varying lots do, and this app has no holiday
    * calendar, so the honest move is to tell the driver to read the sign.
    *
    * It sits among the lot's own facts rather than in the money tile, for the

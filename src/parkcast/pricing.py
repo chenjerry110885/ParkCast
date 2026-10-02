@@ -268,16 +268,35 @@ class Segment:
 @dataclass(frozen=True, slots=True)
 class Tariff:
     segments: tuple[Segment, ...]
+    #: Whether the fare text named a **public** holiday at all, independent of
+    #: whether any segment ended up holiday-scoped.
+    #:
+    #: It has to be carried separately, because `_scope_of` deliberately folds a
+    #: holiday marker into a weekend scope that was already carried into the
+    #: clause -- and the corpus writes holidays *inside* the weekend clause
+    #: (`週六、週日、行政機關放假之紀念日與民俗日60元/時`) nearly every time. That
+    #: fold is right about the rate and it destroyed the evidence: reading
+    #: holidays off the segments found 1 of the fixture's 119 tariffs, where the
+    #: prose names one in 36. The other 35 resolved a rate and said nothing, so a
+    #: public holiday falling midweek rendered the WEEKDAY rate -- confidently,
+    #: and 20% under what the sign charges.
+    holidays: bool = False
 
 
 def prices_holidays(tariff: Tariff | None) -> bool:
-    """Whether any segment is holiday-scoped.
+    """Whether this lot prices public holidays as something of their own.
 
-    The display needs this. 95 of the fixture's 219 varying lots price public
-    holidays as their own category, and a driver on one of those days should be
-    told the rate shown is the ordinary one rather than trust it.
+    The display needs it: a driver on Double Tenth Day should be told the rate
+    shown is the ordinary one rather than trust it. This app has no holiday
+    calendar, so the note is the whole of what can honestly be offered.
+
+    True on either evidence -- a holiday-scoped segment, or a holiday named in
+    the prose and then folded into a weekend scope. The second is overwhelmingly
+    the common case; see `Tariff.holidays`.
     """
-    return tariff is not None and any(s.scope == "holiday" for s in tariff.segments)
+    if tariff is None:
+        return False
+    return tariff.holidays or any(s.scope == "holiday" for s in tariff.segments)
 
 
 def _scope_of(clause: str, carried: str) -> str:
@@ -399,7 +418,14 @@ def parse_tariff(payex: str | None) -> Tariff | None:
         return None
     if any(not span.low <= s.rate <= span.high for s in unique):
         return None
-    return Tariff(tuple(unique))
+    # Read off the same `timing` text the segments came from, not off `payex`:
+    # `_drop_surcharges` and `_strip_non_car` have already removed the motorcycle
+    # and penalty clauses, and a holiday named only in one of those says nothing
+    # about what a car is charged. `_HOLIDAY_MARK` and not `_WEEKEND_MARK` --
+    # `假日` and `例假日` are this corpus's ordinary words for "weekend", and
+    # flagging those would put the note on lots with nothing to warn about, which
+    # is how a warning stops being read.
+    return Tariff(tuple(unique), holidays=bool(_HOLIDAY_MARK.search(timing)))
 
 
 def rate_at(tariff: Tariff, when: datetime) -> int | None:
@@ -421,7 +447,7 @@ def rate_at(tariff: Tariff, when: datetime) -> int | None:
       rates resolves perfectly well at 14:00 on an ordinary Tuesday -- the
       weekday segment applies and the date says it is a Tuesday. 95 of the
       fixture's 219 varying lots price holidays, so refusing all of them would
-      cost 43% of the feature to protect about ten days a year.
+      cost 40% of the feature to protect about ten days a year.
 
     A naive `when` raises. Which hour applies depends entirely on the zone, and
     assuming Taipei would be right for this project's callers and silently wrong
