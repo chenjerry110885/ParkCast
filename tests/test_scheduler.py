@@ -1661,6 +1661,71 @@ def test_the_week_file_is_written_once_a_day_not_once_a_tick(tmp_path, monkeypat
     assert writes == ["taipei", "taipei"], "and one more when the day rolls over"
 
 
+def test_a_roster_that_moves_mid_day_rebuilds_the_week_table(tmp_path, monkeypatch):
+    """**The invariant the Worker enforces, and the one this used to break.**
+
+    `handleWeekUpload` rejects with 422 when the body's own `roster_id` differs
+    from the `X-Roster-Id` the client claimed -- a table indexed on one roster
+    cannot be read against another without attaching every lot's climatology to
+    the wrong lot.
+
+    The once-a-day gate asked "did I build a table today?" and offered the blob
+    it found under TODAY's roster id, which are two different rosters the moment
+    a city gains a lot after the build. Live on 2026-10-03: Taipei went 1,127 ->
+    1,130 lots, and the same 757,362 bytes were rejected 15 times across the day,
+    on exponential back-off, until midnight -- every distant-arrival forecast
+    running on a week table the app could not match to its roster.
+
+    So the assertion is not "it rebuilt". It is that what is offered agrees with
+    the id it is offered under, which is exactly what the Worker compares.
+    """
+    conn = store.connect(tmp_path / "t.sqlite")
+    out_dir = tmp_path / "artifacts"
+    day = date(2026, 9, 17)
+    monkeypatch.setattr(scheduler.time, "time", lambda: _taipei_noon(day))
+
+    _seed(conn, date(2026, 9, 4), lot="A")
+    up = _RecordingUploader()
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, today=day, uploader=up)
+
+    # Same Taipei day, one more lot in the roster -- a feed adding a car park.
+    _seed(conn, date(2026, 9, 4), lot="B")
+    scheduler.publish_artifacts(
+        conn, [_make_lot("A"), _make_lot("B")], out_dir, today=day, uploader=up)
+    conn.close()
+
+    assert len(up.week_offers) == 2
+    for blob, _city, offered_roster in up.week_offers:
+        embedded = artifacts.decode_week_header(blob[:artifacts.WEEK_HEADER_SIZE])
+        assert embedded["roster_id"] == offered_roster, (
+            "the bytes and the id they are offered under name different rosters; "
+            "the Worker answers that with 422 and retries it until midnight")
+    assert up.week_offers[0][0] != up.week_offers[1][0], "the table was rebuilt"
+
+
+def test_a_stable_roster_still_builds_the_week_table_only_once_a_day(tmp_path, monkeypatch):
+    """The gate's real job, unchanged. Rebuilding is a corpus-wide pass, and the
+    collector restarts routinely (the operator pauses it while gaming), so a
+    roster check that rebuilt on every tick would spend the Free tier's whole KV
+    budget re-stating what it said five minutes ago."""
+    conn = store.connect(tmp_path / "t.sqlite")
+    out_dir = tmp_path / "artifacts"
+    day = date(2026, 9, 17)
+    monkeypatch.setattr(scheduler.time, "time", lambda: _taipei_noon(day))
+    _seed(conn, date(2026, 9, 4), lot="A")
+
+    writes = []
+    real = artifacts.publish_week
+    monkeypatch.setattr(artifacts, "publish_week", lambda out_dir, city, *, week_blob: (
+        writes.append(city), real(out_dir, city, week_blob=week_blob))[-1])
+
+    for _ in range(12):
+        scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, today=day)
+    conn.close()
+
+    assert writes == ["taipei"], "one build, not twelve"
+
+
 def test_a_week_publish_failure_never_stops_the_tick(tmp_path, monkeypatch, caplog):
     """Publishing is downstream of collection. A week table that cannot be
     written must not cost a reading that cannot be re-fetched."""

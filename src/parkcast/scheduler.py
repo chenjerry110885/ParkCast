@@ -92,6 +92,26 @@ def _read_current_week(out_dir: Path, city: str) -> bytes | None:
         return None
 
 
+def _week_roster(blob: bytes | None) -> int | None:
+    """The roster a published week.bin was indexed on, or None if it cannot say.
+
+    Same "nothing trustworthy" contract as `_week_already_built_today`: missing,
+    truncated or non-week bytes all read as None, which never equals a real
+    roster id and so always forces a rebuild. That is the safe direction -- the
+    cost is one corpus-wide pass, where trusting unreadable bytes would publish
+    climatology attached to the wrong lots.
+    """
+    if blob is None:
+        return None
+    try:
+        header = artifacts.decode_week_header(blob[:artifacts.WEEK_HEADER_SIZE])
+    except struct.error:
+        return None
+    if header["magic"] != artifacts.WEEK_MAGIC:
+        return None
+    return header["roster_id"]
+
+
 def _week_already_built_today(blob: bytes | None, today: date) -> bool:
     """Whether `blob` -- `city`'s published week.bin, read fresh off disk by
     the caller -- shows a build already done today, in Taipei.
@@ -160,8 +180,18 @@ def _publish_week(
     must never be allowed to cost -- or even mark stale -- a reading that
     will never come back.
     """
+    roster = artifacts.roster_id(published_ids)
     blob_on_disk = _read_current_week(out_dir, city)
-    if _week_already_built_today(blob_on_disk, today):
+    # Both conditions, and the second is not redundant. The daily gate asks "did
+    # I build a table today?", which stops being the right question the moment
+    # the city gains or loses a lot after that build: the table is still today's
+    # and is no longer *this roster's*, and a week table read against a roster it
+    # was not indexed on attaches every lot's climatology to the wrong lot. The
+    # Worker refuses exactly that (422, body vs `X-Roster-Id`), so offering it
+    # cannot corrupt the site -- it just fails, every five minutes, until
+    # midnight. Live on 2026-10-03: Taipei went 1,127 -> 1,130 lots mid-day and
+    # the same 757,362 bytes were rejected 15 times.
+    if _week_already_built_today(blob_on_disk, today) and _week_roster(blob_on_disk) == roster:
         blob = blob_on_disk
     else:
         cells = build_week_cells(history, lot_ids)
@@ -181,7 +211,7 @@ def _publish_week(
         artifacts.publish_week(out_dir, city, week_blob=blob)
         log.info("published %s: week table for %s lots", city, len(published_ids))
     if uploader is not None:
-        uploader.offer_week(blob, city=city, roster_id=artifacts.roster_id(published_ids))
+        uploader.offer_week(blob, city=city, roster_id=roster)
 
 
 def publish_city(

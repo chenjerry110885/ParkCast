@@ -124,6 +124,40 @@ collector was not touched.
 
 ---
 
+## The week table stopped uploading when a roster moved mid-day — found and fixed 2026-10-03
+
+`week.bin` had been rejected by the Worker **15 times across 2026-10-03**, the same 757,362 bytes
+each time, on exponential back-off, from 08:12 until past 20:36. Found by reading the collector's
+logs while chasing an unrelated question; nothing else reports it.
+
+**The size was the clue.** 757,362 = an 18-byte header + 1,127 x 336 x 2, so that table covered
+1,127 lots — while the grid published that day covered **1,130**. Taipei gained three lots after the
+table was built.
+
+`_publish_week` rebuilds at most once a Taipei day (ruling R6) and offers today's bytes on every
+tick. It offered them under `artifacts.roster_id(published_ids)` — **the live roster, not the one the
+bytes were indexed on.** `handleWeekUpload` compares the body's own `roster_id` with the
+`X-Roster-Id` header and answers a disagreement with 422, because a week table read against a roster
+it was not built for attaches every lot's climatology to the wrong lot.
+
+**The guard worked and that is the part worth keeping.** Nothing wrong was ever published; the
+Worker refused it. What failed was the collector's willingness to keep offering bytes it should have
+replaced — and 422 is retriable, where a roster mismatch is permanent, so it retried all day.
+
+The cost while it lasted: `week.bin` in KV stayed stale, so arrivals beyond the grid's window ran on
+an older climatology table — or none, since the app checks the roster too. Silent apart from a
+WARNING, and self-healing at midnight, which is exactly why it survived a full day unnoticed.
+
+The fix is one condition: the daily gate now also requires the on-disk table's roster to match what
+is being published, so a roster change triggers a rebuild instead of a day of rejected uploads. The
+gate keeps its real job — a corpus-wide rebuild is expensive and the collector restarts routinely —
+because the roster is stable on most days. Mutating `_week_roster` to never match kills three tests,
+two of them the pre-existing once-a-day guards, so neither half can be dropped silently.
+
+**Deliberately not changed: the 422 itself.** It is the right answer to “body and header disagree”,
+and narrowing it to 409 would weaken a check that just proved its worth. The root cause is the
+collector sending a pair that disagrees.
+
 ## Time-aware pricing — built 2026-10-01 on `main`, deploy check passed, **not yet released**
 
 The price shown and the price charged are now both read off the car park's own published schedule
