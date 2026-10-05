@@ -384,43 +384,47 @@ function fire(type: string, layer: string | null, event: unknown): void {
 }
 
 describe("the map's selection, padding and taps", () => {
-  it("haloes the selection and the best pick separately, and applies the padding it is given", () => {
+  it("haloes the selection and nothing else, and applies the padding it is given", () => {
     render(
       <MapView
         lots={MAP_LOTS}
         destination={null}
         lang="en"
         selectedId="TPE_A"
-        bestId="TPE_C"
         centerRequest={null}
         padding={{ top: 0, right: 0, bottom: 300, left: 0 }}
       />,
     );
 
-    // Two halo layers, each under the dots -- a ring around the dot, never a
-    // substitute for it. Two and not one because only the best pick breathes,
-    // and a paint property is set per layer.
+    // One halo, under the dots -- a ring around the dot, never a substitute
+    // for it.
     const halo = shared.map?.layerSpecs.get(LOTS_HALO_LAYER);
-    const bestHalo = shared.map?.layerSpecs.get(LOTS_BEST_HALO_LAYER);
     expect(halo).toBeDefined();
-    expect(bestHalo).toBeDefined();
     expect(halo?.before).toBe(LOTS_LAYER);
-    expect(bestHalo?.before).toBe(LOTS_LAYER);
     expect(JSON.stringify(halo?.filter)).toContain("selected");
-    expect(JSON.stringify(halo?.filter)).not.toContain("best");
-    expect(JSON.stringify(bestHalo?.filter)).toContain("best");
-    expect(JSON.stringify(bestHalo?.filter)).not.toContain("selected");
+
+    // **A ring means "you chose this", and nothing else.** The best pick used
+    // to carry one too, so the map showed two rings whose difference was a
+    // pulse that stopped after three beats -- after which the recommendation
+    // and the driver's own choice were the same mark. The crown lives in the
+    // list, where it is a word rather than a circle to decode.
+    expect(shared.map?.layerSpecs.get(LOTS_BEST_HALO_LAYER)).toBeUndefined();
+    for (const [id, spec] of shared.map?.layerSpecs ?? []) {
+      if (id === LOTS_HALO_LAYER || id === LOTS_HOVER_HALO_LAYER) continue;
+      expect(JSON.stringify(spec.filter ?? null)).not.toContain("best");
+    }
 
     // The sheet sits over the bottom of the map, so the map's idea of "centre"
     // has to move up by exactly as much.
     expect(shared.map?.setPadding).toHaveBeenCalledWith({ top: 0, right: 0, bottom: 300, left: 0 });
 
-    // ...and the marks the halos filter on are on the features themselves.
+    // ...and the mark the halo filters on is on the feature itself, while
+    // `best` is not on it at all -- carrying a flag nothing draws is how a
+    // removed feature comes back by accident.
     const drawn = shared.map?.getSource(LOTS_SOURCE)?.data as FeatureCollection<Point, LotProperties>;
     const selected = drawn.features.find((f) => f.id === "TPE_A");
     expect(selected?.properties.selected).toBe(true);
-    expect(selected?.properties.best).toBe(false);
-    expect(drawn.features.find((f) => f.id === "TPE_C")?.properties.best).toBe(true);
+    expect(selected?.properties).not.toHaveProperty("best");
   });
 
   it("haloes the hovered card's dot through a filter, under the selection's ring", () => {
@@ -430,7 +434,6 @@ describe("the map's selection, padding and taps", () => {
         destination={null}
         lang="en"
         selectedId={null}
-        bestId={null}
         hoverId={hoverId}
         centerRequest={null}
         padding={NO_PADDING}
@@ -460,7 +463,6 @@ describe("the map's selection, padding and taps", () => {
         destination={null}
         lang="en"
         selectedId={null}
-        bestId={null}
         onSelectLot={onSelectLot}
         centerRequest={centerRequest}
         padding={NO_PADDING}
@@ -500,7 +502,6 @@ describe("the map's selection, padding and taps", () => {
         destination={null}
         lang="en"
         selectedId="TPE_A"
-        bestId={null}
         onSelectLot={onSelectLot}
         centerRequest={{ lat: 25.03, lon: 121.56, nonce: 1 }}
         padding={NO_PADDING}
@@ -525,7 +526,6 @@ describe("the map's selection, padding and taps", () => {
         destination={null}
         lang="en"
         selectedId={null}
-        bestId={null}
         onSelectLot={() => {}}
         hasCard={hasCard}
         centerRequest={null}
@@ -563,7 +563,6 @@ describe("the map's selection, padding and taps", () => {
         destination={null}
         lang="en"
         selectedId={null}
-        bestId={null}
         centerRequest={null}
         padding={NO_PADDING}
       />,
@@ -580,7 +579,11 @@ describe("the map's selection, padding and taps", () => {
     expect(popup?.content?.textContent).not.toContain("0%");
   });
 
-  it("breathes the best pick's halo and leaves the selection's alone", () => {
+  it("paints no halo on a timer at all, now that nothing pulses", () => {
+    // Both pulse tests lived here: one that the best pick breathed, one that it
+    // stopped after a few beats. The halo they animated is gone, so the timer
+    // is too -- and a paint change re-renders the WHOLE map, so this asserts
+    // the cost is gone rather than merely the sight of it.
     vi.useFakeTimers();
     try {
       render(
@@ -589,52 +592,14 @@ describe("the map's selection, padding and taps", () => {
           destination={null}
           lang="en"
           selectedId="TPE_A"
-          bestId="TPE_C"
           centerRequest={null}
           padding={NO_PADDING}
         />,
       );
-
-      // Two beats, so the toggle is seen going both ways.
-      vi.advanceTimersByTime(2000);
-
-      const opacity = (shared.map?.setPaintProperty.mock.calls ?? []).filter(
-        (call) => call[1] === "circle-stroke-opacity",
-      );
-      expect(opacity.length).toBeGreaterThan(0);
-      // The driver's own selection does not pulse: the app is not asking them to
-      // reconsider the thing they just chose.
-      for (const call of opacity) expect(call[0]).toBe(LOTS_BEST_HALO_LAYER);
-      expect(new Set(opacity.map((call) => call[2])).size).toBeGreaterThan(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("stops pulsing the best pick's halo after a few beats", () => {
-    // The pulse used to run for as long as the tab was open. Every paint change
-    // re-renders the whole map, so that was a permanent 60 fps redraw of every
-    // tile and label in aid of an animation nobody is still watching.
-    vi.useFakeTimers();
-    try {
-      render(
-        <MapView
-          lots={MAP_LOTS}
-          destination={null}
-          lang="en"
-          selectedId={null}
-          bestId="TPE_C"
-          centerRequest={null}
-          padding={NO_PADDING}
-        />,
-      );
-
-      vi.advanceTimersByTime(10_000);
-      const settled = (shared.map?.setPaintProperty.mock.calls ?? []).length;
-      expect(settled).toBeGreaterThan(0);
 
       vi.advanceTimersByTime(60_000);
-      expect((shared.map?.setPaintProperty.mock.calls ?? []).length).toBe(settled);
+
+      expect(shared.map?.setPaintProperty).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
@@ -649,7 +614,6 @@ describe("the map's selection, padding and taps", () => {
         onPick={onPick}
         lang="en"
         selectedId={null}
-        bestId={null}
         centerRequest={null}
         padding={NO_PADDING}
       />,
@@ -674,7 +638,6 @@ describe("the map's selection, padding and taps", () => {
         onPick={onPick}
         lang="en"
         selectedId={null}
-        bestId={null}
         centerRequest={null}
         padding={NO_PADDING}
       />,
@@ -1204,7 +1167,7 @@ describe("a car park tapped on the map", () => {
     expect(lastPadding().bottom).toBe(before.bottom);
   });
 
-  it("never crowns a car park the ranking never reached, and never pulses its dot", async () => {
+  it("never crowns a car park the ranking never reached", async () => {
     await renderWithDestination();
     tapDot(CROWD[22]!);
 
@@ -1216,12 +1179,13 @@ describe("a car park tapped on the map", () => {
     // ...and the crown is still where the ranking put it.
     expect(within(screen.getByTestId("lot-list")).getByText(t("en").bestPick)).toBeInTheDocument();
 
-    // The map says the same thing: this dot is selected and is not the best
-    // pick, so the layer that pulses can never match it.
+    // The map says the same thing in the one way it still can: this dot is
+    // selected. It carries no crown of its own because no dot does any more --
+    // the ring means "you chose this", and the badge above is where the
+    // ranking's own pick is withheld or granted.
     const drawn = drawnLots().features.find((f) => f.properties.id === OUTSIDER_ID);
     expect(drawn?.properties.selected).toBe(true);
-    expect(drawn?.properties.best).toBe(false);
-    expect(drawnLots().features.filter((f) => f.properties.best)).toHaveLength(1);
+    expect(drawnLots().features.filter((f) => f.properties.selected)).toHaveLength(1);
   });
 
   it("replaces the card when a second dot is tapped, rather than stacking them", async () => {

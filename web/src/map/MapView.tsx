@@ -3,9 +3,8 @@
  * its chance of having a space at the driver's arrival time.
  *
  * Every lot is one point in **one** GeoJSON source, drawn by one circle layer
- * for the dots and three more underneath: a halo around the selection, a second
- * one around the best pick, which is the one that breathes, and a third, faintest
- * one under both for the card the pointer is over. The obvious
+ * for the dots and two more underneath: a halo around the selection, and a
+ * fainter one below it for the card the pointer is over. The obvious
  * alternative -- a `maplibregl.Marker` per lot -- puts a thousand
  * absolutely-positioned DOM nodes on the page and repositions every one of them
  * on every frame of a pan. That is the difference between a map that glides and
@@ -49,15 +48,17 @@ import { useMapLibre } from "./useMapLibre";
 export const LOTS_SOURCE = "lots";
 const LOTS_LAYER = "lots-circles";
 /**
- * Two halo layers, not one with a filter that matches both.
+ * **A ring on this map means "you chose this", and nothing else.**
  *
- * The best pick breathes and the selection does not, and a paint property is
- * set per *layer*: one layer for both would mean the driver's own selection
- * pulsing along with the recommendation, which says the app is unsure about the
- * thing the driver just chose.
+ * The best pick carried one too, on its own layer, breathing three times and
+ * then holding still -- after which the recommendation and the driver's own
+ * selection were the same mark, and the map showed two identical rings whose
+ * difference had already finished happening. The crown belongs in the list,
+ * where it is a word rather than a circle to decode, and where the driver is
+ * already reading. Removing the layer took the pulse timer with it; see the
+ * centring effect below for the only animation left here.
  */
 const LOTS_HALO_LAYER = "lots-halo";
-const LOTS_BEST_HALO_LAYER = "lots-best-halo";
 
 /**
  * How much of a dot is left when the list's amenity filter has taken its car
@@ -86,16 +87,10 @@ const DESTINATION_LAYER = "destination-pin";
 
 /** `--accent` in `styles/tokens.css`. The halo is the same teal as the app's own. */
 const ACCENT = "#0fb5a5";
-/** The ring at rest, and at the bottom of the best pick's breath. */
+/** The ring at rest. */
 const HALO_OPACITY = 0.55;
-const HALO_OPACITY_DIM = 0.2;
 /** The hover ring, fainter than either of the other two: a hint, not a choice. */
 const HOVER_HALO_OPACITY = 0.5;
-/** One breath per second, each one slower than a blink: noticeable, not busy. */
-const PULSE_EVERY_MS = 1000;
-/** Half-beats: three dim-and-back cycles, then the halo holds still. */
-const PULSE_STEPS = 6;
-const PULSE_FADE_MS = 900;
 /** The glide to a lot the driver tapped in the list. */
 const CENTRE_MS = 600;
 /** Covers both rings of the destination ripple, including the late one's delay. */
@@ -117,7 +112,6 @@ export interface MapViewProps {
   /** The lot the driver has tapped, in the list or here. Haloed, not recoloured. */
   selectedId: string | null;
   /** The lot the ranking put first. Haloed too, and the only one that pulses. */
-  bestId: string | null;
   /**
    * The lot whose card the pointer is over, or `null`. Drawn as a fainter ring
    * *under* the selection's, so pointing at a card can never be mistaken for
@@ -177,7 +171,6 @@ export default function MapView({
   // Defaulted because each one has a real opening state: nothing selected,
   // nothing ranked yet, nowhere asked for, and no chrome over the map.
   selectedId = null,
-  bestId = null,
   hoverId = null,
   onSelectLot,
   hasCard,
@@ -188,8 +181,8 @@ export default function MapView({
   const s = t(lang);
 
   const features = useMemo(
-    () => toFeatureCollection(lots, { selectedId, bestId }),
-    [lots, selectedId, bestId],
+    () => toFeatureCollection(lots, { selectedId }),
+    [lots, selectedId],
   );
   const pin = useMemo(() => toPointCollection(destination), [destination]);
 
@@ -268,8 +261,8 @@ export default function MapView({
         ],
       },
     });
-    // The halos, *under* the dots: a ring around the selection and a ring
-    // around the best pick, never a recolouring of either. Colour on this map
+    // The halos, *under* the dots: a ring around the selection and a fainter
+    // one for the hovered card, never a recolouring of either. Colour on this map
     // means one thing -- the chance of a space -- and a second meaning laid
     // over the same channel would make both unreadable. Their own layers rather
     // than a wider stroke on the dots, because a stroke would grow the hit
@@ -315,26 +308,6 @@ export default function MapView({
       },
       LOTS_HALO_LAYER,
     );
-    map.addLayer(
-      {
-        id: LOTS_BEST_HALO_LAYER,
-        type: "circle",
-        source: LOTS_SOURCE,
-        filter: ["get", "best"],
-        paint: {
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 8, 13, 12, 16, 18],
-          "circle-color": "rgba(0, 0, 0, 0)",
-          "circle-stroke-width": 3,
-          "circle-stroke-color": ACCENT,
-          "circle-stroke-opacity": HALO_OPACITY,
-          // Declared with the rest of the paint, so the pulse below is only a
-          // value being toggled and not a place transitions are defined.
-          "circle-stroke-opacity-transition": { duration: PULSE_FADE_MS },
-        },
-      },
-      LOTS_LAYER,
-    );
-
     map.addSource(DESTINATION_SOURCE, { type: "geojson", data: empty });
     map.addLayer({
       id: DESTINATION_LAYER,
@@ -353,7 +326,6 @@ export default function MapView({
       // layers with it, so this guards the StrictMode double-invoke rather than
       // the unmount.
       if (map.getLayer(DESTINATION_LAYER)) map.removeLayer(DESTINATION_LAYER);
-      if (map.getLayer(LOTS_BEST_HALO_LAYER)) map.removeLayer(LOTS_BEST_HALO_LAYER);
       if (map.getLayer(LOTS_HOVER_HALO_LAYER)) map.removeLayer(LOTS_HOVER_HALO_LAYER);
       if (map.getLayer(LOTS_HALO_LAYER)) map.removeLayer(LOTS_HALO_LAYER);
       if (map.getLayer(LOTS_LAYER)) map.removeLayer(LOTS_LAYER);
@@ -447,38 +419,6 @@ export default function MapView({
       duration: prefersReducedMotion() ? 0 : CENTRE_MS,
     });
   }, [map, centerNonce]);
-
-  // The best pick announces itself with three slow beats of its own halo's
-  // stroke and then holds still. Forever was the first version, and it cost
-  // more than it looked: each paint change re-renders the whole map, so a
-  // 1 s pulse with a 900 ms transition keeps MapLibre redrawing every tile and
-  // label at 60 fps for as long as the tab is open -- on a large display, a
-  // constant CPU load in aid of an animation nobody is still watching. Three
-  // beats is enough to find the dot; after that the halo is a static ring,
-  // which is what actually marks it. Opacity and not radius, because a
-  // changing radius reads as a changing *value* on a map whose circles already
-  // mean something. Only the best layer is touched -- the selection's ring is
-  // steady, because the driver is not waiting to be convinced about it.
-  useEffect(() => {
-    if (map === null || bestId === null || prefersReducedMotion()) return;
-    const fade = (opacity: number) => {
-      // The layer effect owns the halos; this one only ever borrows one.
-      if (map.getLayer(LOTS_BEST_HALO_LAYER) === undefined) return;
-      map.setPaintProperty(LOTS_BEST_HALO_LAYER, "circle-stroke-opacity", opacity);
-    };
-    let step = 0;
-    const timer = window.setInterval(() => {
-      step += 1;
-      fade(step % 2 === 1 ? HALO_OPACITY_DIM : HALO_OPACITY);
-      // Stops itself rather than waiting for unmount: a new best pick restarts
-      // the effect, and nothing else needs the timer alive.
-      if (step >= PULSE_STEPS) window.clearInterval(timer);
-    }, PULSE_EVERY_MS);
-    return () => {
-      window.clearInterval(timer);
-      fade(HALO_OPACITY);
-    };
-  }, [map, bestId]);
 
   // Taps. Two handlers, because a tap on a dot and a tap on the city mean
   // opposite things: "tell me about this car park" and "I am going here".

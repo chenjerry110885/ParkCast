@@ -69,19 +69,22 @@ export type LotProperties = {
   known: boolean;
   /** The lot the driver has tapped, in the list or on the map. */
   selected: boolean;
-  /** The lot the ranking put first. Independent of `selected`: usually a different dot. */
-  best: boolean;
   /** Dimmed by the list's amenity filter. See `MapLot.filteredOut`. */
   filteredOut: boolean;
 };
 
 /**
- * Which lots to flag. Both optional and both nullable, because "nothing is
- * selected" and "there is no ranking yet" are the state the map opens in.
+ * Which lot to flag. Optional and nullable, because "nothing is selected" is
+ * the state the map opens in.
+ *
+ * One mark, not two. `bestId` was here as well, feeding a `best` boolean and a
+ * second halo layer; the ranking's own pick is now said in the list, in words,
+ * and the ring on the map means only that the driver chose this dot. The
+ * property went with the layer rather than staying as a flag nothing draws --
+ * that is how a removed feature creeps back.
  */
 export interface LotMarks {
   selectedId?: string | null;
-  bestId?: string | null;
 }
 
 /**
@@ -109,8 +112,8 @@ export function toMapLot(lot: Lot, probability: number | null, filteredOut = fal
 /**
  * Every lot given, as one `FeatureCollection` ready for `setData`.
  *
- * The selection and the best pick ride along as feature *properties* rather
- * than being expressed in the layer's paint as a comparison against an id.
+ * The selection rides along as a feature *property* rather than being
+ * expressed in the layer's paint as a comparison against an id.
  * That way the halo layer is a plain filter on a boolean, one `setData` moves
  * the ring when the driver taps a different card, and there is no second copy
  * of "which lot is which" living inside a MapLibre expression.
@@ -132,7 +135,6 @@ export function toFeatureCollection(
       known: row.probability !== null,
       // `?? null` so an absent mark can never match an absent id.
       selected: row.id === (marks.selectedId ?? null),
-      best: row.id === (marks.bestId ?? null),
       filteredOut: row.filteredOut,
     },
   }));

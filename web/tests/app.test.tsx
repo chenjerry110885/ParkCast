@@ -31,6 +31,8 @@ import {
   composeArrival,
   dayOptions,
   defaultArrival,
+  DEFAULT_LEAD_SEC,
+  MIN_LEAD_SEC,
   floorToStep,
   formatClock,
   horizonFromReading,
@@ -889,16 +891,32 @@ describe("arrival time", () => {
     }
   });
 
-  it("moves the reading forward when a quick chip is clicked, not dragged", async () => {
+  it("adds a quick chip's offset to the arrival already on screen, every press", async () => {
+    // End to end, through the app's own state: the chips are offsets, so two
+    // presses go twice as far. Asserted against the arrival the app OPENED on
+    // rather than against `NOW_SEC`, because that opening value is the default
+    // lead and the chips now build on it instead of replacing it.
     render(<App />);
     await screen.findByTestId("staleness");
-    const before = screen.getByTestId("arrival-time").textContent;
+    const opened = screen.getByTestId("arrival-time").textContent!;
+    const openedTs = ceilToStep(NOW_SEC + DEFAULT_LEAD_SEC);
+    expect(opened).toBe(formatClock(openedTs));
 
     fireEvent.click(screen.getByRole("button", { name: t("en").quickPlus1h }));
+    expect(screen.getByTestId("arrival-time")).toHaveTextContent(formatClock(openedTs + 3600));
 
-    const after = screen.getByTestId("arrival-time").textContent;
-    expect(after).not.toBe(before);
-    expect(after).toBe(formatClock(ceilToStep(NOW_SEC + 3600)));
+    // The second press is the one the old behaviour lost: computed from `now`
+    // it recomputed the same answer and the screen did not move.
+    fireEvent.click(screen.getByRole("button", { name: t("en").quickPlus1h }));
+    expect(screen.getByTestId("arrival-time")).toHaveTextContent(formatClock(openedTs + 7200));
+
+    // ...and `now` is the way back, since nothing here subtracts. It lands on
+    // the nearest arrival the app will forecast at all (`MIN_LEAD_SEC`), which
+    // is closer in than the 15-minute default it opened on -- "now" means now,
+    // not "back to where you started".
+    fireEvent.click(screen.getByRole("button", { name: t("en").quickNow }));
+    expect(screen.getByTestId("arrival-time")).toHaveTextContent(
+      formatClock(ceilToStep(NOW_SEC + MIN_LEAD_SEC)));
   });
 
   it("does not change the selection when a pointer is dragged across the quick chips", async () => {

@@ -40,6 +40,11 @@
    badge for four seconds out of every five. */
 @keyframes shine { from { transform: translateX(-120%) skewX(-20deg); } 16%, to { transform: translateX(220%) skewX(-20deg); } }
 @keyframes pop { from { opacity: 0; transform: translateY(4px) scale(0.98); } to { opacity: 1; transform: none; } }
+/* The arrival readout when it moves. Scale only, never opacity: these chips
+   are pressed in bursts, and a number that fades out and back on each press
+   reads as flicker rather than as response. `pop` is wrong here for exactly
+   that reason -- it starts from opacity 0. */
+@keyframes tick { from { transform: scale(1.14); } to { transform: none; } }
 
 .anim-rise { animation: rise var(--dur-base) var(--ease-out) both; }
 .anim-fade { animation: fade-in var(--dur-base) var(--ease-out) both; }

@@ -32,10 +32,10 @@
  * against `value` itself having drifted (the clock ticked past it) between
  * renders.
  */
-import type { ChangeEvent } from "react";
+import { useRef, useState, type ChangeEvent } from "react";
 import {
   MAX_LEAD_SEC, MIN_LEAD_SEC,
-  ceilToStep, clampArrival, composeArrival, dayOptions, formatClock,
+  ceilToStep, clampArrival, composeArrival, dayOptions, floorToStep, formatClock,
   hourOptions, minuteOptions, relativeMinutes, TIME_ZONE,
   type DayOption,
 } from "../arrival";
@@ -97,7 +97,17 @@ export function ArrivalPicker({ value, nowSec, onChange, lang }: ArrivalPickerPr
   // so it walks forward with `nowSec` on its own -- nothing here caches a
   // window from a render ago.
   const lowerBound = ceilToStep(nowSec + MIN_LEAD_SEC);
-  const upperBound = nowSec + MAX_LEAD_SEC;
+  // FLOORED onto the 5-minute clock, like `lowerBound` above, and floored
+  // rather than rounded so the window never reaches past the seven days it is
+  // the ceiling of.
+  //
+  // It mattered the moment the chips became cumulative. Nothing could land on
+  // this bound before -- the old chips computed `now + 1h` at most -- so an
+  // unsnapped `now + 7 days` was merely a limit no selection ever equalled.
+  // Pressing repeatedly walks straight into it, and then the readout showed
+  // 09:29 while the selects under it showed 09:00: two different arrival times
+  // on one screen, one of them a number no control could produce.
+  const upperBound = floorToStep(nowSec + MAX_LEAD_SEC);
   const bounds = { min: lowerBound, max: upperBound };
 
   // `clampArrival` here is the backstop, not the mechanism: `value` is only
@@ -107,6 +117,17 @@ export function ArrivalPicker({ value, nowSec, onChange, lang }: ArrivalPickerPr
   // effect). A stale `value` is shown, and would be committed, as the
   // nearest still-selectable time instead of the one the clock has already
   // passed.
+  /**
+   * Which chip was last pressed, and a key that changes on every press.
+   *
+   * Presentational only: the arrival itself is the caller's state, and this
+   * never feeds back into it. It exists because a ripple has to replay on a
+   * repeated press of the SAME chip, and React replays a CSS animation only
+   * when the element is new.
+   */
+  const [pressed, setPressed] = useState<{ key: number; deltaSec: number } | null>(null);
+  const pressKey = useRef(0);
+
   const shown = clampArrival(value, bounds);
   const [hour, minute] = formatClock(shown).split(":").map(Number) as [number, number];
 
@@ -140,16 +161,63 @@ export function ArrivalPicker({ value, nowSec, onChange, lang }: ArrivalPickerPr
     commit(selectedDay.daySec, hour, Number(e.target.value));
   }
 
-  /** now / +15 / +30 / +1h, each rounded onto the 5-minute clock and clamped into the window -- see `quick`'s own doc below. */
-  function quick(leadSec: number) {
-    return () => onChange(clampArrival(ceilToStep(nowSec + leadSec), bounds));
+  /**
+   * `+15` / `+30` / `+1h`: an offset added to the arrival **already chosen**,
+   * not a preset computed from `nowSec`.
+   *
+   * They are labelled as offsets, so they behave as offsets. A driver reaching
+   * for half an hour out presses `+15` twice rather than working out which
+   * single chip lands there, and a row of three increments covers every time in
+   * the window by repetition. Computed from `nowSec` instead -- which is what
+   * this did -- the second press of a chip recomputed the same answer and the
+   * screen did not move, which reads as a dropped tap rather than as a design.
+   *
+   * Still snapped onto the 5-minute clock and still clamped into the window, so
+   * repeated pressing saturates at the far end instead of running away; `atMax`
+   * below is what stops a saturated chip from pretending it did something.
+   */
+  function bump(deltaSec: number) {
+    return () => {
+      // A new key on every press, so the ripple below REMOUNTS and its
+      // animation restarts. Toggling a class instead would do nothing on the
+      // second of two fast taps -- the class is already there and a running
+      // animation does not replay -- which is exactly the case these chips are
+      // being rebuilt for.
+      setPressed({ key: pressKey.current++, deltaSec });
+      onChange(clampArrival(ceilToStep(shown + deltaSec), bounds));
+    };
+  }
+
+  /**
+   * The way back. Nothing here subtracts -- three forward chips and no reverse
+   * -- so overshooting by one tap would otherwise mean reaching for the selects.
+   *
+   * Not literally this instant: the app never promises a forecast for a time
+   * already too close to trust, so `clampArrival` floors it to the nearest
+   * arrival the picker offers at all (`MIN_LEAD_SEC`).
+   */
+  function resetToNow() {
+    onChange(clampArrival(ceilToStep(nowSec), bounds));
+  }
+
+  /** Whether a chip has any room left, so a refused press is visible rather than silent. */
+  function atMax(deltaSec: number) {
+    return clampArrival(ceilToStep(shown + deltaSec), bounds) === shown;
   }
 
   return (
     <div className="arrival-picker">
       <div className="arrival-picker__readout">
         <span className="arrival-picker__label">{s.arrivalLabel}</span>
-        <span className="arrival-picker__time num" data-testid="arrival-time">{formatClock(shown)}</span>
+        {/* Keyed on the time itself, so the number springs whenever it moves --
+            on a chip, on a select, on anything. The key is the value rather
+            than a press counter deliberately: it reacts to the arrival
+            CHANGING, not to a button being pressed, so a press that lands on
+            the same minute (a saturated chip, a select set to what it already
+            said) stays still rather than claiming something happened. */}
+        <span key={shown} className="arrival-picker__time num" data-testid="arrival-time">
+          {formatClock(shown)}
+        </span>
         <span className="arrival-picker__relative">{fillTemplate(s.inMinutesTemplate, { n: relativeMinutes(shown, nowSec) })}</span>
       </div>
 
@@ -160,10 +228,30 @@ export function ArrivalPicker({ value, nowSec, onChange, lang }: ArrivalPickerPr
         * thing this file must not bring back.
         */}
       <div className="arrival-picker__quick">
-        <button type="button" className="qchip" onClick={quick(0)}>{s.quickNow}</button>
-        <button type="button" className="qchip" onClick={quick(15 * 60)}>{s.quickPlus15}</button>
-        <button type="button" className="qchip" onClick={quick(30 * 60)}>{s.quickPlus30}</button>
-        <button type="button" className="qchip" onClick={quick(60 * 60)}>{s.quickPlus1h}</button>
+        <button type="button" className="qchip" onClick={resetToNow}>{s.quickNow}</button>
+        {/* Each judged on its own room, never as a row: half an hour from the
+            ceiling `+15` can still move and `+1h` cannot, and disabling them
+            together would refuse a press that is perfectly valid. */}
+        {([[15, s.quickPlus15], [30, s.quickPlus30], [60, s.quickPlus1h]] as const).map(
+          ([mins, label]) => (
+            <button
+              key={mins}
+              type="button"
+              className="qchip qchip--bump"
+              onClick={bump(mins * 60)}
+              disabled={atMax(mins * 60)}
+            >
+              {label}
+              {/* Keyed, so a second press of the same chip replays it. Rendered
+                  only inside the chip that was pressed, and `aria-hidden`
+                  because it says nothing a screen reader has not already been
+                  told by the readout's own change. */}
+              {pressed?.deltaSec === mins * 60 && (
+                <span key={pressed.key} className="qchip__ripple" aria-hidden="true" />
+              )}
+            </button>
+          ),
+        )}
       </div>
 
       <div className="arrival-picker__fields">
