@@ -913,9 +913,17 @@ export default function App() {
    * request and nothing else.
    */
   useEffect(() => {
-    if (!needsWeek || weekTable !== null) return;
+    // `weekTable !== null` was the guard, and it stranded the one case it most
+    // needed to handle: a table whose roster no longer matches the grid's is
+    // discarded below, so holding it as "loaded" meant the app sat on an
+    // unusable table and answered "no data" past the grid's window for the rest
+    // of the session. The question is not "do I have a table?" but "do I have
+    // THIS roster's table?", and asking it here is what lets a roster change
+    // refetch at all.
+    const haveThisRoster = weekTable !== null && grid !== null && weekTable.rosterId === grid.rosterId;
+    if (!needsWeek || haveThisRoster) return;
     let cancelled = false;
-    void loadWeek(ARTIFACTS_BASE).then((table) => {
+    void loadWeek(ARTIFACTS_BASE, grid?.rosterId).then((table) => {
       if (cancelled) return;
       // `null` is a failed or refused load, which must not be committed as
       // "loaded": that is what leaves the next attempt free to try again.
@@ -928,7 +936,7 @@ export default function App() {
     // its own state change, calling the cleanup above and cancelling the
     // fetch's own callback before the response ever arrives.
     // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [needsWeek, arrivalTs]);
+  }, [needsWeek, arrivalTs, grid?.rosterId]);
 
   /**
    * The week table, but only while it describes the same roster the grid does.

@@ -158,6 +158,18 @@ const PASSTHROUGH = "passthrough";
  *     is a forecast artifact under rule 4 until somebody decides otherwise on
  *     purpose.
  *
+ *     **The app asks for `week.bin?roster=N`, and that is load-bearing here.**
+ *     A cache key is per-URL, so holding this file for a week is safe only
+ *     while the file means the same thing for a week -- and it does not: the
+ *     table is indexed by grid row, so it changes identity the moment a city
+ *     gains or loses a lot. `App` refuses a table whose roster disagrees with
+ *     the grid's, because indexing it anyway answers every lot with some
+ *     other car park's history; refused, every arrival past the grid's window
+ *     read "no data" until this cache aged out, which is to say for up to
+ *     seven days. The roster in the query makes a roster change a miss by
+ *     construction. Routing still keys on the path, so the exception below
+ *     catches it either way.
+ *
  *  4. **The artifacts** -- network-first. A forecast from the network beats one
  *     from disk every time. The cached copy is the fallback, and it carries its
  *     own timestamp, so falling back costs honesty nothing.

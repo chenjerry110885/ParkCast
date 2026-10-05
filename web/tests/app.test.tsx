@@ -192,7 +192,10 @@ function stubFetch(grid: ArrayBuffer = makeGrid(), lots: LotsDoc = makeLotsDoc()
     if (url.endsWith("grid.bin")) {
       return Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(grid) });
     }
-    if (url.endsWith("week.bin")) {
+    // `includes`, not `endsWith`: the app asks for `week.bin?roster=N` so that a
+    // roster change is a cache miss in the service worker rather than a stale
+    // table it keeps for a week. The stub answers the file, whatever the key.
+    if (url.includes("week.bin")) {
       return Promise.resolve(typeof week === "function" ? week() : week).then((table) =>
         table === null
           ? { ok: false, status: 503 }
@@ -225,7 +228,7 @@ function gridFetchCount(): number {
 
 /** How many times `week.bin` has been requested since the stub was installed. */
 function weekFetchCount(): number {
-  return fetchMock.mock.calls.filter(([url]) => String(url).endsWith("week.bin")).length;
+  return fetchMock.mock.calls.filter(([url]) => String(url).includes("week.bin")).length;
 }
 
 /** Pretend the artifact's reading is `min` minutes old. */
@@ -1202,6 +1205,52 @@ describe("an arrival beyond the grid's own window", () => {
     expect(chance()).toContain(t("en").noData);
     expect(chance()).not.toContain(`${FAR_PERCENT}%`);
     expect(chance()).not.toContain(CLAMPED);
+  });
+
+  it("asks for the roster it needs, and recovers when the right table arrives", async () => {
+    // **The bug the owner hit, and why refusing alone was not enough.** The
+    // service worker holds `week.bin` cache-first for up to a week, so after a
+    // roster change -- Taipei went 1,130 -> 1,133 lots in a single tick -- a
+    // browser pairs yesterday's table with today's grid. The check above then
+    // correctly throws the table away, and every arrival past the grid's window
+    // reads "no data" for as long as that cached copy stays young. Refusing is
+    // right; staying refused forever is the defect.
+    //
+    // So the roster goes in the URL. A changed roster is a different key, which
+    // is a cache miss by construction rather than a stale hit to be detected
+    // after the fact.
+    const far = tomorrowEvening();
+    const body = (roster: number) => encodeWeek(
+      weekBucket(far),
+      { percent: FAR_PERCENT, support: FAR_SUPPORT },
+      { percent: OTHER_PERCENT, support: 0 },
+      roster,
+    );
+    let served = 0;
+    stubColumnMarkedArtifacts({
+      lot: OBSERVED_LOT,
+      // First the stale one a warm cache would hand over, then the real one.
+      week: () => body(++served === 1 ? ROSTER_ID + 1 : ROSTER_ID),
+    });
+    await renderLocated();
+
+    selectArrival(far);
+    await waitFor(() => expect(weekFetchCount()).toBe(1));
+    expect(chance()).toContain(t("en").noData);
+
+    // The key names the roster, which is the whole mechanism: without it the
+    // second request is the same URL and the worker answers from its cache.
+    const asked = fetchMock.mock.calls.map(([u]) => String(u)).filter((u) => u.includes("week.bin"));
+    expect(asked[0]).toContain(`roster=${ROSTER_ID}`);
+
+    // Moving the arrival is the app's next chance to ask, and this time the
+    // table matches -- so the number arrives instead of the session being
+    // stranded on "no data". Five minutes, deliberately: 21:20 and 21:25 share
+    // a half-hour bucket, so this re-reads the SAME cell and the recovery is
+    // visible as `FAR_PERCENT` rather than as the filler of a neighbouring one.
+    selectArrival(far + 5 * 60);
+    await waitFor(() => expect(chance()).not.toContain(t("en").noData));
+    expect(chance()).toContain(`${FAR_PERCENT}%`);
   });
 
   it("grades the confidence pill on that bucket's own support, not on how far away it is", async () => {
