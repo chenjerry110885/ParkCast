@@ -94,10 +94,21 @@ async function main() {
   // shipping bytes nobody checked.
   const stale = staleness(readStamp(ROOT), measure(ROOT));
   if (stale.length > 0) {
+    // Three things go wrong here in practice, so the message names all three.
+    // The shell is the one that bites first and was missing from this text: the
+    // check phase refuses to run while CLOUDFLARE_API_TOKEN is set, so running
+    // it in THIS shell -- the one holding the deploy key, which is the shell
+    // anyone reading this message is standing in -- prints a one-line refusal,
+    // writes no stamp, and leaves the next release failing in exactly the same
+    // way. The cwd and the flag are the two that follow.
     fail(`${stale.join("; ")}. Nothing was uploaded and the live site is unchanged. ` +
-      `Run \`npm run deploy:check --prefix worker\` from ${ROOT} (NOT from worker/ -- ` +
-      "--prefix is relative to the cwd, so from inside worker/ npm looks for worker/worker/package.json " +
-      "and exits before running anything), then release again.");
+      "Fix it in a SEPARATE shell that does not have CLOUDFLARE_API_TOKEN set -- the check " +
+      "phase refuses to run while the deploy key is in the environment, so re-running it here " +
+      `would change nothing. In that shell, from ${ROOT} (NOT from worker/ -- --prefix is ` +
+      "relative to the cwd, so from inside worker/ npm looks for worker/worker/package.json and " +
+      "exits before running anything):\n" +
+      "    npm run deploy:check --prefix worker -- --with-python\n" +
+      "Drop `-- --with-python` only if src/ is unchanged. Then release again from this shell.");
   }
   const pruneProblems = pruneDryRunArtifacts(join(WORKER, ".wrangler", "dry"), config);
   if (pruneProblems.length > 0) fail(pruneProblems.join("; "));
