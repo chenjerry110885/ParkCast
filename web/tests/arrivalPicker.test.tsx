@@ -37,25 +37,131 @@ function Controlled({ initial, nowSec }: { initial: number; nowSec: number }) {
 afterEach(cleanup);
 
 describe("quick chips", () => {
-  it("set the arrival to now, +15, +30 and +1h, each rounded onto the 5-minute clock", () => {
+  it("add to the arrival already chosen, so pressing one twice goes twice as far", () => {
+    // **The behaviour the owner's colleagues asked for.** These read as "+15",
+    // not "15 from now", and a driver reaching for a time half an hour out
+    // presses +15 twice rather than working out which single chip lands there.
+    // Adding to `nowSec` instead made the second press a no-op, which feels
+    // like a dropped tap.
     const onChange = vi.fn();
     render(<ArrivalPicker value={MIDDAY + 900} nowSec={MIDDAY} onChange={onChange} lang="en" />);
 
-    // MIDDAY sits exactly on a 5-minute mark, so `ceilToStep` moves nothing
-    // for +15/+30/+1h -- only "now" needs a nudge, and that nudge is the
-    // MIN_LEAD_SEC floor, not `ceilToStep` rounding.
     fireEvent.click(screen.getByRole("button", { name: t("en").quickPlus15 }));
-    expect(onChange).toHaveBeenLastCalledWith(MIDDAY + 15 * 60);
-    fireEvent.click(screen.getByRole("button", { name: t("en").quickPlus30 }));
-    expect(onChange).toHaveBeenLastCalledWith(MIDDAY + 30 * 60);
-    fireEvent.click(screen.getByRole("button", { name: t("en").quickPlus1h }));
-    expect(onChange).toHaveBeenLastCalledWith(MIDDAY + 60 * 60);
+    expect(onChange).toHaveBeenLastCalledWith(MIDDAY + 900 + 15 * 60);
+  });
 
-    // "Now" is not literally this instant -- the app never promises a
-    // forecast for a time already too close to trust, so it floors to the
-    // nearest arrival the picker will offer at all (`MIN_LEAD_SEC`).
+  it("keeps adding as the value feeds back, the way App drives it", () => {
+    // The uncontrolled assertion above can only prove one press. This is the
+    // real loop: four taps on +15 must land an hour out, not fifteen minutes
+    // out four times.
+    render(<Controlled initial={MIDDAY + 900} nowSec={MIDDAY} />);
+    const plus15 = screen.getByRole("button", { name: t("en").quickPlus15 });
+
+    for (let i = 0; i < 4; i++) fireEvent.click(plus15);
+
+    expect(screen.getByTestId("arrival-time")).toHaveTextContent(
+      formatClock(MIDDAY + 900 + 60 * 60));
+  });
+
+  it("mixes increments, because they are offsets and not presets", () => {
+    render(<Controlled initial={MIDDAY + 900} nowSec={MIDDAY} />);
+    fireEvent.click(screen.getByRole("button", { name: t("en").quickPlus30 }));
+    fireEvent.click(screen.getByRole("button", { name: t("en").quickPlus15 }));
+    fireEvent.click(screen.getByRole("button", { name: t("en").quickPlus1h }));
+
+    expect(screen.getByTestId("arrival-time")).toHaveTextContent(
+      formatClock(MIDDAY + 900 + (30 + 15 + 60) * 60));
+  });
+
+  it("makes `now` the way back, since the others only ever go forward", () => {
+    // Nothing subtracts, so overshooting needs an undo or the driver is stuck
+    // reaching for the selects. "Now" is not literally this instant either --
+    // the app never promises a forecast for a time already too close to trust,
+    // so it floors to the nearest arrival the picker will offer (`MIN_LEAD_SEC`).
+    render(<Controlled initial={MIDDAY + 900} nowSec={MIDDAY} />);
+    fireEvent.click(screen.getByRole("button", { name: t("en").quickPlus1h }));
     fireEvent.click(screen.getByRole("button", { name: t("en").quickNow }));
-    expect(onChange).toHaveBeenLastCalledWith(ceilToStep(MIDDAY + MIN_LEAD_SEC));
+
+    expect(screen.getByTestId("arrival-time")).toHaveTextContent(
+      formatClock(ceilToStep(MIDDAY + MIN_LEAD_SEC)));
+  });
+
+  it("stops at the end of the window, and says so rather than ignoring the tap", () => {
+    // Repeated pressing walks into the 7-day ceiling, and a chip that silently
+    // does nothing reads as a broken button. Disabled is the honest state: the
+    // press is refused visibly, and `aria-disabled` is not a substitute because
+    // the button genuinely must not fire.
+    render(<Controlled initial={MIDDAY + MAX_LEAD_SEC} nowSec={MIDDAY} />);
+    const plus15 = screen.getByRole("button", { name: t("en").quickPlus15 });
+
+    expect(plus15).toBeDisabled();
+    // ...and `now` never is: it is the one chip that can always move.
+    expect(screen.getByRole("button", { name: t("en").quickNow })).toBeEnabled();
+  });
+
+  it("stays live while it can still move the time at all, not only the whole way", () => {
+    // Half an hour of headroom and a chip worth an hour. The question a chip
+    // answers is "will this press change anything?", not "can I have my full
+    // increment?" -- so +1h stays live and lands exactly on the ceiling.
+    // Disabling it would refuse a press that genuinely moves the arrival.
+    render(<Controlled initial={MIDDAY + MAX_LEAD_SEC - 30 * 60} nowSec={MIDDAY} />);
+    const plus1h = screen.getByRole("button", { name: t("en").quickPlus1h });
+    expect(plus1h).toBeEnabled();
+
+    fireEvent.click(plus1h);
+    expect(screen.getByTestId("arrival-time")).toHaveTextContent(
+      formatClock(MIDDAY + MAX_LEAD_SEC));
+    // ...and now there is nowhere left to go, so every increment stands down.
+    expect(plus1h).toBeDisabled();
+    expect(screen.getByRole("button", { name: t("en").quickPlus15 })).toBeDisabled();
+  });
+
+  it("saturates onto the 5-minute clock, so the readout and the selects agree", () => {
+    // `lowerBound` was snapped and `upperBound` was not, which did not matter
+    // while nothing could land on it: the old chips computed `now + 1h` at most.
+    // Pressing repeatedly walks right into it, and `now + 7 days` is whatever
+    // minute it happens to be -- so the readout said 09:29 while the selects
+    // under it said 09:00. Two different arrival times on one screen.
+    // An off-grid `now`, because that is the only kind there is outside a test:
+    // MIDDAY sits on a 5-minute mark, so MIDDAY + 7 days does too and the bug
+    // cannot show. 71 seconds past the mark is what a real clock looks like.
+    const now = MIDDAY + 71;
+    render(<Controlled initial={now} nowSec={now} />);
+    const plus1h = screen.getByRole("button", { name: t("en").quickPlus1h });
+    for (let i = 0; i < 200 && !(plus1h as HTMLButtonElement).disabled; i++) {
+      fireEvent.click(plus1h);
+    }
+
+    const shown = screen.getByTestId("arrival-time").textContent!;
+    const [h, m] = shown.split(":").map(Number) as [number, number];
+    expect(m % 5).toBe(0);
+    // ...and it agrees with what the selects are set to, which is the pair a
+    // driver would read as one answer.
+    expect(Number(hourSelect().value)).toBe(h);
+    expect(Number(minuteSelect().value)).toBe(m);
+    // Still inside the window it is the ceiling of, never one step past it.
+    expect(composeArrival(Number(daySelect().value), h, m))
+      .toBeLessThanOrEqual(now + MAX_LEAD_SEC);
+  });
+
+  it("marks only the chip that was pressed, and replays on a repeat press", () => {
+    // The ripple is keyed rather than class-toggled, because a class is already
+    // there on the second of two fast taps and a running CSS animation does not
+    // replay -- which is the exact case these chips exist for. The key changing
+    // is what a test can see; that it restarts the animation is the browser's
+    // part of the bargain.
+    render(<Controlled initial={MIDDAY + 900} nowSec={MIDDAY} />);
+    const plus15 = screen.getByRole("button", { name: t("en").quickPlus15 });
+    const plus30 = screen.getByRole("button", { name: t("en").quickPlus30 });
+
+    fireEvent.click(plus15);
+    expect(plus15.querySelector(".qchip__ripple")).not.toBeNull();
+    expect(plus30.querySelector(".qchip__ripple")).toBeNull();
+
+    // Pressing its neighbour moves the mark; two chips never ripple at once.
+    fireEvent.click(plus30);
+    expect(plus15.querySelector(".qchip__ripple")).toBeNull();
+    expect(plus30.querySelector(".qchip__ripple")).not.toBeNull();
   });
 
   it("does not change the selection when a pointer is dragged across the chips", () => {

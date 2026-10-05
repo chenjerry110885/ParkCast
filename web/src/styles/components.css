@@ -170,7 +170,26 @@
   background: var(--unknown-soft); color: var(--text); font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums;
   transition: background var(--dur-fast), transform var(--dur-fast);
 }
+/* Firmer than the 0.96 every other chip uses. These are the one control in the
+   app pressed in bursts -- four taps on `+15` to reach an hour -- so the press
+   has to be felt at tap speed, not merely seen. */
+.qchip--bump { position: relative; overflow: hidden; }
+.qchip--bump:active { transform: scale(0.92); }
 .qchip:active { transform: scale(0.96); }
+.qchip:disabled { opacity: 0.45; }
+/* No `:active` transform and no ripple once there is nowhere left to go: the
+   chip must not perform a press it is refusing. */
+.qchip:disabled:active { transform: none; }
+/* The ripple, mounted by `ArrivalPicker` only inside the chip just pressed and
+   keyed so a repeat press replays it. Centred rather than struck from the
+   pointer: these are 44px targets hit with a thumb, where the difference is not
+   visible and the coordinate plumbing would be real. */
+.qchip__ripple {
+  position: absolute; left: 50%; top: 50%; width: 120%; aspect-ratio: 1;
+  translate: -50% -50%; border-radius: 50%; background: var(--accent);
+  pointer-events: none; animation: ripple 420ms var(--ease-out) both;
+}
+.arrival-picker__time { display: inline-block; animation: tick var(--dur-fast) var(--ease-out) both; }
 @media (hover: hover) { .qchip:hover { background: var(--accent-soft); } }
 /* Three native selects, side by side: they wrap onto two rows rather than
    shrinking below a usable width on the narrowest phones this ships to. */

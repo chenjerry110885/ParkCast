@@ -1591,7 +1591,6 @@ export default function App() {
         onPick={pickDestination}
         lang={lang}
         selectedId={selectedLotId}
-        bestId={bestId}
         hoverId={hoverLotId}
         onSelectLot={selectLotOnMap}
         hasCard={hasCard}

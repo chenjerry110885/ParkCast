@@ -22,24 +22,25 @@ describe("toFeatureCollection", () => {
     expect(toFeatureCollection([row(), row({ id: "B" }), row({ id: "C" })]).features).toHaveLength(3);
   });
 
-  it("marks the selected and best lots on their features", () => {
-    // The map draws the halo from these two flags, so they have to be per-lot
-    // properties rather than a paint expression over ids -- and they have to be
-    // independent: the lot the driver tapped is usually not the best one.
-    const fc = toFeatureCollection([row({ id: "A" }), row({ id: "B" })], { selectedId: "A", bestId: "B" });
+  it("marks the selected lot on its feature, and marks nothing else", () => {
+    // The map draws its one halo from this flag, so it has to be a per-lot
+    // property rather than a paint expression over ids.
+    const fc = toFeatureCollection([row({ id: "A" }), row({ id: "B" })], { selectedId: "A" });
     expect(fc.features[0]!.properties.selected).toBe(true);
-    expect(fc.features[0]!.properties.best).toBe(false);
     expect(fc.features[1]!.properties.selected).toBe(false);
-    expect(fc.features[1]!.properties.best).toBe(true);
+
+    // `best` was the second flag here, feeding a second halo layer. Both are
+    // gone: the ranking's pick is said in the list, in words, and a ring on the
+    // map means only that the driver chose this dot. Asserted as an ABSENT key
+    // rather than a false one, because a flag nothing draws is how a removed
+    // feature creeps back.
+    for (const feature of fc.features) expect(feature.properties).not.toHaveProperty("best");
   });
 
   it("marks nothing when it is told nothing, rather than guessing", () => {
     // The map is drawn before a destination exists, so "no marks" is the
     // ordinary case and must not fall back to marking the first row.
     const fc = toFeatureCollection([row({ id: "A" }), row({ id: "B" })]);
-    for (const feature of fc.features) {
-      expect(feature.properties.selected).toBe(false);
-      expect(feature.properties.best).toBe(false);
-    }
+    for (const feature of fc.features) expect(feature.properties.selected).toBe(false);
   });
 });
