@@ -241,15 +241,39 @@ export function resetWeekCache(): void {
  * caller anyway. What must never happen is the absence being filled in with a
  * number computed for some other time; see `App.tsx`'s `probabilityForLot`.
  */
-export function loadWeek(base: string): Promise<WeekTable | null> {
-  const url = artifactUrl(base, "week.bin");
+export function loadWeek(base: string, rosterId?: number): Promise<WeekTable | null> {
+  // `?roster=` names the roster the caller needs, and it is a cache key, not a
+  // request the Worker reads -- it serves whatever is current either way.
+  //
+  // **It is here because the service worker holds this file cache-first for up
+  // to a week** (`WEEK_MAX_AGE_MS`), which is right for a 715 KB aggregate
+  // whose support only grows, and wrong the moment the roster moves underneath
+  // it: `App` discards a table indexed on a different ordering, because using
+  // it would answer every lot with some other car park's history. Discarded, it
+  // left every arrival past the grid's window reading "no data" -- for as long
+  // as the cached copy stayed young, which is to say up to seven days.
+  //
+  // One URL per roster makes a roster change a cache miss by construction, so
+  // the stale copy is never consulted rather than being fetched and thrown
+  // away. The cost is one cache entry per roster change, a few times a week,
+  // which the `VERSION` bump clears with everything else.
+  const url = artifactUrl(base, "week.bin") + (rosterId === undefined ? "" : `?roster=${rosterId}`);
   const pending = weekCache.get(url);
   if (pending) return pending;
   const attempt = (async () => {
     try {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`week.bin: HTTP ${res.status}`);
-      return parseWeek(await res.arrayBuffer());
+      const table = parseWeek(await res.arrayBuffer());
+      // The key asks; only the header answers. A Worker whose collector has not
+      // yet published the new roster's table serves the old one under any key,
+      // and committing that would re-create the bug this parameter removes --
+      // so it is refused like any other unusable body, and dropped from the
+      // memo so a later attempt is free to ask again.
+      if (rosterId !== undefined && table.rosterId !== rosterId) {
+        throw new Error(`week.bin is roster ${table.rosterId}, asked for ${rosterId}`);
+      }
+      return table;
     } catch {
       weekCache.delete(url);
       return null;

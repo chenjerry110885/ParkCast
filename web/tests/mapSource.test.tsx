@@ -1369,7 +1369,10 @@ describe("a car park tapped on the map", () => {
         if (url.endsWith("grid.bin")) {
           return Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(grid) });
         }
-        if (url.endsWith("week.bin")) {
+        // `includes`, not `endsWith`: the app keys this request on the roster
+        // it needs (`week.bin?roster=N`), so that a roster change is a cache
+        // miss rather than a week-old table the service worker keeps serving.
+        if (url.includes("week.bin")) {
           return Promise.resolve({ ok: true, status: 200, arrayBuffer: () => Promise.resolve(week) });
         }
         if (url.endsWith("lots.json")) {
