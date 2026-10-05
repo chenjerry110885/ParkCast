@@ -17,15 +17,27 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOST_ROOT = ROOT.replaceAll("\\", "/"); // Docker Desktop takes forward slashes
 // --user 0:0: the image runs as uid 10001, which cannot pip-install pytest. This
 // throwaway container's mounts are all read-only; never do this to the live collector.
-// scripts/ and web/tests/ are mounted because tests/test_seam_fixture.py reads
-// both: the committed fixture under web/tests/fixtures, and the generator under
-// scripts/ that it re-runs to prove the fixture is still byte-identical. Without
-// them those 9 tests fail on a missing path -- and since python is the FIRST
-// gate here, the whole check aborts before it ever builds, leaving a stale
-// web/dist for the release phase to upload. See scripts/build-stamp.mjs.
+// Four extra read-only mounts, each earning its place, because python is the
+// FIRST gate here: a missing path aborts the whole check before it ever builds,
+// leaving a stale web/dist for the release phase to upload. See build-stamp.mjs.
+//
+//   scripts/ + web/tests/  tests/test_seam_fixture.py reads both -- the committed
+//                          fixture under web/tests/fixtures, and the generator
+//                          under scripts/ that it re-runs to prove the fixture is
+//                          still byte-identical. 9 tests.
+//   web/src/               tests/test_probe_ranker.py reads web/src/rank.ts, the
+//                          SHIPPED ranker, so probe-ranker.py cannot quietly drift
+//                          from the rules it exists to argue with. That is the
+//                          whole point of those tests, so the mount is not
+//                          incidental: without it they fail on a missing path and
+//                          take the release with them. 7 tests.
+//
+// Adding a test that reads a new tree means adding its mount HERE too, or the
+// suite passes locally and aborts the gate.
 const PYTHON_TESTS =
   `docker run --rm --user 0:0 -v "${HOST_ROOT}/src:/repo/src:ro" -v "${HOST_ROOT}/tests:/repo/tests:ro" ` +
   `-v "${HOST_ROOT}/scripts:/repo/scripts:ro" -v "${HOST_ROOT}/web/tests:/repo/web/tests:ro" ` +
+  `-v "${HOST_ROOT}/web/src:/repo/web/src:ro" ` +
   `-v "${HOST_ROOT}/pyproject.toml:/repo/pyproject.toml:ro" -w /repo -e PYTHONDONTWRITEBYTECODE=1 ` +
   'docker-collector:latest sh -c "pip install -q pytest 2>/dev/null; python -m pytest -q -p no:cacheprovider tests/"';
 
