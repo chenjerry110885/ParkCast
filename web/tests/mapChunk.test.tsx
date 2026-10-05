@@ -19,7 +19,7 @@
  * existed. `mapLazy.test.tsx` keeps passing under that mutation, which is
  * precisely why this file is separate from it.
  */
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import { HEADER_SIZE } from "../src/artifacts";
@@ -124,7 +124,30 @@ describe("a cold first render", () => {
     expect(screen.getByRole("button", { name: t("en").useMyLocation })).toBeEnabled();
 
     // ...and the chunk lands on its own, with the placeholder standing down.
-    await screen.findByText(t("en").mapUnavailable);
+    //
+    // Awaited as the module promise, not polled for as text. vitest gives this
+    // file its own module registry, so `import()` here is the same entry in it
+    // that `App`'s `lazy()` is waiting on and has been since `render` above --
+    // the same promise, not a second copy and not a second load, so awaiting it
+    // is done exactly when React's own copy of it is.
+    //
+    // `findByText` stood here and polled the DOM instead, which staked the whole
+    // file on a real `maplibre-gl` import finishing inside `asyncUtilTimeout`'s
+    // one second. Alone on an idle machine that wait measures ~200 ms and the bet
+    // always won; sharing 24 cores with the other 39 files of a full-suite run it
+    // reaches 1,014 ms, and the file failed for nothing the app had done -- which
+    // aborted `scripts/deploy-check.mjs` at its second gate, before the build.
+    //
+    // It has to stay a dynamic `import()` *here*, below the assertions above.
+    // Hoisted to a static import at the top of the file it would pull the chunk
+    // in before the first render ever happened and leave those assertions
+    // passing vacuously: the kind of green the header of this file exists to
+    // refuse. `act` is what lets the resolved chunk render and `MapView`'s
+    // effect report the missing WebGL context before anything is asserted.
+    await act(async () => {
+      await import("../src/map/MapView");
+    });
+    expect(screen.getByText(t("en").mapUnavailable)).toBeInTheDocument();
     expect(screen.queryByTestId("map-loading")).toBeNull();
   });
 });

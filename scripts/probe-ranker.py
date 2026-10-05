@@ -44,8 +44,28 @@ them down, so there is nothing to read. The probe therefore parses the rule's
 whole shape as well as the walk prices, applies it, and refuses to run if the
 shape changes -- see `FLOOR_RULE`.
 
+**The fee is a function of the clock, so two runs at different arrival times
+are not comparable.** Since time-aware pricing shipped, `rank.ts` charges a
+stay by integrating the lot's published fare schedule across it rather than by
+doubling the midpoint of its range -- so a lot whose overnight rate starts at
+22:00 is cheap to the 21:30 arrival and expensive to the 20:00 one, the
+ordering around it moves, and every count below moves with it. Read the
+ARRIVAL line in the header before comparing two reports: same artifacts and
+same arrival, or the diff is measuring the clock.
+
+The rate itself is **not** reimplemented here. `fee_for_stay` calls
+`parkcast.pricing.rate_at`, the same function that parsed the schedule onto the
+wire, because the one thing this file must never do is carry its own copy of a
+rule it is auditing. It carries the integral and `priceOf`'s branching, which
+is copy enough to drift -- so `FEE_RULES` parses those branches out of the
+TypeScript and refuses to run when their shape changes. That tripwire exists
+because this probe spent a stretch reporting inversion counts for the midpoint
+formula after rank.ts had stopped using it.
+
     python scripts/probe-ranker.py
     python scripts/probe-ranker.py --artifacts web/public/artifacts
+    python scripts/probe-ranker.py --arrival 21      # 21:00, the artifacts' own day
+    python scripts/probe-ranker.py --arrival 2026-09-16T21:30
 """
 import argparse
 import json
@@ -55,10 +75,15 @@ import re
 import statistics
 import struct
 import sys
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+
+from parkcast import config, pricing  # noqa: E402
+
 HEADER_FORMAT = "<4sBIIHBBI"
 HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
 UNKNOWN = 255
@@ -207,20 +232,202 @@ def haversine_m(a: tuple[float, float], b: tuple[float, float], radius: float) -
     return 2 * radius * math.asin(math.sqrt(h))
 
 
+class Header(NamedTuple):
+    """`grid.bin`'s header, which `artifacts.encode_grid` wrote.
+
+    The probe used to take `n_lots` and `n_horizons` and drop the rest. Two of
+    the dropped fields turned out to matter: `base_data_ts` is the reading every
+    column is measured from, and `horizon_step_min` is how far apart they are --
+    between them they date any column, which is what lets `--arrival` default to
+    the moment the scored column actually forecasts instead of to a wall clock.
+    """
+
+    magic: bytes
+    version: int
+    generated_at: int
+    base_data_ts: int
+    n_lots: int
+    n_horizons: int
+    horizon_step_min: int
+    roster_id: int
+
+
+def read_header(grid: bytes) -> Header:
+    if len(grid) < HEADER_SIZE:
+        raise SystemExit(f"grid.bin is {len(grid)} bytes, too short to hold a header")
+    header = Header(*struct.unpack(HEADER_FORMAT, grid[:HEADER_SIZE]))
+    if header.magic != b"PCG1":
+        raise SystemExit("grid.bin does not start with the PCG1 magic")
+    return header
+
+
+def column_ts(header: Header, column: int) -> int:
+    """The moment column `column` forecasts.
+
+    Column 0 is the first step past the reading, so the offset is `column + 1`
+    steps -- the same arithmetic the report's own banner prints.
+    """
+    return header.base_data_ts + (column + 1) * header.horizon_step_min * 60
+
+
+def resolve_arrival(raw: str | None, header: Header, column: int) -> datetime:
+    """`--arrival`, as an aware Taipei datetime.
+
+    Three forms, and the default is the interesting one:
+
+    * **omitted** -- the moment the scored column forecasts, read off the
+      artifacts themselves. The probability and the price then refer to the same
+      instant, which `now` would not: scoring the +15 min column while pricing
+      the stay for the present prices a stay nobody in the report is taking. It
+      also keeps a run reproducible -- the same directory probed twice reports
+      the same fees, and a fresh publish moves the arrival only because it moved
+      the forecast too.
+    * **an hour of day**, `0`-`23`, on the artifacts' own date rather than
+      today's, for the same reason: `--arrival 21` has to mean one thing when
+      the directory is re-probed next week.
+    * **an ISO datetime**, naive read as Taipei wall clock. `rate_at` rejects a
+      naive datetime by design -- which hour applies depends entirely on the
+      zone -- so the zone is attached here, where there is a stated default to
+      attach.
+    """
+    if raw is None:
+        return datetime.fromtimestamp(column_ts(header, column), config.TAIPEI_TZ)
+
+    text = raw.strip()
+    if text.isdigit() and len(text) <= 2:
+        hour = int(text)
+        if not 0 <= hour <= 23:
+            raise SystemExit(f"--arrival {raw}: an hour of day runs 0-23")
+        day = datetime.fromtimestamp(header.base_data_ts, config.TAIPEI_TZ).date()
+        return datetime.combine(day, time(hour), tzinfo=config.TAIPEI_TZ)
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise SystemExit(
+            f"--arrival {raw}: expected an hour of day (0-23) or an ISO datetime "
+            f"such as 2026-09-16T21:30"
+        )
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=config.TAIPEI_TZ)
+
+
+# `priceOf`'s three fee branches, as they must read for `Ranker.fee` below to be
+# measuring the shipped ranker. Matched rather than trusted, for the same reason
+# `FLOOR_RULE` is: the probe already spent a stretch reporting the midpoint
+# formula's inversion counts after `priceOf` had stopped using it, and nothing
+# failed, because a wrong fee is still a number and every count built on it is
+# still plausible. Each key names what the branch is for, so a reader whose
+# change trips this is told which rule moved rather than handed a regex.
+FEE_RULES = {
+    "the median fallback for a fare that carries no usable number":
+        re.compile(r"fee:\s*MEDIAN_PRICE_FALLBACK\s*\*\s*EXPECTED_HOURS\s*[,}]"),
+    "the per-entry fare charged once, not per hour":
+        re.compile(r"perEntry:\s*mid\s*,\s*priceKnown:\s*true\s*,\s*fee:\s*mid\s*[,}]"),
+    "the stay integrated across the schedule, midpoint only as a fallback":
+        re.compile(r"fee:\s*stay\s*\?\?\s*mid\s*\*\s*EXPECTED_HOURS\s*[,}]"),
+}
+
+
+def check_fee_rules(source: str) -> None:
+    missing = [name for name, rule in FEE_RULES.items() if rule.search(source) is None]
+    if missing:
+        raise SystemExit(
+            "rank.ts no longer prices a stay the way this probe does -- could not find "
+            + "; ".join(missing)
+            + ". Read `priceOf` in web/src/rank.ts, teach the new shape to `FEE_RULES`, "
+            "and make `Ranker.fee` agree. Until then every fee below, and every count "
+            "built on one, would describe a ranker that is not shipped."
+        )
+
+
+def midpoint(price: dict) -> float | None:
+    """`midpoint` from rank.ts: the middle of a parsed fare, or None.
+
+    `lo ?? hi` rather than `price["lo"]`. Both ends are nullable on the wire and
+    a lot may state only one of them; requiring `lo` sent those lots to the
+    median fallback where the app prices them, and dividing a present-but-null
+    `lo` by two raised instead.
+    """
+    lo = price.get("lo")
+    hi = price.get("hi")
+    lo = hi if lo is None else lo
+    hi = lo if hi is None else hi
+    if not isinstance(lo, (int, float)) or not isinstance(hi, (int, float)):
+        return None
+    if not math.isfinite(lo) or not math.isfinite(hi) or lo < 0 or hi < 0:
+        return None
+    return (lo + hi) / 2
+
+
+def tariff_of(price: dict) -> pricing.Tariff | None:
+    """A lot's published schedule as a `Tariff`, or None when it has none.
+
+    `p.t` is read **positionally** -- `[scope, startHour, endHour, rate]`, the
+    order `artifacts.py` writes and `types.ts` pins. A reorder would resolve
+    every rate against the wrong hours and look entirely plausible doing it.
+    """
+    rows = price.get("t")
+    if not rows:
+        return None
+    return pricing.Tariff(tuple(
+        pricing.Segment(scope, int(start), int(end), int(rate))
+        for scope, start, end, rate in rows
+    ))
+
+
+def fee_for_stay(price: dict, arrival: datetime, expected_hours: float) -> float | None:
+    """`feeForStay` from rank.ts: what the assumed stay actually costs.
+
+    The rate is **not** decided here -- `pricing.rate_at` decides it, including
+    its refusal to price a moment only a holiday-scoped segment covers. This
+    function only integrates: hour block by hour block, at most
+    `expected_hours + 1` lookups, because charging the arrival rate for the
+    whole stay would be as wrong as the midpoint it replaces and a
+    minute-by-minute loop would do 120 lookups a lot.
+
+    None rather than a partial sum when a block has no stated rate. A fee
+    missing an hour is a different quantity, not a smaller one, and the caller
+    falls back to the midpoint.
+    """
+    tariff = tariff_of(price)
+    if tariff is None:
+        return None
+
+    stay_min = expected_hours * 60
+    fee = 0.0
+    done_min = 0.0
+    while done_min < stay_min:
+        at = arrival + timedelta(minutes=done_min)
+        rate = pricing.rate_at(tariff, at)
+        if rate is None:
+            return None
+        local = at.astimezone(config.TAIPEI_TZ)
+        chunk = min(60 - local.minute, stay_min - done_min)
+        fee += rate * (chunk / 60)
+        done_min += chunk
+    return fee
+
+
 class Ranker:
     """`rankLots` from `rank.ts`, faithfully -- including `Math.ceil` on the walk."""
 
-    def __init__(self, doc: dict, grid: bytes, k: dict[str, float]):
+    def __init__(self, doc: dict, grid: bytes, k: dict[str, float], arrival: datetime):
         self.lots = doc["lots"]
         self.k = k
+        # The fee is a function of this, so it is required rather than defaulted:
+        # a ranker that picked its own arrival would be scoring a moment the
+        # report never names. `main` resolves it from the artifacts.
+        self.arrival = arrival
+        # Checked here rather than in `main` so that no path can score a lot
+        # against a fee rule nobody verified -- the probe refuses to build a
+        # ranker it cannot vouch for. See `FEE_RULES`.
+        check_fee_rules(_rank_source())
         # What a minute costs when nobody has asked for anything else. Every
         # method below takes `prices` and falls back to this, so the reports
         # that predate the preference control read the shipped pair unchanged.
         self.prices = Prices(k["WALK_VALUE"], k["DELAY_VALUE"])
-        header = struct.unpack(HEADER_FORMAT, grid[:HEADER_SIZE])
-        if header[0] != b"PCG1":
-            raise SystemExit("grid.bin does not start with the PCG1 magic")
-        self.n_lots, self.n_horizons = header[4], header[5]
+        self.header = read_header(grid)
+        self.n_lots, self.n_horizons = self.header.n_lots, self.header.n_horizons
         self.body = grid[HEADER_SIZE:]
         self._columns: dict[int, list[float | None]] = {}
 
@@ -240,11 +447,28 @@ class Ranker:
         return math.ceil(max(0.0, meters) / self.k["WALK_METERS_PER_MIN"])
 
     def fee(self, price: dict) -> float:
-        """`priceOf`: a per-entry fare is charged once, an hourly one per visit."""
-        if price.get("k") == "unknown" or "lo" not in price:
+        """`priceOf`'s money term, for the stay beginning at `self.arrival`.
+
+        Three branches, in rank.ts's order:
+
+        * a fare carrying no usable number is charged the median, per hour;
+        * a per-entry fare is charged **once** -- 31 lots charge per visit, and
+          treating NT$50 a visit as NT$50 an hour would sink every one of them
+          to the bottom of every list;
+        * anything hourly is charged for the stay, integrated across whatever
+          rate boundaries fall inside it, with the midpoint as the fallback for
+          a stay the schedule cannot price.
+
+        That last branch is why this is time-dependent, and the whole reason
+        `--arrival` exists.
+        """
+        mid = midpoint(price)
+        if mid is None or price.get("k") == "unknown":
             return self.k["MEDIAN_PRICE_FALLBACK"] * self.k["EXPECTED_HOURS"]
-        mid = (price["lo"] + price["hi"]) / 2
-        return mid if price["k"] == "entry" else mid * self.k["EXPECTED_HOURS"]
+        if price.get("k") == "entry":
+            return mid
+        stay = fee_for_stay(price, self.arrival, self.k["EXPECTED_HOURS"])
+        return mid * self.k["EXPECTED_HOURS"] if stay is None else stay
 
     def fallback(self, scored: list[dict], delay: float) -> tuple[float, dict | None]:
         """`fallbackCost` from rank.ts: the cheapest reliable lot scored simply, and which lot."""
@@ -686,6 +910,13 @@ def main() -> int:
                         help="directory holding grid.bin and lots.json")
     parser.add_argument("--column", type=int, default=2,
                         help="horizon column to read (default 2 = +15 min)")
+    parser.add_argument("--arrival", default=None,
+                        help="when the driver arrives: an hour of day (0-23) on the "
+                             "artifacts' own date, or an ISO datetime, read as Taipei "
+                             "wall clock unless it carries an offset. Default: the "
+                             "moment --column forecasts, so price and probability "
+                             "describe the same instant. The fee depends on this, so "
+                             "two runs at different arrivals are not comparable")
     parser.add_argument("--top", type=int, default=10, help="list depth the inversion search reads")
     parser.add_argument("--gap", type=float, default=0.40,
                         help="probability gap that counts as an inversion")
@@ -710,9 +941,18 @@ def main() -> int:
         raise SystemExit(f"could not read artifacts from {base}: {err}")
 
     k = load_constants()
-    ranker = Ranker(doc, grid, k)
+    header = read_header(grid)
+    arrival = resolve_arrival(args.arrival, header, args.column)
+    ranker = Ranker(doc, grid, k, arrival)
+    ahead = (args.column + 1) * header.horizon_step_min
     print(f"ranker calibration probe -- {doc['n_lots']} lots, "
-          f"column {args.column} (+{(args.column + 1) * 5} min)\n")
+          f"column {args.column} (+{ahead} min)")
+    # Printed, not implied. Every fee below is the cost of a stay beginning at
+    # this moment, so a reader diffing two reports has to be able to see whether
+    # they priced the same one.
+    print(f"ARRIVAL {arrival:%Y-%m-%d %H:%M %Z} ({arrival:%a}) -- fees are the cost of "
+          f"a {k['EXPECTED_HOURS']:g}-hour stay from here, so a report at another "
+          f"arrival is not comparable\n")
     report_exchange_rates(k)
     report_spread(ranker, args.column)
     worst = report_inversions(ranker, args.column, args.top, args.gap)
