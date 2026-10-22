@@ -161,3 +161,19 @@ blank, because WebGL is the one thing that needs a frame.
 never by reading `document.hidden`. And when a canvas is blank while the DOM around it is correct,
 suspect the compositor before the code: check `rAF`, `isContextLost()` and the network panel — if
 tiles are arriving as `206`s, the app is fine and the rig is not.
+
+## Two deploy paths — a release ships the reader, not the writer (2026-10-02)
+
+Time-aware pricing was released and the owner still saw every range. The web release had shipped
+the code that *reads* fare schedules; the code that *writes* them lives in the collector, which was
+still running an image built eight days before the feature existed. The plan's release task had
+one step — the web release — because the plan was written as if "release" meant one thing.
+
+The architecture had been explained correctly to the owner one message earlier and still was not
+applied to the plan.
+
+**Rule:** for every change, list which deploy path each touched file ships through — the web/Worker
+release (`deploy:release`) or the collector image (`docker compose ... up -d --build
+--force-recreate`) — and give the plan a step for each path it touches, in the order that never
+leaves a writer ahead of its reader. A reader that tolerates both the old and new artifact goes
+first; the writer goes second.
