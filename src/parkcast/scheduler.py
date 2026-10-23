@@ -92,6 +92,18 @@ def _read_current_week(out_dir: Path, city: str) -> bytes | None:
         return None
 
 
+def _week_version(blob: bytes | None) -> int | None:
+    """The schema version a published week.bin was written in, or None if it
+    cannot say -- the same contract as `_week_roster` beside it."""
+    if blob is None:
+        return None
+    try:
+        header = artifacts.decode_week_header(blob[:artifacts.WEEK_HEADER_SIZE])
+    except struct.error:
+        return None
+    return header["version"] if header["magic"] == artifacts.WEEK_MAGIC else None
+
+
 def _week_roster(blob: bytes | None) -> int | None:
     """The roster a published week.bin was indexed on, or None if it cannot say.
 
@@ -191,7 +203,13 @@ def _publish_week(
     # cannot corrupt the site -- it just fails, every five minutes, until
     # midnight. Live on 2026-10-03: Taipei went 1,127 -> 1,130 lots mid-day and
     # the same 757,362 bytes were rejected 15 times.
-    if _week_already_built_today(blob_on_disk, today) and _week_roster(blob_on_disk) == roster:
+    # And a third: the format. A table written before a schema change is not
+    # today's table however recently it was built -- the holiday release
+    # recreates the collector mid-day over a version-1 file, and re-offering it
+    # would keep the holiday slot off the site until midnight.
+    if (_week_already_built_today(blob_on_disk, today)
+            and _week_roster(blob_on_disk) == roster
+            and _week_version(blob_on_disk) == artifacts.WEEK_VERSION):
         blob = blob_on_disk
     else:
         cells = build_week_cells(history, lot_ids)

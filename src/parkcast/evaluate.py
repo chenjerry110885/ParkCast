@@ -51,7 +51,7 @@ import pyarrow.parquet as pq
 from parkcast import config, ids, liveness
 from parkcast.compact import SLOTS_PER_DAY, SLOT_SECONDS, day_bounds
 from parkcast.forecast import (Blend, Climatology, Persistence, by_city,
-                               empty_history, load_history, week_bucket)
+                               day_bucket, empty_history, load_history)
 
 # Feed publishes at data_ts minutes = 3 (mod 5), i.e. 180s into each 5-minute
 # slot. Verified against the hot store, not assumed -- see the module docstring.
@@ -387,7 +387,7 @@ def backtest(
             if not actual:
                 continue
             bucket_counts = history.counts.bucket
-            key_bucket = week_bucket(target)
+            key_bucket = day_bucket(target)   # the key the counts are filed under
             for lot_id, free in actual.items():
                 if lot_id in withheld:
                     result.withheld += 1

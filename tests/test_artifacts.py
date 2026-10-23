@@ -3,7 +3,7 @@ import struct
 
 import pytest
 
-from parkcast import artifacts
+from parkcast import artifacts, config
 from parkcast.artifacts import (CITIES_NAME, HEADER_SIZE, MAGIC, VERSION,
                                 build_cities_json, build_lots_json, city_entry,
                                 decode_header, encode_grid, publish,
@@ -443,24 +443,29 @@ def test_read_cities_treats_anything_unusable_as_nothing_to_carry(tmp_path, cont
 
 
 def test_encode_week_round_trips_a_known_cell():
-    cells = {"A": [(None, 0)] * 336, "B": [(None, 0)] * 336}
+    n = config.WEEK_BUCKETS             # 384: the clock week plus the holiday day
+    cells = {"A": [(None, 0)] * n, "B": [(None, 0)] * n}
     cells["A"][5] = (0.86, 12)
     cells["B"][5] = (0.0, 300)          # a real zero, and support past the cap
+    cells["A"][340] = (0.41, 7)         # a holiday cell, past the clock week
     blob = artifacts.encode_week(["A", "B"], cells, built_ts=1789600000)
 
     header = artifacts.decode_week_header(blob)
     assert header["magic"] == artifacts.WEEK_MAGIC
     assert header["n_lots"] == 2
-    assert header["n_buckets"] == 336
+    assert header["n_buckets"] == 384
     assert header["bucket_min"] == 30
     assert header["roster_id"] == artifacts.roster_id(["A", "B"])
     body = blob[artifacts.WEEK_HEADER_SIZE:]
-    assert len(body) == 2 * 336 * 2
+    assert len(body) == 2 * 384 * 2
 
     def cell(i, b):
-        off = (i * 336 + b) * 2
+        off = (i * 384 + b) * 2
         return body[off], body[off + 1]
     assert cell(0, 5) == (86, 12)
+    # The holiday slot is laid out in the same row as the lot's clock week, so a
+    # reader striding by 336 would land this on lot B's bucket 4.
+    assert cell(0, 340) == (41, 7)
     # A real zero is a probability, not an absence: 0, never the unknown sentinel.
     assert cell(1, 5) == (0, 255)
     assert cell(0, 6) == (255, 0)        # unknown
@@ -481,7 +486,7 @@ def test_encode_week_names_the_missing_lot():
     contains `B`), so the assertion is on text only the diagnostic produces.
     """
     with pytest.raises(KeyError, match="missing from cells"):
-        artifacts.encode_week(["A", "B"], {"A": [(None, 0)] * 336}, built_ts=1)
+        artifacts.encode_week(["A", "B"], {"A": [(None, 0)] * config.WEEK_BUCKETS}, built_ts=1)
 
 
 def test_week_name_follows_the_shard_convention():

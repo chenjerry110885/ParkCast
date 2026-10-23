@@ -21,13 +21,13 @@ def _bucket_timestamp(bucket: int) -> int:
     """A Unix timestamp `ts` such that `forecast.week_bucket(ts) == bucket`.
 
     `week_bucket` computes `((ts + 8h) // 60 // CLIMATOLOGY_BUCKET_MIN) %
-    WEEK_BUCKETS` -- it anchors on the bare Unix epoch and does no calendar
+    CLOCK_BUCKETS` -- it anchors on the bare Unix epoch and does no calendar
     arithmetic, so bucket 0 is Thursday 00:00 Taipei (1970-01-01 was a
     Thursday), not Monday. Reimplementing a Monday-anchored week here would
     silently disagree with it. Instead this inverts that exact arithmetic:
     setting `local_min = bucket * CLIMATOLOGY_BUCKET_MIN` lands the inner
     `// CLIMATOLOGY_BUCKET_MIN` back on `bucket` exactly, and `bucket` is
-    always already in `range(WEEK_BUCKETS)` so the outer `% WEEK_BUCKETS` is a
+    always already in `range(CLOCK_BUCKETS)` so the outer `% CLOCK_BUCKETS` is a
     no-op; undoing the same +8h Taipei shift `week_bucket` applies recovers a
     real epoch timestamp. `test_week.py` asserts this round-trips for every
     bucket in the week against `week_bucket` itself, not against this
@@ -75,8 +75,10 @@ def build_week_cells(
     for lot_id in lot_ids:
         row: list[tuple[float | None, int]] = []
         for bucket in range(config.WEEK_BUCKETS):
-            ts = _bucket_timestamp(bucket)
-            probability = climatology.predict(lot_id, ts, horizon_min=0)
+            # By bucket, not by a representative timestamp: no clock timestamp
+            # reaches the holiday slot (336..383), so asking `predict` at one
+            # would fill every holiday cell with an ordinary day's answer.
+            probability = climatology.predict_bucket(lot_id, bucket)
             support = bucket_counts.get((lot_id, bucket), (0, 0))[1]
             row.append((probability, support))
         cells[lot_id] = row

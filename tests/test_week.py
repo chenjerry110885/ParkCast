@@ -34,7 +34,9 @@ def write(conn, ts, lot="taipei:TPE0001", free=5, capacity=50):
 
 
 def test_bucket_timestamp_round_trips_every_bucket_of_the_week():
-    for bucket in range(config.WEEK_BUCKETS):
+    # The CLOCK week: the holiday slot (336..383) is no clock time at all, and
+    # `build_week_cells` reaches it by bucket, never by timestamp.
+    for bucket in range(config.CLOCK_BUCKETS):
         assert week_bucket(_bucket_timestamp(bucket)) == bucket
 
 

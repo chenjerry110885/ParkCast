@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from parkcast import config, store
+from parkcast import config, holidays, store
 from parkcast.compact import compact_day, day_bounds
 from parkcast.feed import TS_FEED, FeedSnapshot, Observation
 from parkcast.forecast import (Blend, Climatology, Persistence, by_city,
@@ -370,8 +370,16 @@ def test_climatology_prefers_the_bucket_rate_over_the_lot_rate(conn):
     lot's 0.5, so what is pinned is that the answer is driven by the bucket and
     sits well clear of the lot rate -- not that it is exactly 1.0.
     """
-    target_base = 1788537600
+    # Wednesdays from 2026-07-01, 00:00 Taipei. This was a run of Saturdays from
+    # 2026-09-05, and its sixth week was 2026-10-10 -- National Day, which now
+    # files under the holiday slot and left the bucket with 9 samples, not 10.
+    # The behaviour was right and the fixture was not: it pins the fallback
+    # order, and a holiday inside it was measuring something else.
+    target_base = 1782835200
     other_base = target_base + 6 * 3600  # a fixed offset lands in a different bucket
+    crosses_a_holiday = any(holidays.is_holiday_ts(base + week * 7 * 86400)
+                            for base in (target_base, other_base) for week in range(16))
+    assert not crosses_a_holiday, "test setup requires no public holiday among the writes or the target"
 
     assert week_bucket(other_base) != week_bucket(target_base), \
         "test setup requires the two groups of writes to land in different buckets"

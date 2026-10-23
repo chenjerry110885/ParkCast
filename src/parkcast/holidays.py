@@ -46,6 +46,26 @@ def all_holidays() -> list[date]:
     return sorted(_calendar()[2])
 
 
+_EPOCH = date(1970, 1, 1)
+_TAIPEI_OFFSET = 8 * 3600
+
+
+@cache
+def _holiday_day_numbers() -> frozenset[int]:
+    return frozenset((d - _EPOCH).days for d in _calendar()[2])
+
+
+def is_holiday_ts(ts: int) -> bool:
+    """`is_holiday(taipei_date(ts))`, in integer arithmetic only.
+
+    This is on the hot path: `forecast.Counts.add` calls it once per row of a
+    corpus that runs to millions, and building a `datetime` per row would cost
+    more than the whole of the rest of the fold. Taipei has no DST, so the
+    Taipei day number is exact integer division.
+    """
+    return (ts + _TAIPEI_OFFSET) // 86400 in _holiday_day_numbers()
+
+
 def taipei_date(ts: int) -> date:
     """The Taipei calendar date of an epoch-seconds timestamp -- never UTC's,
     which would file the first eight hours of every holiday under the day

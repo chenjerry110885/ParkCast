@@ -102,14 +102,32 @@ HORIZON_COUNT = 24            # +5 min through +120 min
 # counts would depend on which side of a midnight compaction each reading was
 # seen on, and would shift under themselves as days rolled into the cold store.
 CLIMATOLOGY_BUCKET_MIN = 30
-# Buckets in one full week at that width (336 at 30 min). This is the one
-# place the number is computed: `forecast.BUCKETS_PER_WEEK` is an alias of it,
-# and `artifacts.encode_week` reads it through `config` rather than `forecast`
-# to keep the artifact layer from depending on the forecasting layer. Two
-# independent copies of `7 * 24 * 60 // CLIMATOLOGY_BUCKET_MIN` would agree
-# today and silently diverge the moment either the bucket width changed or the
-# arithmetic was "simplified" in only one of the two places.
-WEEK_BUCKETS = 7 * 24 * 60 // CLIMATOLOGY_BUCKET_MIN
+# Half-hours in a day (48) and in a clock week (336). This is the one place
+# either is computed: `forecast.BUCKETS_PER_WEEK` is an alias of the second, and
+# `artifacts.encode_week` reads its sizes through `config` rather than
+# `forecast` to keep the artifact layer from depending on the forecasting
+# layer. Two independent copies of the arithmetic would agree today and
+# silently diverge the moment the bucket width changed in only one of them.
+BUCKETS_PER_DAY = 24 * 60 // CLIMATOLOGY_BUCKET_MIN
+CLOCK_BUCKETS = 7 * BUCKETS_PER_DAY
+# The published table has one more day than the clock does: public holidays.
+# Day slots 0-6 are the clock's (0 is THURSDAY, because 1970-01-01 was one --
+# see `forecast.week_bucket`), and slot 7 is every holiday, whatever weekday it
+# fell on. `holidays.py` says which dates those are.
+#
+# CLOCK_BUCKETS and WEEK_BUCKETS are deliberately two names. `week_bucket`
+# reduces modulo the clock week; reducing modulo the table instead would shift
+# every bucket after the first week by a day and nothing would fail -- the
+# table would just describe the wrong days.
+HOLIDAY_SLOT = 7
+WEEK_BUCKETS = CLOCK_BUCKETS + BUCKETS_PER_DAY
+# The day slot a holiday cell shrinks toward, at the same half-hour, instead of
+# toward the lot's flat rate. A lot sees about 22 holidays a year against 52 of
+# each weekday, so its holiday cells are thin for a long time, and the day a
+# holiday most resembles is a far better starting shape than the lot average.
+# 3 is Sunday (slot 0 is Thursday). Task 3 of the holiday plan measures which
+# slot it should be; see `scripts/holiday-prior.py`.
+HOLIDAY_PRIOR_SLOT = 3
 # Hierarchical shrinkage strengths, in pseudo-observations. A 30-min bucket at a
 # 5-min cadence accrues only 6 observations per week, so an unsmoothed bucket
 # rate is 0/6 or 6/6 far more often than not: measured, 96.1% of bucket rates

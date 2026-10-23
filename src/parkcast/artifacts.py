@@ -27,6 +27,11 @@ HEADER_SIZE = struct.calcsize(HEADER_FORMAT)   # n_lots, n_horizons,
                                                # horizon_step_min, roster_id
 
 WEEK_MAGIC = b"PCW1"
+#: The week table's own schema version, separate from the grid's `VERSION`.
+#: 1 = 336 clock buckets. 2 = 384: the clock week plus one day of public
+#: holidays (`config.HOLIDAY_SLOT`). The Worker and the app accept both, for as
+#: long as a browser can still hold a version-1 table in its cache.
+WEEK_VERSION = 2
 WEEK_HEADER_FORMAT = "<4sBIHHBI"    # magic, version, built_ts, n_lots,
 WEEK_HEADER_SIZE = struct.calcsize(WEEK_HEADER_FORMAT)  # n_buckets, bucket_min, roster_id
 
@@ -203,7 +208,7 @@ def encode_week(
             body[off] = _week_prob_byte(probability)
             body[off + 1] = min(255, support)
     header = struct.pack(
-        WEEK_HEADER_FORMAT, WEEK_MAGIC, VERSION, built_ts,
+        WEEK_HEADER_FORMAT, WEEK_MAGIC, WEEK_VERSION, built_ts,
         n_lots, config.WEEK_BUCKETS, config.CLIMATOLOGY_BUCKET_MIN, roster_id(lot_ids),
     )
     return header + bytes(body)

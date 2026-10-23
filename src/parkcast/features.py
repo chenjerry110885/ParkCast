@@ -43,7 +43,7 @@ from collections.abc import Sequence
 from zlib import crc32
 
 from parkcast import config, pricing
-from parkcast.forecast import Climatology, History, week_bucket
+from parkcast.forecast import Climatology, History, day_bucket, week_bucket
 
 #: Buckets a string category is hashed into. Taipei has ~12 districts and a
 #: handful of lot types, so collisions at 1024 are vanishingly unlikely; the
@@ -171,7 +171,7 @@ def row(
     free_ratio = (None if free_now is None or not capacity
                   else min(1.0, free_now / capacity))
 
-    bucket = history.counts.bucket.get((lot.id, week_bucket(target_ts)), (0, 0))
+    bucket = history.counts.bucket.get((lot.id, day_bucket(target_ts)), (0, 0))
     lot_counter = history.counts.lot.get(lot.id, (0, 0))
 
     price = pricing.parse_fare(lot.fare_text)

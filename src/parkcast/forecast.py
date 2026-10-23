@@ -29,7 +29,7 @@ from heapq import heappush, heappushpop
 from pathlib import Path
 from typing import Protocol
 
-from parkcast import config, ids
+from parkcast import config, holidays, ids
 
 log = logging.getLogger("parkcast.forecast")
 
@@ -351,11 +351,10 @@ def _read_parquet_day(path: Path):
                 yield lot_id, start + slot * SLOT_SECONDS, free
 
 
-# Alias of `config.WEEK_BUCKETS`. `artifacts.encode_week` needs the identical
-# count and reaches it through `config` directly -- `artifacts` must not import
-# this module -- so the arithmetic lives in exactly one place and this name
-# just carries it into the forecasting layer where `week_bucket` needs it too.
-BUCKETS_PER_WEEK = config.WEEK_BUCKETS
+# Alias of `config.CLOCK_BUCKETS` -- the CLOCK week, 336, and not the published
+# table's 384. `week_bucket` reduces modulo this; see `config` for why the two
+# are deliberately different names.
+BUCKETS_PER_WEEK = config.CLOCK_BUCKETS
 
 
 def week_bucket(ts: int) -> int:
@@ -366,6 +365,25 @@ def week_bucket(ts: int) -> int:
     """
     local_min = (ts + 8 * 3600) // 60
     return int(local_min // config.CLIMATOLOGY_BUCKET_MIN) % BUCKETS_PER_WEEK
+
+
+def day_bucket(ts: int) -> int:
+    """The climatology bucket `ts` is filed under: its clock bucket, unless its
+    Taipei date is a public holiday, in which case the holiday slot at the same
+    half-hour (`config.CLOCK_BUCKETS + half_hour_of_day`).
+
+    This, not `week_bucket`, is the key every climatology count and lookup uses.
+    `week_bucket` stays the pure clock function it was, for the callers that
+    really do mean "which weekday and half-hour".
+
+    Past the end of the committed calendar no date is a holiday, so the result
+    is exactly the clock bucket -- the behaviour from before holidays existed.
+    """
+    if holidays.is_holiday_ts(ts):
+        local_min = (ts + 8 * 3600) // 60
+        half_hour = int(local_min // config.CLIMATOLOGY_BUCKET_MIN) % config.BUCKETS_PER_DAY
+        return config.CLOCK_BUCKETS + half_hour
+    return week_bucket(ts)
 
 
 class Counts:
@@ -385,7 +403,7 @@ class Counts:
 
     def add(self, lot_id: str, ts: int, free: int) -> None:
         hit = 1 if free >= 1 else 0
-        for counter in (self.bucket[(lot_id, week_bucket(ts))],
+        for counter in (self.bucket[(lot_id, day_bucket(ts))],
                         self.lot[lot_id], self.glob):
             counter[0] += hit
             counter[1] += 1
@@ -554,6 +572,18 @@ class Climatology:
         self._global = history.counts.glob
 
     def predict(self, lot_id: str, target_ts: int, horizon_min: int) -> float | None:
+        return self.predict_bucket(lot_id, day_bucket(target_ts))
+
+    def predict_bucket(self, lot_id: str, bucket: int) -> float | None:
+        """The shrunk rate for one bucket of `config.WEEK_BUCKETS`.
+
+        A clock bucket shrinks toward the lot rate, as it always has. A holiday
+        bucket (`>= config.CLOCK_BUCKETS`) shrinks toward the same half-hour of
+        `config.HOLIDAY_PRIOR_SLOT` instead -- itself a clock bucket, so this
+        recurses exactly once. With no holiday history the holiday cell IS that
+        day's cell; each holiday observed pulls it off by one pseudo-observation
+        in `CLIMATOLOGY_BUCKET_PRIOR + n`.
+        """
         if not self._global[1]:
             return None
         # Jeffreys, i.e. _shrink(self._global, 0.5, 1.0): the uniform-ish prior
@@ -566,10 +596,15 @@ class Climatology:
             return rate
         rate = _shrink(lot, rate, config.CLIMATOLOGY_LOT_PRIOR)
 
-        bucket = self._bucket.get((lot_id, week_bucket(target_ts)))
-        if bucket is None:
+        if bucket >= config.CLOCK_BUCKETS:
+            prior_bucket = (config.HOLIDAY_PRIOR_SLOT * config.BUCKETS_PER_DAY
+                            + bucket % config.BUCKETS_PER_DAY)
+            rate = self.predict_bucket(lot_id, prior_bucket)
+
+        counter = self._bucket.get((lot_id, bucket))
+        if counter is None:
             return rate
-        return _shrink(bucket, rate, config.CLIMATOLOGY_BUCKET_PRIOR)
+        return _shrink(counter, rate, config.CLIMATOLOGY_BUCKET_PRIOR)
 
 
 class Persistence:

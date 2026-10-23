@@ -1826,6 +1826,38 @@ def test_publish_artifacts_offers_the_weeks_current_blob_on_every_tick(tmp_path,
     assert third != first, "a day rollover offers a genuinely new blob"
 
 
+def test_a_restart_over_todays_version_one_table_rebuilds_it_as_version_two(tmp_path):
+    """The restart the holiday release causes. The collector is recreated
+    mid-day with a week.bin built earlier TODAY in the old format -- 336 clock
+    buckets, no holiday day. The daily gate asked "built today?" and "this
+    roster?", both yes, so it would re-offer the old table until midnight: the
+    holiday slot would not exist on the site for the rest of the day, and the
+    app would read every holiday as an ordinary weekday.
+
+    A table in the wrong format is not today's table, whenever it was built."""
+    import struct
+    conn = store.connect(tmp_path / "t.sqlite")
+    _seed(conn, date(2026, 9, 4), lot="A")
+    out_dir = tmp_path / "artifacts"
+    out_dir.mkdir()
+
+    day = date(2026, 9, 17)
+    roster = artifacts.roster_id(["A"])
+    old = struct.pack(artifacts.WEEK_HEADER_FORMAT, artifacts.WEEK_MAGIC, 1,
+                      _taipei_noon(day), 1, config.CLOCK_BUCKETS,
+                      config.CLIMATOLOGY_BUCKET_MIN, roster) + bytes(config.CLOCK_BUCKETS * 2)
+    (out_dir / "week.bin").write_bytes(old)
+    up = _RecordingUploader()
+
+    scheduler.publish_artifacts(conn, [_make_lot("A")], out_dir, uploader=up, today=day)
+    conn.close()
+
+    offered = up.week_offers[-1][0]
+    header = artifacts.decode_week_header(offered[:artifacts.WEEK_HEADER_SIZE])
+    assert (header["version"], header["n_buckets"]) == (artifacts.WEEK_VERSION, config.WEEK_BUCKETS)
+    assert (out_dir / "week.bin").read_bytes() == offered, "rebuilt on disk too"
+
+
 def test_a_restart_with_a_valid_todays_week_bin_does_not_rebuild_it(tmp_path):
     """The restart case R6 exists for: a fresh process (nothing in memory),
     but a valid week.bin already on disk from earlier today -- the operator
