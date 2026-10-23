@@ -82,10 +82,10 @@ function seamWeek(): Uint8Array {
  * rather than waiting for a real roster to cross the boundary in production.
  */
 const EXPECTED = {
-  version: 1,
+  version: 2,
   builtTs: 1789502400,
   nLots: 4,
-  nBuckets: 336,
+  nBuckets: 384, // the clock week's 336 + one day of public holidays
   bucketMin: 30,
   rosterId: 2444777626,
 } as const;
@@ -107,7 +107,7 @@ describe("week.bin, as the Python encoder writes it", () => {
     // out so a failure says which of the two sides moved.
     const week = seamWeek();
     expect(week.byteLength).toBe(WEEK_HEADER_SIZE + EXPECTED.nLots * WEEK_BUCKETS * 2);
-    expect(week.byteLength).toBe(2706);
+    expect(week.byteLength).toBe(3090); // 18 + 4 lots x 384 x 2
   });
 
   it("carries the version, bucket count and bucket width the Worker demands", () => {

@@ -181,6 +181,11 @@ export interface WeekTable {
   rosterId: number;
   /** Unix seconds the table was built, not when any one reading landed. */
   builtTs: number;
-  /** Row-major, `nLots * 336 * 2` bytes: `(percent | UNKNOWN, support)` pairs. */
+  /**
+   * Buckets per lot row. 336 is the clock week (schema version 1); 384 adds a
+   * day of public holidays (version 2). Lookups stride by this, never by 336.
+   */
+  nBuckets: 336 | 384;
+  /** Row-major, `nLots * nBuckets * 2` bytes: `(percent | UNKNOWN, support)` pairs. */
   cells: Uint8Array;
 }

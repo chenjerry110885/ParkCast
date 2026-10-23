@@ -112,9 +112,23 @@ describe("validateWeek", () => {
     expect(validateWeek(week.week).ok).toBe(true);
   });
 
+  it("accepts both the holiday table and the clock-only one before it", () => {
+    // The collector writes version 2 after the holiday release; until it is
+    // recreated it still writes version 1, and the Worker ships first. Refusing
+    // either would leave the site with no week table across the changeover.
+    expect(validateWeek(buildWeek({ version: 2, nBuckets: 384 })).ok).toBe(true);
+    expect(validateWeek(buildWeek({ version: 1, nBuckets: 336 })).ok).toBe(true);
+  });
+
   it.each<[string, () => Uint8Array]>([
     ["bad magic", () => buildWeek({ magic: [0x51, 0x43, 0x57, 0x31] })],
-    ["unknown schema version", () => buildWeek({ version: 2 })],
+    ["unknown schema version", () => buildWeek({ version: 3 })],
+    // Each version has exactly one bucket count: 1 is the clock week (336), 2
+    // adds the holiday day (384). A header pairing them the other way round
+    // describes a table nobody wrote, and indexing it with either stride would
+    // attach every lot's climatology to the wrong cells.
+    ["version 2 with version 1's bucket count", () => buildWeek({ version: 2, nBuckets: 336 })],
+    ["version 1 with version 2's bucket count", () => buildWeek({ version: 1, nBuckets: 384 })],
     ["truncated body", () => buildWeek({ bodyLength: 3 * 336 * 2 - 1 })],
     ["oversized body", () => buildWeek({ bodyLength: 3 * 336 * 2 + 1 })],
     // Body re-sized to match the wrong bucket count/size, so only the field
@@ -131,7 +145,7 @@ describe("validateWeek", () => {
     const result = validateWeek(week.week);
     expect(result.ok).toBe(true);
     expect(result.ok && result.header).toEqual({
-      version: 1, builtTs: NOW - 3600, nLots: 5, nBuckets: 336, bucketMin: 30, rosterId: 99,
+      version: 2, builtTs: NOW - 3600, nLots: 5, nBuckets: 384, bucketMin: 30, rosterId: 99,
     });
   });
 });

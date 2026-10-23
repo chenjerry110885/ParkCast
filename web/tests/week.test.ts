@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { BLEND_HALF_LIFE_MIN, HEADER_SIZE, WEEK_UNKNOWN, blend, parseWeek, probabilityAt, weekBucket } from "../src/week";
+import { BLEND_HALF_LIFE_MIN, HEADER_SIZE, WEEK_UNKNOWN, blend, dayBucket, parseWeek, probabilityAt, weekBucket } from "../src/week";
 
 // Resolved through `fileURLToPath` rather than `new URL("...", import.meta.url)`:
 // Vite rewrites that literal pattern at transform time into an asset URL, which
@@ -23,12 +23,16 @@ const WEEK_BUCKET_FIXTURE: { rows: { ts: number; bucket: number; label: string }
 );
 
 /** Build a week table the same way the Python encoder does: little-endian, no padding. */
-function makeWeek(nLots: number, cellsPerLot: Uint8Array[], { rosterId = 42, builtTs = 1788675094 } = {}): ArrayBuffer {
-  const N_BUCKETS = 336;
+function makeWeek(
+  nLots: number,
+  cellsPerLot: Uint8Array[],
+  { rosterId = 42, builtTs = 1788675094, version = 1, nBuckets = 336 } = {},
+): ArrayBuffer {
+  const N_BUCKETS = nBuckets;
   const buf = new ArrayBuffer(HEADER_SIZE + nLots * N_BUCKETS * 2);
   const dv = new DataView(buf);
   new Uint8Array(buf).set(new TextEncoder().encode("PCW1"), 0);
-  dv.setUint8(4, 1);
+  dv.setUint8(4, version);
   dv.setUint32(5, builtTs, true);
   dv.setUint16(9, nLots, true);
   dv.setUint16(11, N_BUCKETS, true);
@@ -156,7 +160,7 @@ describe("probabilityAt", () => {
     row[bucket * 2 + 1] = 7;
     const table = parseWeek(makeWeek(1, [row]));
     expect(weekBucket(mondayMidnight)).toBe(bucket);
-    expect(probabilityAt(table, 0, mondayMidnight)).toEqual({ p: 0.42, support: 7 });
+    expect(probabilityAt(table, 0, mondayMidnight)).toEqual({ p: 0.42, support: 7, holiday: false });
     // A different bucket on the same row reads its own (zeroed) cell.
     expect(probabilityAt(table, 0, mondayMidnight - 3600).p).toBe(0);
   });
@@ -217,5 +221,69 @@ describe("blend", () => {
     expect(blend(5, 0.2, -60)).toBe(blend(5, 0.2, 0));
     expect(blend(5, 0.2, -60)).toBe(1);
     expect(blend(0, 0.9, -120)).toBe(blend(0, 0.9, 0));
+  });
+});
+
+/** Taipei wall clock as epoch SECONDS (UTC+8, no DST). */
+const taipeiAt = (y: number, m: number, d: number, h: number, min: number) =>
+  Math.floor(Date.UTC(y, m - 1, d, h, min) / 1000) - 8 * 3600;
+/** National Day 2026 (a Saturday) at 14:10: half-hour 28. */
+const NATIONAL_DAY = taipeiAt(2026, 10, 10, 14, 10);
+/** The clock bucket that Saturday afternoon has: slot 2 (Thursday is 0). */
+const SAT_1400 = 2 * 48 + 28;
+const HOLIDAY_1400 = 336 + 28;
+
+/** A row of `n` buckets, every cell `(fill, 6)`, with chosen cells overridden. */
+function row(n: number, fill: number, cells: Record<number, [number, number]> = {}): Uint8Array {
+  const out = new Uint8Array(n * 2);
+  for (let b = 0; b < n; b++) { out[b * 2] = fill; out[b * 2 + 1] = 6; }
+  for (const [b, [p, s]] of Object.entries(cells)) { out[Number(b) * 2] = p; out[Number(b) * 2 + 1] = s; }
+  return out;
+}
+
+describe("the holiday table (version 2, 384 buckets)", () => {
+  it("parses both versions, each with its own bucket count", () => {
+    expect(parseWeek(makeWeek(1, [row(384, 50)], { version: 2, nBuckets: 384 })).nBuckets).toBe(384);
+    expect(parseWeek(makeWeek(1, [row(336, 50)])).nBuckets).toBe(336);
+  });
+
+  it("refuses a version paired with the other's bucket count", () => {
+    expect(() => parseWeek(makeWeek(1, [row(336, 50)], { version: 2, nBuckets: 336 }))).toThrow();
+    expect(() => parseWeek(makeWeek(1, [row(384, 50)], { version: 1, nBuckets: 384 }))).toThrow();
+  });
+
+  it("reads the holiday slot on a holiday", () => {
+    const table = parseWeek(makeWeek(2, [
+      row(384, 50, { [HOLIDAY_1400]: [73, 12], [SAT_1400]: [20, 30] }),
+      row(384, 50, { [HOLIDAY_1400]: [61, 4] }),
+    ], { version: 2, nBuckets: 384 }));
+
+    expect(dayBucket(NATIONAL_DAY, table)).toBe(HOLIDAY_1400);
+    expect(probabilityAt(table, 0, NATIONAL_DAY)).toEqual({ p: 0.73, support: 12, holiday: true });
+    // Lot 1 at the same cell: a 336 stride would land this in lot 0's row.
+    expect(probabilityAt(table, 1, NATIONAL_DAY).p).toBe(0.61);
+  });
+
+  it("falls back to the clock bucket on a table that has no holiday day", () => {
+    // A browser can hold a version-1 table for a week after the collector moves
+    // to version 2. It must read it as what it is -- 336 buckets a row -- and
+    // answer a holiday from its clock bucket, never reach past the row.
+    const table = parseWeek(makeWeek(2, [
+      row(336, 50, { [SAT_1400]: [20, 30] }),
+      row(336, 90, { [SAT_1400]: [33, 6] }),
+    ]));
+
+    expect(dayBucket(NATIONAL_DAY, table)).toBe(SAT_1400);
+    expect(probabilityAt(table, 0, NATIONAL_DAY)).toEqual({ p: 0.2, support: 30, holiday: false });
+    // Lot 1's own Saturday cell. A 384 stride would read lot 1's bucket 172.
+    expect(probabilityAt(table, 1, NATIONAL_DAY).p).toBe(0.33);
+  });
+
+  it("claims nothing past the end of the calendar", () => {
+    const table = parseWeek(makeWeek(1, [row(384, 50)], { version: 2, nBuckets: 384 }));
+    const nationalDay2028 = taipeiAt(2028, 10, 10, 14, 10);
+
+    expect(dayBucket(nationalDay2028, table)).toBe(weekBucket(nationalDay2028));
+    expect(probabilityAt(table, 0, nationalDay2028).holiday).toBe(false);
   });
 });

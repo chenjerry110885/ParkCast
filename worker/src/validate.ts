@@ -113,9 +113,20 @@ export function validatePair(grid: Uint8Array, lotsBytes: Uint8Array): PairResul
  * n_lots, n_buckets, bucket_min, roster_id -- 4+1+4+2+2+1+4 = 18 bytes, no
  * padding (`<` is unaligned little-endian), matching `WEEK_HEADER_SIZE` there. */
 export const WEEK_HEADER_SIZE = 18;
-export const WEEK_VERSION = 1;
-/** `config.WEEK_BUCKETS = 7 * 24 * 60 // CLIMATOLOGY_BUCKET_MIN` = 336. */
-export const WEEK_BUCKETS = 336;
+/** What the collector writes now: `artifacts.WEEK_VERSION`. */
+export const WEEK_VERSION = 2;
+/**
+ * The one bucket count each schema version has. 1 is the clock week (336
+ * half-hours); 2 adds a day for public holidays (384, `config.WEEK_BUCKETS`).
+ *
+ * Both are accepted for as long as a collector can still be writing version 1,
+ * which is every moment between this Worker's release and the collector's
+ * recreation -- the order the holiday release ships in. A version paired with
+ * the other's count describes a table nobody wrote, and is refused.
+ */
+export const WEEK_SHAPES: Readonly<Record<number, number>> = { 1: 336, 2: 384 };
+/** The largest bucket count any accepted version has, for sizing limits. */
+export const WEEK_BUCKETS = 384;
 export const WEEK_BUCKET_MIN = 30;
 
 export interface WeekHeader {
@@ -147,7 +158,7 @@ export function parseWeekHeader(week: Uint8Array): WeekHeader | null {
 
 export function validateWeek(week: Uint8Array): WeekResult {
   const h = parseWeekHeader(week);
-  if (h === null || h.version !== WEEK_VERSION || h.nBuckets !== WEEK_BUCKETS || h.bucketMin !== WEEK_BUCKET_MIN) {
+  if (h === null || WEEK_SHAPES[h.version] !== h.nBuckets || h.bucketMin !== WEEK_BUCKET_MIN) {
     return { ok: false };
   }
   if (h.nLots < 1 || h.nLots > MAX_LOTS || week.byteLength !== WEEK_HEADER_SIZE + h.nLots * h.nBuckets * 2) {

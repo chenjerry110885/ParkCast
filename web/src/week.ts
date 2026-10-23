@@ -10,24 +10,36 @@
  * validate the header against the body it came with, and throw rather than
  * hand back something half-trusted.
  */
+import { isHoliday } from "./holidays";
 import type { WeekTable } from "./types";
 
 /** `magic(4) version(1) builtTs(4) nLots(2) nBuckets(2) bucketMin(1) rosterId(4)`. */
 export const HEADER_SIZE = 18;
 
-/** The schema version this client knows how to read. Shared with `grid.bin`. */
-export const VERSION = 1;
+/**
+ * The schema versions this client reads, each with its one bucket count: 1 is
+ * the clock week (336 half-hours), 2 adds a day for public holidays (384,
+ * `config.WEEK_BUCKETS`).
+ *
+ * Both, because a browser can hold a version-1 table in its cache for up to a
+ * week after the collector starts writing version 2 (`WEEK_MAX_AGE_MS` in
+ * `sw.js`). A version-1 table simply has no holiday day, and every lookup falls
+ * back to the clock bucket -- exactly what the app did before holidays existed.
+ */
+export const WEEK_SHAPES: Readonly<Record<number, number>> = { 1: 336, 2: 384 };
 
 const MAGIC = "PCW1";
 
 /**
- * Buckets covering a full week at `BUCKET_MIN`-minute width: `7 * 24 * 60 / 30`,
- * matching `config.WEEK_BUCKETS`. `weekBucket` and `probabilityAt` hard-code
- * this shape rather than reading it back out of a parsed `WeekTable` on every
- * call -- `parseWeek` is what makes hard-coding it safe, by refusing to parse
- * a header that declares anything else.
+ * Buckets in the CLOCK week at `BUCKET_MIN`-minute width: `7 * 24 * 60 / 30`,
+ * matching `config.CLOCK_BUCKETS`. This is what `weekBucket` reduces by, and it
+ * is not a table's row length -- a version-2 row is 384, and `probabilityAt`
+ * strides by the parsed table's own `nBuckets`. Reducing modulo 384 would shift
+ * every bucket after the first week by a day and nothing would fail.
  */
 const N_BUCKETS = (7 * 24 * 60) / 30;
+/** Half-hours in a day: the holiday slot's width. */
+const BUCKETS_PER_DAY = (24 * 60) / 30;
 
 /** Minutes per bucket, matching `config.CLIMATOLOGY_BUCKET_MIN`. */
 const BUCKET_MIN = 30;
@@ -89,8 +101,9 @@ export function parseWeek(buf: ArrayBuffer): WeekTable {
     throw new Error(`week.bin has magic ${JSON.stringify(magic)}, expected ${MAGIC}`);
   }
   const version = dv.getUint8(4);
-  if (version !== VERSION) {
-    throw new Error(`week.bin is schema version ${version}, this client reads ${VERSION}`);
+  const shape = WEEK_SHAPES[version];
+  if (shape === undefined) {
+    throw new Error(`week.bin is schema version ${version}, this client reads ${Object.keys(WEEK_SHAPES).join(" and ")}`);
   }
 
   const builtTs = dv.getUint32(5, true);
@@ -104,24 +117,25 @@ export function parseWeek(buf: ArrayBuffer): WeekTable {
   // weekBucket and probabilityAt both hard-code this shape (N_BUCKETS above);
   // a header declaring a different one would silently misalign every lookup
   // rather than fail loudly, so it is refused here instead.
-  if (nBuckets !== N_BUCKETS || bucketMin !== BUCKET_MIN) {
+  if (nBuckets !== shape || bucketMin !== BUCKET_MIN) {
     throw new Error(
-      `week.bin declares ${nBuckets} buckets at ${bucketMin} min, this client reads ${N_BUCKETS} at ${BUCKET_MIN} min -- ` +
+      `week.bin version ${version} declares ${nBuckets} buckets at ${bucketMin} min, this client reads ${shape} at ${BUCKET_MIN} min -- ` +
         `this file was built by a different version of the encoder than this client understands; rebuild week.bin ` +
         `with a matching encoder, or update this client to the bucket geometry it now writes.`,
     );
   }
 
-  const expected = nLots * N_BUCKETS * 2;
+  const expected = nLots * nBuckets * 2;
   const body = buf.byteLength - HEADER_SIZE;
   if (body !== expected) {
     throw new Error(
-      `week.bin body is ${body} bytes, header declares ${nLots} lots x ${N_BUCKETS} buckets x 2 = ${expected}`,
+      `week.bin body is ${body} bytes, header declares ${nLots} lots x ${nBuckets} buckets x 2 = ${expected}`,
     );
   }
 
   return {
     nLots,
+    nBuckets: nBuckets as WeekTable["nBuckets"],
     rosterId,
     builtTs,
     cells: new Uint8Array(buf, HEADER_SIZE, expected),
@@ -186,18 +200,35 @@ export function probabilityAt(
   table: WeekTable,
   lotIndex: number,
   ts: number,
-): { p: number | null; support: number } {
+): { p: number | null; support: number; holiday: boolean } {
   if (!Number.isInteger(lotIndex) || lotIndex < 0 || lotIndex >= table.nLots) {
     throw new RangeError(`lot index ${lotIndex} is outside 0..${table.nLots - 1}`);
   }
   if (!Number.isFinite(ts)) {
     throw new RangeError(`ts ${ts} is not a finite timestamp`);
   }
-  const bucket = weekBucket(ts);
-  const offset = (lotIndex * N_BUCKETS + bucket) * 2;
+  const bucket = dayBucket(ts, table);
+  // The table's own row length, never the clock week's: a version-2 row is 384.
+  const offset = (lotIndex * table.nBuckets + bucket) * 2;
   const percent = table.cells[offset]!;
   const support = table.cells[offset + 1]!;
-  return { p: percent === WEEK_UNKNOWN ? null : percent / 100, support };
+  return { p: percent === WEEK_UNKNOWN ? null : percent / 100, support, holiday: bucket >= N_BUCKETS };
+}
+
+/**
+ * The bucket of `table` that answers `ts`: its clock bucket, unless `ts` falls
+ * on a public holiday AND the table has a holiday day, in which case the holiday
+ * slot at the same half-hour (`336 + halfHour`).
+ *
+ * Mirrors `forecast.day_bucket` on the collector. Either condition failing gives
+ * the clock bucket: past the end of the calendar no date is a holiday, and a
+ * version-1 table has nowhere else to look -- both exactly the behaviour from
+ * before holidays existed.
+ */
+export function dayBucket(ts: number, table: WeekTable): number {
+  const clock = weekBucket(ts);
+  if (table.nBuckets <= N_BUCKETS || !isHoliday(ts)) return clock;
+  return N_BUCKETS + (clock % BUCKETS_PER_DAY);
 }
 
 /**

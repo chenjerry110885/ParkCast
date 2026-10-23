@@ -67,7 +67,11 @@ export function metaFor(pair: Pair, overrides: Partial<StoredMeta> = {}): Stored
 
 export interface Week { week: Uint8Array<ArrayBuffer>; nLots: number; rosterId: number; builtTs: number }
 
-const WEEK_BUCKETS = 336;
+// Spelled out here rather than imported from `../src/validate`: a fixture built
+// from the code under test can only ever agree with it. Version 2 is the
+// holiday table, 384 = the clock week's 336 + one day of public holidays.
+const WEEK_VERSION = 2;
+const WEEK_BUCKETS = 384;
 
 /** A well-formed `week.bin`: `PCW1` header (see `WEEK_HEADER_FORMAT` in
  * artifacts.py) followed by `nLots * WEEK_BUCKETS` cells of a plausible
@@ -79,7 +83,7 @@ export function makeWeek(o: { builtTs: number; nLots?: number; rosterId?: number
   const week = new Uint8Array(18 + nLots * WEEK_BUCKETS * 2);
   const dv = new DataView(week.buffer);
   week.set([0x50, 0x43, 0x57, 0x31], 0); // "PCW1"
-  dv.setUint8(4, 1);
+  dv.setUint8(4, WEEK_VERSION); // what the collector writes now
   dv.setUint32(5, o.builtTs, true);
   dv.setUint16(9, nLots, true);
   dv.setUint16(11, WEEK_BUCKETS, true);
