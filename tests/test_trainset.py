@@ -280,3 +280,62 @@ def test_a_row_is_kept_when_only_a_later_horizon_is_frozen(conn):
 
     kept = build(conn, origins=[ORIGIN], horizons=[5, 120])
     assert [r.horizon_min for r in kept] == [5]
+
+
+# --- the reading each row sees ----------------------------------------------
+
+
+def test_a_training_row_sees_the_reading_that_was_current_at_its_origin(conn):
+    """Every serving row carries the lot's live reading. A training row built
+    from one history cut at the training cutoff does not: that history keeps
+    only the newest `config.HISTORY_TAIL` readings, so every origin older than
+    about two hours finds no reading at all -- 97% of rows on three days, and
+    effectively all of them on a corpus of weeks. A model fitted on those rows
+    learns what to do when the reading is missing, and is then only ever asked
+    about rows where it is present.
+
+    `iter_served_rows` gives each origin the tail serving would have held at
+    that moment, so the reading, its trend and its age are all as they were."""
+    start = ORIGIN - 3 * 86400
+    for i, ts in enumerate(range(start, ORIGIN, SLOT)):
+        write(conn, ts, free=i % 7)
+    labels = load_labels(conn, None)
+    history = load_history(conn, before_ts=ORIGIN)
+    origins = trainset.sample_origins(labels)
+
+    built = [r for r in trainset.iter_served_rows(
+        history, Climatology(history), [lot()], origins=origins, horizons=(15,),
+        labels=labels, reading_series=reading_series(labels)) if r.label is not None]
+
+    free_now = features.FEATURES.index("free_now")
+    staleness = features.FEATURES.index("staleness_min")
+    assert len(built) > 100
+    assert all(r.values[free_now] is not None for r in built)
+    # The reading AT the origin, not the newest one: a row from three days ago
+    # must not see the value from the end of the corpus.
+    assert all(r.values[free_now] == float(((r.origin_ts - start) // SLOT) % 7) for r in built)
+    assert all(r.values[staleness] == 0.0 for r in built)
+
+
+def test_a_served_row_matches_the_row_serving_builds_at_that_moment(conn):
+    """The same row the live collector would build at the origin: a history
+    cut there, holding the same tail, gives the same reading features."""
+    start = ORIGIN - 86400
+    for i, ts in enumerate(range(start, ORIGIN, SLOT)):
+        write(conn, ts, free=(i * 3) % 11)
+    labels = load_labels(conn, None)
+    history = load_history(conn, before_ts=ORIGIN)
+    origin = start + 10 * 3600
+    clim = Climatology(history)
+
+    served = next(iter(trainset.iter_served_rows(
+        history, clim, [lot()], origins=[origin], horizons=(30,), labels=labels,
+        reading_series=reading_series(labels))))
+    live = features.row(load_history(conn, before_ts=origin + 1), clim, lot(),
+                        origin_ts=origin, horizon_min=30)
+
+    reading_features = ("free_now", "free_ratio", "is_free_now", "staleness_min",
+                        "trend_15", "trend_30", "trend_60")
+    for name in reading_features:
+        i = features.FEATURES.index(name)
+        assert served.values[i] == live[i], name

@@ -42,7 +42,7 @@ import math
 from collections.abc import Sequence
 from zlib import crc32
 
-from parkcast import config, pricing
+from parkcast import config, holidays, pricing
 from parkcast.forecast import Climatology, History, day_bucket, week_bucket
 
 #: Buckets a string category is hashed into. Taipei has ~12 districts and a
@@ -75,6 +75,10 @@ FEATURES: tuple[str, ...] = (
     "price_low", "price_high", "price_kind", "lot_type", "area", "city",
     # the neighbourhood
     "nbr_free", "nbr_seen",
+    # stacked on what ships, and the day it is asked about. Appended, never
+    # inserted: the first 26 are the columns every earlier model was fitted
+    # on, and `scripts/ablate-model.py` selects them by that prefix.
+    "blend_p", "is_holiday",
 )
 
 #: Told to LightGBM as categorical rather than ordered. `dow` is included
@@ -178,6 +182,9 @@ def row(
     taipei_second = (origin_ts + _TAIPEI_OFFSET) % _SECONDS_PER_DAY
     angle = 2 * math.pi * taipei_second / _SECONDS_PER_DAY
 
+    is_free_now = None if free_now is None else float(free_now >= 1)
+    clim_p = clim.predict(lot.id, target_ts, horizon_min)
+
     seen = [history.recent[n] for n in neighbours if n in history.recent]
     ratios = []
     for other in seen:
@@ -189,12 +196,12 @@ def row(
         float(horizon_min),
         None if free_now is None else float(free_now),
         free_ratio,
-        None if free_now is None else float(free_now >= 1),
+        is_free_now,
         None if reading is None else (origin_ts - reading[0]) / 60.0,
         *(_trend(series, origin_ts=origin_ts, minutes=m, free_now=free_now)
           for m in TREND_WINDOWS_MIN),
 
-        clim.predict(lot.id, target_ts, horizon_min),
+        clim_p,
         float(bucket[1]),
         None if not lot_counter[1] else lot_counter[0] / lot_counter[1],
         float(lot_counter[1]),
@@ -216,4 +223,26 @@ def row(
 
         None if not ratios else sum(ratios) / len(ratios),
         float(len(ratios)),
+
+        _blend(is_free_now, clim_p, horizon_min),
+        # The TARGET's date: an origin at 23:50 forecasting 00:05 is asking
+        # about tomorrow. Past the committed calendar this is 0.0, the same
+        # "ordinary day" `forecast.day_bucket` falls back to.
+        float(holidays.is_holiday_ts(target_ts)),
     ]
+
+
+def _blend(is_free_now: float | None, clim_p: float | None, horizon_min: int) -> float | None:
+    """`forecast.Blend.predict`, from the two values this row already holds.
+
+    The forecaster that ships, as a feature: a model handed it starts from
+    the number it has to beat rather than relearning it from parts. Computed
+    here rather than by constructing a `Blend`, which would rebuild a
+    `Climatology` per row; `tests/test_features.py` pins the two to agree.
+    """
+    if is_free_now is None:
+        return clim_p
+    if clim_p is None:
+        return is_free_now
+    weight = 0.5 ** (horizon_min / config.BLEND_HALF_LIFE_MIN)
+    return weight * is_free_now + (1.0 - weight) * clim_p

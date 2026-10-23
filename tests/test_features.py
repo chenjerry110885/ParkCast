@@ -8,7 +8,7 @@ import pytest
 
 from parkcast import features, store
 from parkcast.feed import TS_FEED, FeedSnapshot, Observation
-from parkcast.forecast import Climatology, load_history
+from parkcast.forecast import Blend, Climatology, load_history
 from parkcast.metadata import Lot
 
 ORIGIN = 1_700_000_000 - 1_700_000_000 % 300      # a clean five-minute grid point
@@ -327,3 +327,60 @@ def test_training_and_serving_build_the_identical_row(conn):
                              exclude_frozen=False)
 
     assert [r.values for r in training] == [serving]
+
+
+# --- stacking the shipped forecaster -----------------------------------------
+
+
+@pytest.mark.parametrize("horizon", [5, 30, 120])
+def test_blend_p_is_the_number_blend_would_ship(conn, horizon):
+    """The forecaster that ships, handed to the model as a feature. Computed
+    here from `is_free_now` and `clim_p` rather than by calling `Blend`, so the
+    two must agree exactly -- or the model is told a number nobody publishes."""
+    for i in range(40, 0, -1):
+        write(conn, ORIGIN - i * 1800, free=0 if i % 3 else 4)
+    write(conn, ORIGIN, free=0)
+
+    history = load_history(conn, before_ts=ORIGIN + 1)
+    r = dict(zip(features.FEATURES,
+                 features.row(history, Climatology(history), lot(), origin_ts=ORIGIN,
+                              horizon_min=horizon)))
+    assert r["blend_p"] == pytest.approx(
+        Blend(history).predict("taipei:A", ORIGIN + horizon * 60, horizon), abs=1e-12)
+
+
+def test_blend_p_without_a_reading_is_the_climatology(conn):
+    """No reading: `Blend` falls back to climatology, and so does this."""
+    for i in range(40, 0, -1):
+        write(conn, ORIGIN - i * 1800, free=0 if i % 3 else 4)
+    write(conn, ORIGIN, lot="taipei:B", free=3)
+
+    r = built(conn, the_lot=lot("taipei:Z"))
+    assert r["free_now"] is None
+    assert r["blend_p"] == r["clim_p"]
+
+
+def _taipei(y, m, d, h, mi):
+    from datetime import datetime
+
+    from parkcast import config
+    return int(datetime(y, m, d, h, mi, tzinfo=config.TAIPEI_TZ).timestamp())
+
+
+def test_is_holiday_is_the_targets_date_not_the_origins(conn):
+    """2026-10-09 is a bridge holiday before National Day; 10-08 is an ordinary
+    Thursday. An origin fifteen minutes before midnight on the 8th forecasts the
+    9th, and the flag must be the 9th's."""
+    origin = _taipei(2026, 10, 8, 23, 50)
+    write(conn, origin, free=3)
+    assert built(conn, at=origin, horizon=15)["is_holiday"] == 1.0
+    assert built(conn, at=origin, horizon=5)["is_holiday"] == 0.0
+
+
+def test_is_holiday_claims_nothing_past_the_calendar(conn):
+    """2028-10-10 is National Day, but the committed calendar ends in 2027:
+    past it no date is a holiday, which is what `day_bucket` says too."""
+    origin = _taipei(2028, 10, 10, 9, 0)
+    write(conn, origin, free=3)
+    assert built(conn, at=origin, horizon=15)["is_holiday"] == 0.0
+

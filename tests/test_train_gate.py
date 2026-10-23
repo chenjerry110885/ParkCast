@@ -363,3 +363,24 @@ def test_a_candidate_that_beats_blend_is_adopted(conn, tmp_path):
     })
 
     assert decision.adopted, decision.reason
+
+
+def test_the_nightly_fit_trains_on_rows_that_carry_the_live_reading(conn, tmp_path, monkeypatch):
+    """Every row the model will ever be asked about carries the lot's live
+    reading. Training rows cut from one end-of-training history did not: its
+    tail is two hours long, so almost every origin found no reading, and the
+    model learnt what to do without one."""
+    fill(conn)
+    seen = {}
+    real_fit = train.fit
+
+    def spy(x, y, **kw):
+        seen["x"] = x
+        return real_fit(x, y, **kw)
+
+    monkeypatch.setattr(train, "fit", spy)
+    run(conn, tmp_path, _force_scores=WINS)
+
+    free_now = seen["x"][:, features.FEATURES.index("free_now")]
+    assert len(free_now) > 1000
+    assert (free_now != free_now).mean() < 0.01      # NaN marks a missing reading

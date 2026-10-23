@@ -181,3 +181,39 @@ def test_only_the_last_seven_are_kept(tmp_path):
         saved(tmp_path, trained_through=1_700_000_000 + i * 86400)
 
     assert len(list((tmp_path / "history").glob("*.txt"))) == train.KEEP_MODELS
+
+
+# --- weights and column subsets ---------------------------------------------
+
+
+def _constant(n_neg=200, n_pos=200, width=None):
+    """No feature carries any signal, so the fitted model can only predict its
+    starting point: the (weighted) share of positives."""
+    width = len(features.FEATURES) if width is None else width
+    x = np.zeros((n_neg + n_pos, width), dtype=np.float32)
+    y = np.array([0] * n_neg + [1] * n_pos, dtype=np.int8)
+    return x, y
+
+
+def test_fit_weighs_each_row_by_the_weight_it_is_given():
+    """Weight 3 on every positive is three times as many positives: the share
+    moves from 1/2 to 3/4. A `weight` that never reached LightGBM would leave
+    it at 1/2 and every weighted variant in the ablation would be a copy of
+    the unweighted one."""
+    x, y = _constant()
+    plain = train.fit(x, y, num_rounds=5)
+    weighted = train.fit(x, y, num_rounds=5, weight=np.where(y == 1, 3.0, 1.0))
+
+    assert plain.predict(x[:1])[0] == pytest.approx(0.5, abs=1e-3)
+    assert weighted.predict(x[:1])[0] == pytest.approx(0.75, abs=1e-3)
+
+
+def test_fit_takes_a_named_subset_of_the_columns():
+    """The ablation's `base` variant is the first 26 columns: the ones every
+    earlier model was fitted on. The categoricals it names must be the ones
+    that subset actually has."""
+    names = list(features.FEATURES[:26])
+    x, y = _constant(width=len(names))
+    booster = train.fit(x, y, num_rounds=5, feature_names=names)
+
+    assert booster.feature_name() == names

@@ -28,11 +28,13 @@ about 4.4M rows. `sample_origins` is `evaluate.choose_origins` with that cadence
 as its default, reused rather than reimplemented so training and scoring cannot
 drift apart about what an origin is.
 """
+from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
 from parkcast import config, features
 from parkcast.evaluate import choose_origins
+from parkcast.forecast import History
 
 
 class Row(NamedTuple):
@@ -179,6 +181,50 @@ def iter_rows(
                     horizon_min=horizon_min,
                 )
 
+
+
+def iter_served_rows(
+    history,
+    clim,
+    lots: Sequence,
+    *,
+    origins: Sequence[int],
+    horizons: Sequence[int],
+    labels: Mapping[int, Mapping[str, int]],
+    reading_series: Mapping[str, tuple[Sequence[int], Sequence[int]]],
+    spans: Mapping[str, Sequence[tuple[int, int]]] | None = None,
+):
+    """`iter_rows`, with each origin seeing the readings serving saw then.
+
+    `history` is cut once, at the training cutoff, and `recent` is only its
+    newest `config.HISTORY_TAIL` readings. Every origin older than that tail
+    -- nearly all of them, over weeks -- found no reading at all, so the
+    reading, its trend and its age were missing on almost every training row
+    and present on every serving row. A model fitted that way learns the
+    climatology and is then asked about the reading it never saw.
+
+    Here each origin gets its own tail: the `HISTORY_TAIL` readings at or
+    before it, cut from the lot's full ordered series -- the same tail the live
+    collector holds at that moment. `counts` (and so `clim`) stay as the
+    caller built them, which is the trainer's existing bargain: climatology
+    is fitted once, at the cutoff.
+
+    Origins are walked in the order given; each costs one bisect per lot.
+    """
+    if spans is None:
+        spans = spans_for(reading_series)
+    for origin in origins:
+        recent: dict[str, list[tuple[int, int]]] = {}
+        for lot_id, (stamps, values) in reading_series.items():
+            hi = bisect_right(stamps, origin)
+            if hi:
+                lo = max(0, hi - config.HISTORY_TAIL)
+                recent[lot_id] = list(zip(stamps[lo:hi], values[lo:hi]))
+        at = History(latest_ts=origin,
+                     current={lot_id: tail[-1][1] for lot_id, tail in recent.items()},
+                     recent=recent, counts=history.counts)
+        yield from iter_rows(at, clim, lots, origins=[origin], horizons=horizons,
+                             labels=labels, spans=spans)
 
 def rows(*args, **kwargs) -> list[Row]:
     """`iter_rows` materialised. Convenient, and the wrong call for a real fit.

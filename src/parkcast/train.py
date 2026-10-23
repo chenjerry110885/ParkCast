@@ -42,7 +42,7 @@ from parkcast import features
 from parkcast.compact import day_bounds
 
 log = logging.getLogger(__name__)
-from parkcast.trainset import Row, iter_rows, sample_origins, spans_for
+from parkcast.trainset import Row, iter_rows, iter_served_rows, sample_origins, spans_for
 
 #: How many previous models stay on disk. A rollback reaches back about a week;
 #: keeping every one would grow without bound beside a corpus measured in tens
@@ -116,16 +116,23 @@ def to_arrays(rows: Iterable[Row]) -> tuple[np.ndarray, np.ndarray]:
 
 
 def fit(x: np.ndarray, y: np.ndarray, *, params: dict | None = None,
-        num_rounds: int = NUM_ROUNDS) -> lgb.Booster:
+        num_rounds: int = NUM_ROUNDS, weight: np.ndarray | None = None,
+        feature_names: Sequence[str] | None = None) -> lgb.Booster:
     """One booster, reproducibly.
 
     The categorical columns are named rather than positional so that reordering
     `features.FEATURES` cannot silently turn a district into a number line.
+
+    `weight` is per row, passed straight to LightGBM; `None` is every row
+    counting once. `feature_names` fits a named subset of the columns -- the
+    ablation's, never the nightly's, which always fits all of `FEATURES` --
+    and only the categoricals that subset holds are declared.
     """
+    names = list(features.FEATURES if feature_names is None else feature_names)
     data = lgb.Dataset(
-        x, label=y,
-        feature_name=list(features.FEATURES),
-        categorical_feature=list(features.CATEGORICAL),
+        x, label=y, weight=weight,
+        feature_name=names,
+        categorical_feature=[c for c in features.CATEGORICAL if c in names],
         free_raw_data=False,
     )
     return lgb.train(params or PARAMS, data, num_boost_round=num_rounds)
@@ -437,8 +444,12 @@ def nightly(
 
     train_clim = Climatology(train_history)
     train_origins = [t for t in sample_origins(labels) if t < cutoff]
-    x, y = to_arrays(iter_rows(train_history, train_clim, lots, origins=train_origins,
-                               horizons=horizons, labels=labels, reading_series=series))
+    # Served rows: each origin sees the readings the collector held at that
+    # moment. `iter_rows` over `train_history` saw only its last two hours, so
+    # nearly every training row had no reading while every serving row has one
+    # -- see `trainset.iter_served_rows`.
+    x, y = to_arrays(iter_served_rows(train_history, train_clim, lots, origins=train_origins,
+                                      horizons=horizons, labels=labels, reading_series=series))
     if len(y) < MIN_TRAIN_ROWS:
         return _record(model_dir, day, Decision(
             False, f"only {len(y)} labelled rows, below the {MIN_TRAIN_ROWS} floor", {}))
