@@ -1249,8 +1249,12 @@ describe("an arrival beyond the grid's own window", () => {
     // a half-hour bucket, so this re-reads the SAME cell and the recovery is
     // visible as `FAR_PERCENT` rather than as the filler of a neighbouring one.
     selectArrival(far + 5 * 60);
-    await waitFor(() => expect(chance()).not.toContain(t("en").noData));
-    expect(chance()).toContain(`${FAR_PERCENT}%`);
+    // Waited for as the NUMBER, never as "anything but no data". The ring counts
+    // its figure up from 0 through `motion.tween`, so the first frame after the
+    // recovery reads "0%" -- and under a full-suite run's load, a wait for "not
+    // no data" landed on exactly that frame about one run in three, then
+    // asserted 73% against it. The recovered number is the claim; wait for it.
+    await waitFor(() => expect(chance()).toContain(`${FAR_PERCENT}%`));
   });
 
   it("grades the confidence pill on that bucket's own support, not on how far away it is", async () => {
