@@ -327,6 +327,23 @@
 .fact__icon--info { color: var(--muted); }
 .fact__value { display: block; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .fact__label { display: block; font-size: 11px; color: var(--muted); }
+/* The selected card's typical week (WeekProfile.tsx): a day column, then 24
+   hour cells coloured by the map's ramp. Grid, not table: it is one image to a
+   screen reader (role="img" + the summary as its name), so its rows carry no
+   semantics of their own. */
+.week-profile { margin: 12px 0 0; padding: 10px; border-radius: 12px; background: var(--unknown-soft); cursor: default; }
+.week-profile__caption { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+.week-profile__caption b { color: var(--text); font-weight: 700; }
+.week-profile__chart { display: flex; flex-direction: column; gap: 2px; }
+.week-profile__row,
+.week-profile__axis { display: grid; grid-template-columns: 2.6em repeat(24, minmax(0, 1fr)); gap: 1px; align-items: center; }
+.week-profile__day { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.week-profile__cell { height: 12px; border-radius: 2px; transform-origin: left center; animation: week-cell-in var(--dur-base) var(--ease-out) both; }
+.week-profile__cell--busy { outline: 1.5px solid var(--text); outline-offset: -1px; }
+.week-profile__axis { font-size: 9px; color: var(--muted); margin-top: 2px; }
+.week-profile__legend { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 10px; color: var(--muted); }
+.week-profile__ramp { flex: 0 1 96px; height: 6px; border-radius: 3px; }
+@keyframes week-cell-in { from { opacity: 0; transform: scaleX(0.4); } to { opacity: 1; transform: none; } }
 /* The combined 機車/充電 tile (`LotCard.tsx`'s `AmenityTile`): still one
    `.fact` cell -- same padding, background and radius -- but stacked rather
    than centred on one row, because it may hold one amenity's row or two.

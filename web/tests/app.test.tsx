@@ -2591,9 +2591,14 @@ describe("searching for a destination", () => {
     // Once, on the first focus -- not per keystroke, and not never either: the
     // index is what lets the box find anything that is not a car park.
     expect(places.length).toBe(1);
+    // Choosing a car park selects it, and a selected card draws its typical
+    // week from `week.bin`. That request names the roster and nothing else --
+    // no query, no place -- so it is let through by its exact shape.
+    const week = urls.filter((url) => url.includes("week.bin"));
+    expect(week.every((url) => /\/week\.bin\?roster=\d+$/.test(url))).toBe(true);
     // ...and nothing else: every other request is one the artifacts had already
     // made before a key was pressed.
-    expect(urls.filter((url) => !places.includes(url)).every((url) => seen.has(url))).toBe(true);
+    expect(urls.filter((url) => !places.includes(url) && !week.includes(url)).every((url) => seen.has(url))).toBe(true);
   });
 
   it("names the car parks in Chinese and the districts in the reader's language", async () => {
@@ -2675,6 +2680,26 @@ describe("the map is a separate chunk", () => {
     expect(within(rowFor("市府路一號停車場")).getByTestId("lot-probability").textContent).toContain(
       "88%",
     );
+  });
+});
+
+describe("the selected lot's typical week", () => {
+  it("loads the week table on selection, not before, and draws it on that card alone", async () => {
+    // The default arrival is inside the grid's window, so nothing else would
+    // ever ask for `week.bin`: the chart is what pays for it, and only once a
+    // driver has picked a car park to look at.
+    stubFetch(makeGrid(), makeLotsDoc(), encodeWeek(0, { percent: 60, support: 6 }, { percent: 60, support: 6 }, ROSTER_ID, LOTS.length));
+    await renderLocated();
+    expect(weekFetchCount()).toBe(0);
+    expect(screen.queryByTestId("week-profile")).toBeNull();
+
+    const [first] = screen.getAllByTestId("lot-row");
+    fireEvent.click(within(first!).getByRole("button", { name: new RegExp(t("en").selectCard) }));
+
+    const profile = await screen.findByTestId("week-profile");
+    expect(weekFetchCount()).toBe(1);
+    expect(screen.getAllByTestId("week-profile")).toHaveLength(1);
+    expect(profile.closest("[data-testid='lot-row']")).toHaveClass("lot-card--selected");
   });
 });
 

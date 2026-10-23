@@ -4,7 +4,7 @@ import { LotCard } from "../src/components/LotCard";
 import { LotList } from "../src/components/LotList";
 import { fillTemplate, t } from "../src/i18n";
 import type { Ranked } from "../src/rank";
-import type { Lot } from "../src/types";
+import type { Lot, WeekTable } from "../src/types";
 
 const BASE = 1788677280;
 const lot = (over: Partial<Lot> = {}): Lot => ({ i: 0, id: "TPE1", n: "台北101停車場", a: "信義區", y: 25.03, x: 121.56, c: 400, t: "民營停車場", p: { k: "exact", lo: 60, hi: 60 }, f: 38, ...over });
@@ -225,6 +225,40 @@ describe("LotCard", () => {
     expect(within(card).getByRole("note")).toHaveTextContent(
       fillTemplate(t("en").confidenceHolidaysTemplate, { n: 4 }),
     );
+  });
+
+  /**
+   * A one-lot version-1 table at 85% everywhere except Saturday 14:00-17:00
+   * at 15%. Saturday is clock slot 2 (bucket 0 is Thursday 00:00).
+   */
+  const weekWithSaturdayDip = (): WeekTable => {
+    const cells = new Uint8Array(336 * 2);
+    for (let b = 0; b < 336; b++) {
+      const dip = b >= 2 * 48 + 28 && b < 2 * 48 + 34;
+      cells[b * 2] = dip ? 15 : 85;
+      cells[b * 2 + 1] = 6;
+    }
+    return { nLots: 1, rosterId: 1, builtTs: 0, nBuckets: 336, cells };
+  };
+
+  it("shows the lot's typical week when selected, summarised for a screen reader", () => {
+    render(<ol><LotCard row={row()} {...props} week={weekWithSaturdayDip()} best={false} selected /></ol>);
+    const profile = within(screen.getByTestId("lot-row")).getByTestId("week-profile");
+    const chart = within(profile).getByRole("img");
+    expect(chart).toHaveAccessibleName(/typical week/i);
+    expect(chart).toHaveAccessibleName(/Saturday.*14:00.*17:00/);
+    // Seven days of 24 hours, read off the table rather than drawn for show.
+    expect(within(profile).getAllByTestId("week-profile-row")).toHaveLength(7);
+  });
+
+  it("keeps the typical week off an unselected card, and off a card with no table", () => {
+    render(
+      <ol>
+        <LotCard row={row()} {...props} week={weekWithSaturdayDip()} best={false} selected={false} />
+        <LotCard row={row({ id: "TPE2" }, { id: "TPE2" })} {...props} week={null} best={false} selected />
+      </ol>,
+    );
+    expect(screen.queryByTestId("week-profile")).toBeNull();
   });
 
   it("keeps the name Chinese under English and selects on tap", () => {

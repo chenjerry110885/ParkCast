@@ -881,8 +881,16 @@ export default function App() {
   const needsWeek = beyondGrid && !withheld;
 
   /**
-   * `week.bin`, on the first arrival chosen outside the grid's window and never
-   * before it.
+   * Whether anything on screen wants `week.bin`: a far arrival's numbers, or
+   * the selected card's typical week. Kept apart from `needsWeek`, which also
+   * decides where every row's probability comes from -- selecting a car park
+   * must load its history without rerouting the forecast through it.
+   */
+  const wantsWeek = needsWeek || selectedLotId !== null;
+
+  /**
+   * `week.bin`, on the first arrival chosen outside the grid's window or the
+   * first car park selected, and never before either.
    *
    * 715 KB for a table most sessions never consult: a driver asking about the
    * next half hour is answered entirely from the 26 KB grid, and paying for the
@@ -922,7 +930,7 @@ export default function App() {
     // THIS roster's table?", and asking it here is what lets a roster change
     // refetch at all.
     const haveThisRoster = weekTable !== null && grid !== null && weekTable.rosterId === grid.rosterId;
-    if (!needsWeek || haveThisRoster) return;
+    if (!wantsWeek || haveThisRoster) return;
     let cancelled = false;
     void loadWeek(ARTIFACTS_BASE, grid?.rosterId).then((table) => {
       if (cancelled) return;
@@ -935,9 +943,11 @@ export default function App() {
     };
     // `weekTable` is set BY this effect; listing it would rerun the effect on
     // its own state change, calling the cleanup above and cancelling the
-    // fetch's own callback before the response ever arrives.
+    // fetch's own callback before the response ever arrives. `selectedLotId`
+    // is listed so a failed load retries on the next selection, as it does on
+    // the next far arrival.
     // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [needsWeek, arrivalTs, grid?.rosterId]);
+  }, [wantsWeek, arrivalTs, grid?.rosterId, selectedLotId]);
 
   /**
    * The week table, but only while it describes the same roster the grid does.
@@ -1706,6 +1716,7 @@ export default function App() {
                   support={supportById.get(mapCard.id) ?? 0}
                   fromHistory={fromHistory}
                   holidaySupport={holidaySupport}
+                  week={week}
                   best={mapCard.id === bestId}
                   selected
                   // Tapping the card itself re-centres the map on its lot and
@@ -1859,6 +1870,7 @@ export default function App() {
             supportById={supportById}
             fromHistory={fromHistory}
             holidaySupport={holidaySupport}
+            week={week}
             bestId={bestId}
             selectedId={selectedLotId}
             onSelect={selectLot}
@@ -1921,6 +1933,7 @@ export default function App() {
                   supportById={supportById}
                   fromHistory={fromHistory}
                   holidaySupport={holidaySupport}
+                  week={week}
                   bestId={bestId}
                   selectedId={selectedLotId}
                   onSelect={selectLot}

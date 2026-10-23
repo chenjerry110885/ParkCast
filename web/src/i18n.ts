@@ -60,8 +60,10 @@ export interface Strings {
   priceVaries: string;
   /**
    * Sub-line note for a car park that prices public holidays as its own
-   * category -- 87 of the 219 varying lots do, and this app has no holiday
-   * calendar, so the honest move is to tell the driver to read the sign.
+   * category -- 87 of the 219 varying lots do. On a holiday in the committed
+   * calendar (`holidays.ts`) the money tile already shows the holiday rate;
+   * this note is the standing fact for every other day, and for any date past
+   * the calendar's end, where only the sign can say.
    *
    * It sits among the lot's own facts rather than in the money tile, for the
    * same reason the not-updating note does: it is a fact about this car park,
@@ -91,6 +93,23 @@ export interface Strings {
    * measurement ever picks another day, this sentence changes with it.
    */
   holidayFromHistory: string;
+  /** Heading of the selected card's typical-week chart. */
+  weekProfileTitle: string;
+  /**
+   * The chart's one-line reading: the three hours this lot is usually
+   * hardest to park in. `{day}` is a weekday name or `weekProfileHolidays`;
+   * `{start}`/`{end}` are `HH:00`.
+   */
+  weekProfileBusiestTemplate: string;
+  /** The reading when even the lot's worst three hours usually have room. */
+  weekProfileRoomy: string;
+  /** The holiday row's label, short enough for the chart's day column. */
+  weekProfileHolidayShort: string;
+  /** Public holidays, as `{day}` in `weekProfileBusiestTemplate`. */
+  weekProfileHolidays: string;
+  /** Legend ends: the ramp's red and teal, the same colours as the map. */
+  weekProfileFull: string;
+  weekProfileFree: string;
   /**
    * Label suffix on a range shown on a holiday for a lot that distinguishes
    * weekdays from weekends but never says which a holiday is. Either answer
@@ -529,6 +548,13 @@ const en: Strings = {
   priceHolidayRate: "holiday rate",
   holidayNoticeTemplate: "Public holiday — {name}. Car parks may fill differently from a usual day.",
   holidayFromHistory: "These chances come from past holidays, and follow Sundays where a car park has seen few.",
+  weekProfileTitle: "Typical week",
+  weekProfileBusiestTemplate: "Usually fullest on {day}, {start}–{end}.",
+  weekProfileRoomy: "Usually has space at every hour.",
+  weekProfileHolidayShort: "Hol",
+  weekProfileHolidays: "public holidays",
+  weekProfileFull: "usually full",
+  weekProfileFree: "usually space",
   priceMayDifferHoliday: "may differ on holidays",
   priceUnknown: "Price unknown",
   noData: "No data",
@@ -647,6 +673,13 @@ const zh: Strings = {
   priceHolidayRate: "假日費率",
   holidayNoticeTemplate: "國定假日：{name}。停車場狀況可能與平常不同。",
   holidayFromHistory: "以下機率依據過去的國定假日；假日資料不足的停車場參考週日。",
+  weekProfileTitle: "一週概況",
+  weekProfileBusiestTemplate: "通常{day} {start}–{end} 最難停。",
+  weekProfileRoomy: "通常每個時段都有空位。",
+  weekProfileHolidayShort: "國定",
+  weekProfileHolidays: "國定假日",
+  weekProfileFull: "通常客滿",
+  weekProfileFree: "通常有位",
   priceMayDifferHoliday: "假日可能不同",
   priceUnknown: "價格未知",
   noData: "無資料",

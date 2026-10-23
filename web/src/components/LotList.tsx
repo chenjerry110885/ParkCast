@@ -14,6 +14,7 @@ import { memo, useLayoutEffect, useRef } from "react";
 import type { Lang } from "../i18n";
 import { DURATION, flipMove, measureRects, type Corner } from "../motion";
 import type { Ranked } from "../rank";
+import type { WeekTable } from "../types";
 import { LotCard } from "./LotCard";
 
 export interface LotListProps {
@@ -64,6 +65,8 @@ export interface LotListProps {
    * the arrival, not by the lot. See `LotCard`'s prop of the same name.
    */
   holidaySupport?: boolean;
+  /** The roster-matched week table, for the selected card's typical week. */
+  week?: WeekTable | null;
   /** Id of the list's single top pick, or `null` when none applies. */
   bestId: string | null;
   /** Id of the card currently selected on the map, or `null`. */
@@ -85,6 +88,7 @@ function LotListInner({
   supportById,
   fromHistory,
   holidaySupport = false,
+  week = null,
   bestId,
   selectedId,
   onSelect,
@@ -153,6 +157,7 @@ function LotListInner({
           support={supportById.get(row.id) ?? 0}
           fromHistory={fromHistory}
           holidaySupport={holidaySupport}
+          week={week}
           best={row.id === bestId}
           selected={row.id === selectedId}
           onSelect={onSelect}

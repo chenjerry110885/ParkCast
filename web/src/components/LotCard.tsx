@@ -54,9 +54,10 @@ import { formatDistance, formatPrice, notUpdatingHours } from "../format";
 import { Charging, Price, Scooter, Spaces, Walk } from "../icons";
 import { districtName, fillTemplate, lotTypeName, t, type Lang, type Strings } from "../i18n";
 import type { Ranked } from "../rank";
-import type { Lot } from "../types";
+import type { Lot, WeekTable } from "../types";
 import { ConfidencePill } from "./ConfidencePill";
 import { ProbabilityRing } from "./ProbabilityRing";
+import { WeekProfile } from "./WeekProfile";
 
 export interface LotCardProps {
   row: Ranked;
@@ -106,6 +107,12 @@ export interface LotCardProps {
    * default: a version-1 table, or any ordinary day, has no holiday cell.
    */
   holidaySupport?: boolean;
+  /**
+   * The roster-matched week table, or `null` while it is not in hand. Only a
+   * selected card reads it, to draw the lot's typical week; an unselected one
+   * ignores it, so a list of twenty does not draw twenty charts.
+   */
+  week?: WeekTable | null;
   /** Whether this is the list's single top pick. */
   best: boolean;
   /** Whether this card is the one currently selected on the map. */
@@ -185,6 +192,7 @@ export function LotCard({
   support,
   fromHistory,
   holidaySupport = false,
+  week = null,
   best,
   selected,
   onSelect,
@@ -280,12 +288,11 @@ export function LotCard({
               </>
             )}
             {/* Beside the district and the operator, not inside the money tile.
-                This car park prices public holidays as its own category and the
-                app has no holiday calendar, so the note is a standing fact about
-                the lot rather than a hedge on the number in the tile -- the same
-                distinction, and the same slot, as the not-updating note above.
-                The rate shown is still correct for an ordinary day; what nobody
-                here knows is whether *this* day is a holiday. */}
+                This car park prices public holidays as its own category, so the
+                note is a standing fact about the lot rather than a hedge on the
+                number in the tile -- the same distinction, and the same slot, as
+                the not-updating note above. On a holiday in the committed
+                calendar the tile itself switches to the holiday rate. */}
             {row.pricesHolidays && (
               <>
                 {" · "}
@@ -340,6 +347,9 @@ export function LotCard({
             published. See `AmenityTile`. */}
         <AmenityTile lot={row.lot} s={s} />
       </div>
+      {selected && week !== null && row.lot.i < week.nLots && (
+        <WeekProfile table={week} lotIndex={row.lot.i} lang={lang} />
+      )}
     </li>
   );
 }
