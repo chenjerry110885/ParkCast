@@ -105,10 +105,11 @@ export function formatPrice(row: Ranked, s: Strings, arrivalTs?: number): string
       const exact = amount(row.rateAtArrival, row.rateAtArrival);
       if (exact !== null) {
         const at = `${exact} ${fillTemplate(s.perHourAtTemplate, { time: formatClock(arrivalTs) })}`;
-        // On a holiday this number came from the holiday rule, and the label has
-        // to say so: on a Friday, "NT$60 per hour at 14:00" reads as the lot's
-        // Friday rate.
-        return row.holidayAtArrival ? `${at} · ${s.priceHolidayRate}` : at;
+        // When the holiday chose this number the label has to say so: on a
+        // Friday, "NT$60 per hour at 14:00" reads as the lot's Friday rate. A
+        // rate the holiday did not change gets no label -- it would announce a
+        // surcharge nobody stated.
+        return row.holidayRateAtArrival ? `${at} · ${s.priceHolidayRate}` : at;
       }
     }
     const span = amount(price.lo, price.hi);

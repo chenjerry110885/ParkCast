@@ -428,7 +428,7 @@ def parse_tariff(payex: str | None) -> Tariff | None:
     return Tariff(tuple(unique), holidays=bool(_HOLIDAY_MARK.search(timing)))
 
 
-def _holiday_rate(tariff: Tariff, hour: int) -> int | None:
+def _holiday_rate(tariff: Tariff, hour: int, weekend: bool) -> int | None:
     """The rate a public holiday is charged at `hour`, or None when the lot
     never says.
 
@@ -441,9 +441,11 @@ def _holiday_rate(tariff: Tariff, hour: int) -> int | None:
        `週六、週日、行政機關放假之紀念日與民俗日60元/時` -- and the parser folds
        them into `weekend`, so for these lots the weekend rate IS the holiday
        rate. An `all` segment covering the hour applies too, as on any day.
-    3. Otherwise, if the lot distinguishes weekdays from weekends at all, None.
-       It never said which a holiday is, and either answer is a guess with money
-       on it; the caller shows the range, which is true.
+    3. Otherwise, if the lot distinguishes weekdays from weekends at all: on a
+       Saturday or Sunday holiday its ordinary weekend rate -- a weekend under
+       any reading of "holiday" -- and on a weekday holiday None. It never said
+       which a holiday is, and either answer is a guess with money on it; the
+       caller shows the range, which is true.
     4. A schedule that only ever says `all` does not depend on the day, so a
        holiday is like any other.
     """
@@ -461,7 +463,7 @@ def _holiday_rate(tariff: Tariff, hour: int) -> int | None:
     if tariff.holidays:                                                          # 2
         return most_specific([s for s in covering if s.scope in ("weekend", "all")])
     if any(s.scope in ("weekday", "weekend") for s in tariff.segments):         # 3
-        return None
+        return _ordinary_rate(tariff, hour, "weekend") if weekend else None
     return most_specific([s for s in covering if s.scope == "all"])              # 4
 
 
@@ -494,11 +496,16 @@ def rate_at(tariff: Tariff, when: datetime) -> int | None:
         raise ValueError("rate_at needs an aware datetime: the hour depends on the zone")
 
     local = when.astimezone(config.TAIPEI_TZ)
+    weekend = local.weekday() >= 5
     if holidays.is_holiday(local.date()):
-        return _holiday_rate(tariff, local.hour)
-    wanted = "weekend" if local.weekday() >= 5 else "weekday"
-    applicable = [s for s in tariff.segments
-                  if s.covers(local.hour) and s.scope in (wanted, "all")]
+        return _holiday_rate(tariff, local.hour, weekend)
+    return _ordinary_rate(tariff, local.hour, "weekend" if weekend else "weekday")
+
+
+def _ordinary_rate(tariff: Tariff, hour: int, wanted: str) -> int | None:
+    """The rate `wanted` ("weekday" or "weekend") or `all` states at `hour`,
+    most specific first; None when no such segment covers it."""
+    applicable = [s for s in tariff.segments if s.covers(hour) and s.scope in (wanted, "all")]
     if not applicable:
         return None
     best = max(_SCOPE_RANK[s.scope] for s in applicable)

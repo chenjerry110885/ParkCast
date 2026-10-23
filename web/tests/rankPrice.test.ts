@@ -249,6 +249,27 @@ describe("public holidays", () => {
     expect(rateAt(sched(WEEKDAY_WEEKEND), on(ORDINARY_THU, 14))).toBe(50);
   });
 
+  it("charges a weekend holiday the weekend rate even where holidays are never mentioned", () => {
+    // National Day is a Saturday: a Saturday under any reading of "holiday".
+    expect(rateAt(sched(WEEKDAY_WEEKEND), on(NATIONAL_DAY, 14))).toBe(60);
+  });
+
+  it("calls a rate a holiday rate only when the holiday chose it", () => {
+    // The label explains why a Friday shows the weekend price. On a schedule
+    // whose rate never depends on the day, or a Saturday priced as any
+    // Saturday, it would claim a holiday surcharge nobody stated.
+    const one = (p: Price, ts: number) => rankLots({
+      destination: { lat: 25.05, lon: 121.52 }, horizonMin: 15, arrivalTs: ts,
+      lots: [{ i: 0, id: "x", n: "x", a: "中正區", y: 25.0502, x: 121.52, c: 50, t: "民營停車場", p } as never],
+      probability: () => 0.9,
+    })[0]!.holidayRateAtArrival;
+    expect(one(sched(WEEKDAY_WEEKEND, 1), on(HOLIDAY_FRI, 14))).toBe(true);
+    expect(one(sched([...WEEKDAY_WEEKEND, ["holiday", 8, 20, 80]]), on(HOLIDAY_FRI, 14))).toBe(true);
+    expect(one(DAY_NIGHT, on(HOLIDAY_FRI, 14))).toBe(false);
+    expect(one(sched(WEEKDAY_WEEKEND), on(NATIONAL_DAY, 14))).toBe(false);
+    expect(one(sched(WEEKDAY_WEEKEND, 1), on(ORDINARY_THU, 14))).toBe(false);
+  });
+
   it("leaves a schedule that ignores the day alone", () => {
     expect(rateAt(DAY_NIGHT, on(HOLIDAY_FRI, 14))).toBe(50);
   });

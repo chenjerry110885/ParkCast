@@ -33,7 +33,7 @@ const lot = (over: Partial<Lot> = {}): Lot => ({
 });
 const row = (over: Partial<Ranked> = {}, lotOver: Partial<Lot> = {}): Ranked => ({
   lot: lot(lotOver), id: "TPE1", index: 0, probability: 0.86, hourly: 60,
-  perEntry: null, priceKnown: true, rateAtArrival: null, pricesHolidays: false, holidayAtArrival: false,
+  perEntry: null, priceKnown: true, rateAtArrival: null, pricesHolidays: false, holidayAtArrival: false, holidayRateAtArrival: false,
   meters: 320, walkMin: 4, cost: 100, ...over,
 });
 const props = {
@@ -181,7 +181,7 @@ describe("on a public holiday", () => {
     // Without the word, NT$60 on a Friday reads as this lot's Friday rate --
     // which it is not; it is what the lot charges because today is a holiday.
     render(
-      <ol><LotCard row={row({ rateAtArrival: 60, holidayAtArrival: true }, { p: FOLDED })} {...props} arrivalTs={HOLIDAY_1400} /></ol>,
+      <ol><LotCard row={row({ rateAtArrival: 60, holidayAtArrival: true, holidayRateAtArrival: true }, { p: FOLDED })} {...props} arrivalTs={HOLIDAY_1400} /></ol>,
     );
     expect(value()).toBe("NT$60");
     expect(label()).toBe(`per hour at 14:00 · ${t("en").priceHolidayRate}`);
@@ -195,6 +195,17 @@ describe("on a public holiday", () => {
     expect(label()).toBe(`per hour · ${t("en").priceMayDifferHoliday}`);
   });
 
+  it("adds nothing to a rate that does not depend on the day", () => {
+    // 08-22 at NT$50 every day: on a holiday it is still just 50 at 14:00, and
+    // "holiday rate" beside it would announce a surcharge nobody stated.
+    const dayNight: Price = { k: "range", lo: 10, hi: 50, t: [["all", 8, 22, 50], ["all", 22, 8, 10]] };
+    render(
+      <ol><LotCard row={row({ rateAtArrival: 50, holidayAtArrival: true, holidayRateAtArrival: false }, { p: dayNight })} {...props} arrivalTs={HOLIDAY_1400} /></ol>,
+    );
+    expect(value()).toBe("NT$50");
+    expect(label()).toBe("per hour at 14:00");
+  });
+
   it("leaves a flat fare exactly as it is", () => {
     // One stated rate is one rate; a holiday changes nothing the lot said.
     render(<ol><LotCard row={row({ rateAtArrival: 60, holidayAtArrival: true })} {...props} arrivalTs={HOLIDAY_1400} /></ol>);
@@ -203,7 +214,7 @@ describe("on a public holiday", () => {
 
   it("says it in Chinese too", () => {
     render(
-      <ol><LotCard row={row({ rateAtArrival: 60, holidayAtArrival: true }, { p: FOLDED })} {...props} lang="zh" arrivalTs={HOLIDAY_1400} /></ol>,
+      <ol><LotCard row={row({ rateAtArrival: 60, holidayAtArrival: true, holidayRateAtArrival: true }, { p: FOLDED })} {...props} lang="zh" arrivalTs={HOLIDAY_1400} /></ol>,
     );
     expect(label()).toBe(`14:00 每小時 · ${t("zh").priceHolidayRate}`);
   });

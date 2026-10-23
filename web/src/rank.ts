@@ -296,6 +296,14 @@ export interface Ranked {
    * never said what a holiday costs. False past the end of the calendar.
    */
   holidayAtArrival: boolean;
+  /**
+   * Whether `rateAtArrival` is a holiday price -- chosen because the day is a
+   * holiday (a holiday segment, or the weekend rate of a lot whose weekend
+   * clause names holidays). False for a rate that would be the same on any
+   * such day, so "holiday rate" is never printed beside a fare the holiday did
+   * not change.
+   */
+  holidayRateAtArrival: boolean;
   /** Straight-line metres from the destination. */
   meters: number;
   /** Whole minutes to walk `meters`, rounded up. */
@@ -405,6 +413,8 @@ interface Money {
   pricesHolidays: boolean;
   /** See `Ranked.holidayAtArrival`. */
   holidayAtArrival: boolean;
+  /** See `Ranked.holidayRateAtArrival`. */
+  holidayRateAtArrival: boolean;
 }
 
 /**
@@ -446,62 +456,79 @@ function covers(segment: FareSegment, hour: number): boolean {
   return hour >= start || hour < end; // wraps midnight
 }
 
+/** The most specific of `segments` (holiday > weekday/weekend > all), or `null` for none. */
+function mostSpecific(segments: readonly FareSegment[]): FareSegment | null {
+  if (segments.length === 0) return null;
+  const best = Math.max(...segments.map((s) => SCOPE_RANK[s[0]]));
+  return segments.find((s) => SCOPE_RANK[s[0]] === best)!;
+}
+
+/** A resolved rate, and whether it is a holiday price rather than the day's ordinary one. */
+interface Resolved {
+  rate: number | null;
+  holidayPrice: boolean;
+}
+
+/** The ordinary-day rate at `hour` for a weekday or a weekend: that scope or `all`. */
+function ordinaryRate(segments: readonly FareSegment[], hour: number, weekend: boolean): number | null {
+  const wanted: FareScope = weekend ? "weekend" : "weekday";
+  return mostSpecific(segments.filter((s) => covers(s, hour) && (s[0] === wanted || s[0] === "all")))?.[3] ?? null;
+}
+
+/**
+ * What a public holiday is charged at `hour`. Mirrors `pricing._holiday_rate`;
+ * each step is the lot's own words:
+ *
+ * 1. a holiday-scoped segment covering the hour -- a holiday price;
+ * 2. otherwise, for a lot that mentions holidays at all (`Price.h`), its weekend
+ *    segment -- the corpus writes holidays INSIDE the weekend clause, so for
+ *    these lots the weekend rate is the holiday rate -- or an `all` segment,
+ *    which is the same every day and so no holiday price;
+ * 3. otherwise, if the lot distinguishes weekdays from weekends: on a Saturday
+ *    or Sunday holiday its ordinary weekend rate (a weekend under any reading of
+ *    "holiday"), and on a weekday holiday `null` -- it never said which a holiday
+ *    is, and either answer is a guess with money on it;
+ * 4. a schedule that only says `all` does not depend on the day.
+ *
+ * `holidayPrice` is what lets the card say "holiday rate" only when the
+ * holiday chose the number: step 1, and step 2's weekend segment. Never an
+ * `all` segment, and never step 3's ordinary weekend rate.
+ */
+function holidayRate(segments: readonly FareSegment[], hour: number, pricesHolidays: boolean, weekend: boolean): Resolved {
+  const covering = segments.filter((s) => covers(s, hour));
+  const stated = mostSpecific(covering.filter((s) => s[0] === "holiday"));
+  if (stated !== null) return { rate: stated[3], holidayPrice: true };
+  if (pricesHolidays) {
+    const chosen = mostSpecific(covering.filter((s) => s[0] === "weekend" || s[0] === "all"));
+    return { rate: chosen?.[3] ?? null, holidayPrice: chosen?.[0] === "weekend" };
+  }
+  if (segments.some((s) => s[0] === "weekday" || s[0] === "weekend")) {
+    return { rate: weekend ? ordinaryRate(segments, hour, true) : null, holidayPrice: false };
+  }
+  return { rate: mostSpecific(covering.filter((s) => s[0] === "all"))?.[3] ?? null, holidayPrice: false };
+}
+
+/** `rateAt`, and whether the rate it found is a holiday price. */
+function resolveRate(price: Price, ts: number): Resolved {
+  const segments = price.t ?? [];
+  const { hour, weekend } = taipeiParts(ts);
+  if (isHoliday(ts)) return holidayRate(segments, hour, price.h === 1, weekend);
+  return { rate: ordinaryRate(segments, hour, weekend), holidayPrice: false };
+}
+
 /**
  * The hourly rate a schedule states for a moment, or `null` when none can be
  * claimed.
  *
- * `null` in three cases, and the third is a decision rather than a gap:
- *
- * - no segment covers the hour. Saturday 09:00 at a lot whose only weekend
- *   segment is 10-20 has no stated rate, and the weekday rate is not it;
- * - the schedule is absent, which is how the collector says "fall back";
- * - **the only applicable segment is holiday-scoped.** Taipei car parks price
- *   public holidays differently from ordinary weekends. Saturday and Sunday are
- *   readable from the date; a public holiday is not, and this app has no holiday
- *   calendar. A lot that *also* states weekday or weekend rates still resolves
- *   an ordinary Tuesday -- 87 of the 219 varying lots price holidays, so
- *   refusing all of them would cost most of the feature to protect ten days a
- *   year. Mirrors `pricing.rate_at`.
+ * `null` when no segment covers the hour (Saturday 09:00 at a lot whose only
+ * weekend segment is 10-20 has no stated rate, and the weekday rate is not it),
+ * when the schedule is absent (the collector's "fall back"), and on a weekday
+ * public holiday at a lot that prices weekdays and weekends but never says
+ * which a holiday is -- see `holidayRate`, which owns every date in the
+ * committed holiday calendar. Mirrors `pricing.rate_at`.
  */
-/** The rate a scope set states for `hour`, most specific first; `null` if none covers it. */
-function mostSpecific(segments: readonly FareSegment[]): number | null {
-  if (segments.length === 0) return null;
-  const best = Math.max(...segments.map((s) => SCOPE_RANK[s[0]]));
-  return segments.find((s) => SCOPE_RANK[s[0]] === best)![3];
-}
-
-/**
- * The rate a public holiday is charged at `hour`, or `null` when the lot never
- * says. Mirrors `pricing._holiday_rate`; each step is the lot's own words:
- *
- * 1. a holiday-scoped segment covering the hour;
- * 2. otherwise, for a lot that mentions holidays at all (`Price.h`), its weekend
- *    segment -- the corpus writes holidays INSIDE the weekend clause, so for
- *    these lots the weekend rate is the holiday rate -- or an `all` segment;
- * 3. otherwise, if the lot distinguishes weekdays from weekends, `null`: it never
- *    said which a holiday is, and either answer is a guess with money on it;
- * 4. a schedule that only says `all` does not depend on the day.
- */
-function holidayRate(segments: readonly FareSegment[], hour: number, pricesHolidays: boolean): number | null {
-  const covering = segments.filter((s) => covers(s, hour));
-  const stated = covering.filter((s) => s[0] === "holiday");
-  if (stated.length > 0) return mostSpecific(stated);
-  if (pricesHolidays) return mostSpecific(covering.filter((s) => s[0] === "weekend" || s[0] === "all"));
-  if (segments.some((s) => s[0] === "weekday" || s[0] === "weekend")) return null;
-  return mostSpecific(covering.filter((s) => s[0] === "all"));
-}
-
 export function rateAt(price: Price, ts: number): number | null {
-  const segments = price.t ?? [];
-  const { hour, weekend } = taipeiParts(ts);
-  if (isHoliday(ts)) return holidayRate(segments, hour, price.h === 1);
-  const wanted: FareScope = weekend ? "weekend" : "weekday";
-  const applicable = segments.filter(
-    (s) => covers(s, hour) && (s[0] === wanted || s[0] === "all"),
-  );
-  if (applicable.length === 0) return null;
-  const best = Math.max(...applicable.map((s) => SCOPE_RANK[s[0]]));
-  return applicable.find((s) => SCOPE_RANK[s[0]] === best)![3];
+  return resolveRate(price, ts).rate;
 }
 
 /**
@@ -569,7 +596,7 @@ function midpoint(price: Price): number | null {
  * the car park displays.
  */
 function priceOf(price: Price | undefined, arrivalTs?: number): Money {
-  const blank = { rateAtArrival: null, pricesHolidays: false, holidayAtArrival: false };
+  const blank = { rateAtArrival: null, pricesHolidays: false, holidayAtArrival: false, holidayRateAtArrival: false };
   const mid = price === undefined ? null : midpoint(price);
   if (price === undefined || mid === null || price.k === "unknown") {
     return {
@@ -591,12 +618,13 @@ function priceOf(price: Price | undefined, arrivalTs?: number): Money {
   // the stay has no stated rate, and the midpoint is then the honest fallback,
   // exactly as before this existed.
   const stay = feeForStay(price, arrivalTs);
+  const atArrival = arrivalTs === undefined ? null : resolveRate(price, arrivalTs);
   return {
     hourly: mid,
     perEntry: null,
     priceKnown: true,
     fee: stay ?? mid * EXPECTED_HOURS,
-    rateAtArrival: arrivalTs === undefined ? null : rateAt(price, arrivalTs),
+    rateAtArrival: atArrival?.rate ?? null,
     // The wire flag first, and it is not a shortcut for scanning `t`: the
     // collector folds a holiday marker into the `weekend` scope it is written
     // inside, so the segments lose it. Scanning alone found 1 lot of 119 where
@@ -605,6 +633,7 @@ function priceOf(price: Price | undefined, arrivalTs?: number): Money {
     // arm, for a schedule that really does carry a holiday-only segment.
     pricesHolidays: price.h === 1 || (price.t ?? []).some((s) => s[0] === "holiday"),
     holidayAtArrival: arrivalTs !== undefined && isHoliday(arrivalTs),
+    holidayRateAtArrival: atArrival?.holidayPrice ?? false,
   };
 }
 
@@ -828,6 +857,7 @@ export function rankLots(input: RankInput): Ranked[] {
       rateAtArrival: s.money.rateAtArrival,
       pricesHolidays: s.money.pricesHolidays,
       holidayAtArrival: s.money.holidayAtArrival,
+      holidayRateAtArrival: s.money.holidayRateAtArrival,
       meters: s.meters,
       walkMin: s.walkMin,
       cost:

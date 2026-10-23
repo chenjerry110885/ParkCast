@@ -278,6 +278,18 @@ def test_a_lot_silent_on_holidays_claims_no_rate_on_one():
     assert pricing.rate_at(tariff, ORDINARY_THU_1400) == 50, "an ordinary day is unaffected"
 
 
+def test_a_weekend_holiday_is_a_weekend_whatever_a_holiday_costs():
+    """2026-10-25 is 光復節 and a Sunday. A lot that never says what a holiday
+    costs is still unambiguous on a Sunday: whichever reading of "holiday" its
+    sign intends, a Sunday is a weekend. Withholding its Sunday rate there
+    turned a known 60 into a 50-60 range for no reason."""
+    tariff = pricing.Tariff(WEEKDAY_WEEKEND, holidays=False)
+    sunday_holiday = datetime(2026, 10, 25, 14, 0, tzinfo=config.TAIPEI_TZ)
+
+    assert pricing.rate_at(tariff, sunday_holiday) == 60
+    assert pricing.rate_at(tariff, HOLIDAY_FRI_1400) is None, "a weekday holiday stays ambiguous"
+
+
 def test_a_schedule_that_ignores_the_day_ignores_holidays_too():
     tariff = pricing.Tariff((pricing.Segment("all", 8, 22, 40), pricing.Segment("all", 22, 8, 20)))
 
