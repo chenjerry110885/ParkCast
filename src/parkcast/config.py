@@ -125,8 +125,16 @@ WEEK_BUCKETS = CLOCK_BUCKETS + BUCKETS_PER_DAY
 # toward the lot's flat rate. A lot sees about 22 holidays a year against 52 of
 # each weekday, so its holiday cells are thin for a long time, and the day a
 # holiday most resembles is a far better starting shape than the lot average.
-# 3 is Sunday (slot 0 is Thursday). Task 3 of the holiday plan measures which
-# slot it should be; see `scripts/holiday-prior.py`.
+# 3 is Sunday (slot 0 is Thursday) -- measured, by `scripts/holiday-prior.py`,
+# on 2026-10-23 over the corpus's four holidays (1,131,754 observations).
+# Pooled Brier, predicting each holiday from the same half-hour of each day:
+#     Thu .0530  Fri .0544  Sat .0451  Sun .0444  Mon .0559  Tue .0551  Wed .0545
+# Sunday by a narrow 1.6% over Saturday (they split the four holidays 2-2), every
+# weekday far behind. The finding that matters most is that a holiday's OWN
+# weekday was never the best: on the three weekday holidays, filing each under
+# the weekday it fell on -- what the climatology did before this slot existed --
+# scored ~15% worse than Sunday. Four holidays is a small sample; re-run the
+# script once a year of them has accumulated.
 HOLIDAY_PRIOR_SLOT = 3
 # Hierarchical shrinkage strengths, in pseudo-observations. A 30-min bucket at a
 # 5-min cadence accrues only 6 observations per week, so an unsmoothed bucket
