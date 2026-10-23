@@ -104,12 +104,18 @@ export function formatPrice(row: Ranked, s: Strings, arrivalTs?: number): string
     if (row.rateAtArrival !== null && arrivalTs !== undefined) {
       const exact = amount(row.rateAtArrival, row.rateAtArrival);
       if (exact !== null) {
-        return `${exact} ${fillTemplate(s.perHourAtTemplate, { time: formatClock(arrivalTs) })}`;
+        const at = `${exact} ${fillTemplate(s.perHourAtTemplate, { time: formatClock(arrivalTs) })}`;
+        // On a holiday this number came from the holiday rule, and the label has
+        // to say so: on a Friday, "NT$60 per hour at 14:00" reads as the lot's
+        // Friday rate.
+        return row.holidayAtArrival ? `${at} · ${s.priceHolidayRate}` : at;
       }
     }
     const span = amount(price.lo, price.hi);
     if (span === null) return s.priceUnknown;
-    return `${span} ${s.perHour} · ${s.priceVaries}`;
+    // On a holiday an unresolved range has one specific reason worth naming: the
+    // lot never said what a holiday costs (`rank.holidayRate`, step 3).
+    return `${span} ${s.perHour} · ${row.holidayAtArrival ? s.priceMayDifferHoliday : s.priceVaries}`;
   }
   const text = amount(price.lo, price.hi);
   if (text === null) return s.priceUnknown;

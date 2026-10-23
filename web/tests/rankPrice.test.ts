@@ -6,7 +6,7 @@ import {
   rankLots,
   rateAt,
 } from "../src/rank";
-import type { Price } from "../src/types";
+import type { FareSegment, Price } from "../src/types";
 
 /**
  * Taipei is UTC+8 with no DST, so a wall-clock moment there is exact integer
@@ -21,6 +21,9 @@ const SATURDAY = taipeiMidnight(2026, 10, 3);
 /** Epoch SECONDS, as every timestamp in this project is. */
 const on = (day: number, h: number, min = 0) => day + (h * 60 + min) * 60;
 
+/** A range price around a bare schedule, for the cases that only care about `t`. */
+const sched = (t: FareSegment[], h?: 1): Price => ({ k: "range", lo: 0, hi: 999, t, ...(h ? { h } : {}) });
+
 /** 08-22 at NT$50, 22-08 at NT$10 -- the commonest shape in the corpus. */
 const DAY_NIGHT: Price = {
   k: "range", lo: 10, hi: 50,
@@ -29,56 +32,56 @@ const DAY_NIGHT: Price = {
 
 describe("rateAt", () => {
   it("reads the rate in force at that Taipei hour", () => {
-    expect(rateAt(DAY_NIGHT.t!, on(TUESDAY, 14))).toBe(50);
+    expect(rateAt(DAY_NIGHT, on(TUESDAY, 14))).toBe(50);
   });
 
   it("covers both sides of a segment that wraps midnight", () => {
     // `22-08` is one segment. A rule assuming start < end would drop every
     // overnight rate in the corpus.
-    expect(rateAt(DAY_NIGHT.t!, on(TUESDAY, 23))).toBe(10);
-    expect(rateAt(DAY_NIGHT.t!, on(TUESDAY, 3))).toBe(10);
+    expect(rateAt(DAY_NIGHT, on(TUESDAY, 23))).toBe(10);
+    expect(rateAt(DAY_NIGHT, on(TUESDAY, 3))).toBe(10);
   });
 
   it("uses Taipei's clock, not the machine's", () => {
     // The lots are in Taipei. A driver reading the app from London must see the
     // rate Taipei is charging, not the one their own hour would select.
     const taipeiNoon = on(TUESDAY, 12);
-    expect(rateAt(DAY_NIGHT.t!, taipeiNoon)).toBe(50);
+    expect(rateAt(DAY_NIGHT, taipeiNoon)).toBe(50);
     // 04:00 Taipei is the previous evening in London; still the night rate.
-    expect(rateAt(DAY_NIGHT.t!, on(TUESDAY, 4))).toBe(10);
+    expect(rateAt(DAY_NIGHT, on(TUESDAY, 4))).toBe(10);
   });
 
   it("tells a Saturday from a Tuesday", () => {
     const scoped: Price["t"] = [["weekday", 8, 20, 50], ["weekend", 8, 20, 60]];
-    expect(rateAt(scoped!, on(TUESDAY, 14))).toBe(50);
-    expect(rateAt(scoped!, on(SATURDAY, 14))).toBe(60);
+    expect(rateAt(sched(scoped!), on(TUESDAY, 14))).toBe(50);
+    expect(rateAt(sched(scoped!), on(SATURDAY, 14))).toBe(60);
   });
 
   it("prefers the more specific scope over `all`", () => {
     const scoped: Price["t"] = [["all", 0, 0, 30], ["weekend", 10, 20, 60]];
-    expect(rateAt(scoped!, on(SATURDAY, 14))).toBe(60);
-    expect(rateAt(scoped!, on(TUESDAY, 14))).toBe(30);
+    expect(rateAt(sched(scoped!), on(SATURDAY, 14))).toBe(60);
+    expect(rateAt(sched(scoped!), on(TUESDAY, 14))).toBe(30);
   });
 
   it("returns null for an hour no segment covers", () => {
     // Never the other scope's rate, never a midpoint: an absence is not a number.
     const scoped: Price["t"] = [["weekend", 10, 20, 60]];
-    expect(rateAt(scoped!, on(SATURDAY, 9))).toBeNull();
-    expect(rateAt(scoped!, on(TUESDAY, 14))).toBeNull();
+    expect(rateAt(sched(scoped!), on(SATURDAY, 9))).toBeNull();
+    expect(rateAt(sched(scoped!), on(TUESDAY, 14))).toBeNull();
   });
 
   it("never resolves a holiday-scoped segment", () => {
     // No calendar, no claim: any day might be a public holiday.
     const holiday: Price["t"] = [["holiday", 10, 20, 80]];
-    expect(rateAt(holiday!, on(SATURDAY, 14))).toBeNull();
-    expect(rateAt(holiday!, on(TUESDAY, 14))).toBeNull();
+    expect(rateAt(sched(holiday!), on(SATURDAY, 14))).toBeNull();
+    expect(rateAt(sched(holiday!), on(TUESDAY, 14))).toBeNull();
   });
 
   it("still resolves an ordinary Tuesday at a lot that also prices holidays", () => {
     // 87 of the 219 varying lots price holidays as their own category. Refusing
     // all of them would cost 40% of the feature to protect ten days a year.
     const both: Price["t"] = [["weekday", 8, 20, 50], ["holiday", 8, 20, 80]];
-    expect(rateAt(both!, on(TUESDAY, 14))).toBe(50);
+    expect(rateAt(sched(both!), on(TUESDAY, 14))).toBe(50);
   });
 });
 
@@ -219,5 +222,59 @@ describe("the ranking responds to the arrival time", () => {
     });
     expect(ranked[0]!.rateAtArrival).toBe(50);
     expect(ranked[0]!.cost).not.toBeNull();
+  });
+});
+
+describe("public holidays", () => {
+  /** 2026-10-09, Friday, 補假 -- a holiday on a weekday. */
+  const HOLIDAY_FRI = taipeiMidnight(2026, 10, 9);
+  const ORDINARY_THU = taipeiMidnight(2026, 10, 8);
+  /** 2026-10-10, Saturday, 國慶日; the Sunday after it is an ordinary day. */
+  const NATIONAL_DAY = taipeiMidnight(2026, 10, 10);
+  const WEEKDAY_WEEKEND: FareSegment[] = [["weekday", 8, 20, 50], ["weekend", 8, 20, 60]];
+
+  it("charges a lot that prices holidays its weekend rate on one", () => {
+    // These lots write holidays INSIDE the weekend clause, so the weekend
+    // segment is, in the lot's own words, the holiday rate. This used to be 50.
+    expect(rateAt(sched(WEEKDAY_WEEKEND, 1), on(HOLIDAY_FRI, 14))).toBe(60);
+  });
+
+  it("lets a holiday segment win on a holiday", () => {
+    const withHoliday: FareSegment[] = [...WEEKDAY_WEEKEND, ["holiday", 8, 20, 80]];
+    expect(rateAt(sched(withHoliday, 1), on(HOLIDAY_FRI, 14))).toBe(80);
+  });
+
+  it("claims no rate for a lot that never says what a holiday costs", () => {
+    expect(rateAt(sched(WEEKDAY_WEEKEND), on(HOLIDAY_FRI, 14))).toBeNull();
+    expect(rateAt(sched(WEEKDAY_WEEKEND), on(ORDINARY_THU, 14))).toBe(50);
+  });
+
+  it("leaves a schedule that ignores the day alone", () => {
+    expect(rateAt(DAY_NIGHT, on(HOLIDAY_FRI, 14))).toBe(50);
+  });
+
+  it("treats a holiday date past the calendar as an ordinary day", () => {
+    // 2028-10-10 is National Day and a Tuesday; the calendar ends in 2027.
+    expect(rateAt(sched(WEEKDAY_WEEKEND), on(taipeiMidnight(2028, 10, 10), 14))).toBe(50);
+  });
+
+  it("prices each hour of a stay by its own date", () => {
+    // 23:00 on National Day for two hours: the first hour is the holiday, the
+    // second is 00:00 on an ordinary Sunday. The holiday segment reaches past
+    // midnight (22-02), so pricing the second hour by the ARRIVAL's date would
+    // charge it 99 too -- 198 instead of 109.
+    const night: FareSegment[] = [["holiday", 22, 2, 99], ["weekend", 22, 8, 10], ["weekday", 22, 8, 10]];
+    expect(feeForStay(sched(night, 1), on(NATIONAL_DAY, 23))).toBeCloseTo(99 + 10);
+  });
+
+  it("reports when the arrival falls on a holiday", () => {
+    const one = (ts: number) => rankLots({
+      destination: { lat: 25.05, lon: 121.52 }, horizonMin: 15, arrivalTs: ts,
+      lots: [{ i: 0, id: "x", n: "x", a: "中正區", y: 25.0502, x: 121.52, c: 50, t: "民營停車場",
+        p: sched(WEEKDAY_WEEKEND, 1) } as never],
+      probability: () => 0.9,
+    })[0]!;
+    expect(one(on(HOLIDAY_FRI, 14)).holidayAtArrival).toBe(true);
+    expect(one(on(ORDINARY_THU, 14)).holidayAtArrival).toBe(false);
   });
 });

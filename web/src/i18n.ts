@@ -68,6 +68,18 @@ export interface Strings {
    * not a hedge on the number beside it.
    */
   priceHolidayNote: string;
+  /**
+   * Label suffix on a rate resolved by the holiday rule: the lot priced
+   * holidays, the arrival is on one, and the number shown is that price. Without
+   * it NT$60 on a Friday reads as this lot's Friday rate, which it is not.
+   */
+  priceHolidayRate: string;
+  /**
+   * Label suffix on a range shown on a holiday for a lot that distinguishes
+   * weekdays from weekends but never says which a holiday is. Either answer
+   * would be a guess with money on it, so the range stays, with the reason.
+   */
+  priceMayDifferHoliday: string;
   /** Shown instead of a price when the feed's free-text fare couldn't be parsed. */
   priceUnknown: string;
   /** Shown instead of a probability when the grid has no forecast for a lot. */
@@ -490,6 +502,8 @@ const en: Strings = {
   perHourAtTemplate: "per hour at {time}",
   priceVaries: "rate varies",
   priceHolidayNote: "holiday rates differ",
+  priceHolidayRate: "holiday rate",
+  priceMayDifferHoliday: "may differ on holidays",
   priceUnknown: "Price unknown",
   noData: "No data",
   notUpdating: "Not updating",
@@ -602,6 +616,8 @@ const zh: Strings = {
   perHourAtTemplate: "{time} 每小時",
   priceVaries: "依時段變動",
   priceHolidayNote: "假日費率不同",
+  priceHolidayRate: "假日費率",
+  priceMayDifferHoliday: "假日可能不同",
   priceUnknown: "價格未知",
   noData: "無資料",
   notUpdating: "資料未更新",

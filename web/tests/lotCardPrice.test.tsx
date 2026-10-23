@@ -33,7 +33,7 @@ const lot = (over: Partial<Lot> = {}): Lot => ({
 });
 const row = (over: Partial<Ranked> = {}, lotOver: Partial<Lot> = {}): Ranked => ({
   lot: lot(lotOver), id: "TPE1", index: 0, probability: 0.86, hourly: 60,
-  perEntry: null, priceKnown: true, rateAtArrival: null, pricesHolidays: false,
+  perEntry: null, priceKnown: true, rateAtArrival: null, pricesHolidays: false, holidayAtArrival: false,
   meters: 320, walkMin: 4, cost: 100, ...over,
 });
 const props = {
@@ -169,5 +169,42 @@ describe("Chinese", () => {
     );
     expect(label()).toBe(`${t("zh").perHour} · ${t("zh").priceVaries}`);
     expect(screen.getByTestId("lot-holiday-price")).toHaveTextContent(t("zh").priceHolidayNote);
+  });
+});
+
+describe("on a public holiday", () => {
+  /** 2026-10-09 (補假, a Friday) at 14:00 Taipei, epoch seconds. */
+  const HOLIDAY_1400 = Math.floor(Date.UTC(2026, 9, 9, 14, 0) / 1000) - 8 * 3600;
+  const FOLDED: Price = { k: "range", lo: 50, hi: 60, h: 1, t: [["weekday", 8, 20, 50], ["weekend", 8, 20, 60]] };
+
+  it("says the rate shown is the holiday one", () => {
+    // Without the word, NT$60 on a Friday reads as this lot's Friday rate --
+    // which it is not; it is what the lot charges because today is a holiday.
+    render(
+      <ol><LotCard row={row({ rateAtArrival: 60, holidayAtArrival: true }, { p: FOLDED })} {...props} arrivalTs={HOLIDAY_1400} /></ol>,
+    );
+    expect(value()).toBe("NT$60");
+    expect(label()).toBe(`per hour at 14:00 · ${t("en").priceHolidayRate}`);
+  });
+
+  it("says why there is no single rate when the lot never priced holidays", () => {
+    render(
+      <ol><LotCard row={row({ rateAtArrival: null, holidayAtArrival: true }, { p: { k: "range", lo: 50, hi: 60, t: FOLDED.t } })} {...props} arrivalTs={HOLIDAY_1400} /></ol>,
+    );
+    expect(value()).toBe("NT$50–60");
+    expect(label()).toBe(`per hour · ${t("en").priceMayDifferHoliday}`);
+  });
+
+  it("leaves a flat fare exactly as it is", () => {
+    // One stated rate is one rate; a holiday changes nothing the lot said.
+    render(<ol><LotCard row={row({ rateAtArrival: 60, holidayAtArrival: true })} {...props} arrivalTs={HOLIDAY_1400} /></ol>);
+    expect(label()).toBe("per hour");
+  });
+
+  it("says it in Chinese too", () => {
+    render(
+      <ol><LotCard row={row({ rateAtArrival: 60, holidayAtArrival: true }, { p: FOLDED })} {...props} lang="zh" arrivalTs={HOLIDAY_1400} /></ol>,
+    );
+    expect(label()).toBe(`14:00 每小時 · ${t("zh").priceHolidayRate}`);
   });
 });

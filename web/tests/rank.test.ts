@@ -618,11 +618,12 @@ describe("rankLots: WALK_VALUE and DELAY_VALUE price independently", () => {
 
     let patched = patchDeclaration(source, "WALK_VALUE", WALK_VALUE_TEST);
     patched = patchDeclaration(patched, "DELAY_VALUE", DELAY_VALUE_TEST);
-    // The copy lives one directory further from `src/geo` and `src/types`
-    // than the original does.
-    patched = patched
-      .replace('from "./geo"', 'from "../src/geo"')
-      .replace('from "./types"', 'from "../src/types"');
+    // The copy lives one directory away from `src/`, so EVERY relative import
+    // is rewritten -- not a named list of them. A list is what broke here when
+    // `rank.ts` began importing `./holidays`: the copy kept `./holidays`, which
+    // does not exist beside it, and this test failed on module resolution
+    // rather than on anything about the cost model.
+    patched = patched.replace(/from "\.\/([\w.-]+)"/g, 'from "../src/$1"');
 
     const genDir = join(testsDir, "../.dev-artifacts");
     mkdirSync(genDir, { recursive: true });

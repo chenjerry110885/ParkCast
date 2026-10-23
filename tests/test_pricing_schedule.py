@@ -243,3 +243,49 @@ def test_a_parsed_tariff_never_leaves_the_span_the_old_parser_read():
         assert tariff is not None, text[:40]
         for segment in tariff.segments:
             assert price.low <= segment.rate <= price.high, (text[:40], segment)
+
+
+# --- public holidays, now that there is a calendar ---------------------------
+
+HOLIDAY_FRI_1400 = datetime(2026, 10, 9, 14, 0, tzinfo=config.TAIPEI_TZ)   # 補假
+ORDINARY_THU_1400 = datetime(2026, 10, 8, 14, 0, tzinfo=config.TAIPEI_TZ)
+WEEKDAY_WEEKEND = (pricing.Segment("weekday", 8, 20, 50), pricing.Segment("weekend", 8, 20, 60))
+
+
+def test_a_lot_that_prices_holidays_charges_its_weekend_rate_on_one():
+    """The 35 folded lots write holidays INSIDE the weekend clause --
+    `週六、週日、行政機關放假之紀念日與民俗日60元/時` -- so on a holiday the
+    weekend segment is, by the lot's own words, the rate. A midweek holiday
+    used to charge the weekday 50 here, confidently and 20% under the sign."""
+    tariff = pricing.Tariff(WEEKDAY_WEEKEND, holidays=True)
+
+    assert pricing.rate_at(tariff, HOLIDAY_FRI_1400) == 60
+
+
+def test_a_holiday_segment_wins_on_a_holiday():
+    tariff = pricing.Tariff(WEEKDAY_WEEKEND + (pricing.Segment("holiday", 8, 20, 80),), holidays=True)
+
+    assert pricing.rate_at(tariff, HOLIDAY_FRI_1400) == 80
+
+
+def test_a_lot_silent_on_holidays_claims_no_rate_on_one():
+    """It distinguishes weekdays from weekends and never says which a holiday
+    is. Either answer is a guess with money on it, so neither is given -- the
+    range is shown instead, which is true."""
+    tariff = pricing.Tariff(WEEKDAY_WEEKEND, holidays=False)
+
+    assert pricing.rate_at(tariff, HOLIDAY_FRI_1400) is None
+    assert pricing.rate_at(tariff, ORDINARY_THU_1400) == 50, "an ordinary day is unaffected"
+
+
+def test_a_schedule_that_ignores_the_day_ignores_holidays_too():
+    tariff = pricing.Tariff((pricing.Segment("all", 8, 22, 40), pricing.Segment("all", 22, 8, 20)))
+
+    assert pricing.rate_at(tariff, HOLIDAY_FRI_1400) == 40
+
+
+def test_past_the_calendar_a_holiday_date_is_an_ordinary_day():
+    """2028-10-10 is National Day, but the committed calendar ends in 2027."""
+    tariff = pricing.Tariff(WEEKDAY_WEEKEND, holidays=False)
+
+    assert pricing.rate_at(tariff, datetime(2028, 10, 10, 14, 0, tzinfo=config.TAIPEI_TZ)) == 50
