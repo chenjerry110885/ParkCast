@@ -50,9 +50,10 @@ WEEK_PATH = ROOT / "web" / ".dev-artifacts" / "week.bin"
 
 #: Seconds in one climatology bucket, and in one week of them. `week_bucket` is
 #: invariant under a shift of a whole week, which is what lets the same bucket
-#: be fed from several distinct weeks below.
+#: be fed from several distinct weeks below. The CLOCK week: `WEEK_BUCKETS` also
+#: counts the holiday day, which is a row of the table, not a span of time.
 BUCKET_SEC = config.CLIMATOLOGY_BUCKET_MIN * 60
-WEEK_SEC = config.WEEK_BUCKETS * BUCKET_SEC
+WEEK_SEC = config.CLOCK_BUCKETS * BUCKET_SEC
 
 #: Four weeks at the collector's own five-minute cadence gives each bucket 24
 #: observations -- `confidence.ts`'s `SUPPORT_HIGH_MIN`, so a dev build shows
@@ -99,7 +100,7 @@ def bucket_start(anchor_ts: int, bucket: int) -> int:
     every observation by a constant nobody would notice in a dev build.
     """
     floor = (anchor_ts // BUCKET_SEC) * BUCKET_SEC
-    ts = floor - ((week_bucket(floor) - bucket) % config.WEEK_BUCKETS) * BUCKET_SEC
+    ts = floor - ((week_bucket(floor) - bucket) % config.CLOCK_BUCKETS) * BUCKET_SEC
     assert week_bucket(ts) == bucket, (ts, bucket, week_bucket(ts))
     return ts
 
@@ -121,7 +122,10 @@ def build_history(lots: list[dict], anchor_ts: int, weeks: int) -> forecast.Hist
     """
     counts = forecast.Counts()
     recent: dict[str, list[tuple[int, int]]] = {}
-    starts = [bucket_start(anchor_ts, b) for b in range(config.WEEK_BUCKETS)]
+    # Clock buckets only. Observations on a calendar holiday land in the
+    # holiday day through `Counts.add` itself, exactly as they do live, and
+    # `week.build_week_cells` fills every holiday cell via `predict_bucket`.
+    starts = [bucket_start(anchor_ts, b) for b in range(config.CLOCK_BUCKETS)]
     for lot in lots:
         lot_id = lot["id"]
         tail: list[tuple[int, int]] = []
