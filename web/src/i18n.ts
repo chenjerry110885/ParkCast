@@ -75,6 +75,23 @@ export interface Strings {
    */
   priceHolidayRate: string;
   /**
+   * The notice above the list when the chosen arrival is a public holiday.
+   * `{name}` is the holiday's name in the UI's language. True of any number
+   * below it, live or historical, so it is said whenever the date is one.
+   */
+  holidayNoticeTemplate: string;
+  /**
+   * Appended to the notice only when the numbers below came from the week
+   * table's holiday day -- not for a live forecast, and not from a version-1
+   * table, which has no holiday day and answers from the clock week.
+   *
+   * Names Sunday because the climatology's holiday cells shrink toward Sunday
+   * (`config.HOLIDAY_PRIOR_SLOT`, measured by `scripts/holiday-prior.py`): a
+   * car park with few past holidays answers with its Sunday shape. If that
+   * measurement ever picks another day, this sentence changes with it.
+   */
+  holidayFromHistory: string;
+  /**
    * Label suffix on a range shown on a holiday for a lot that distinguishes
    * weekdays from weekends but never says which a holiday is. Either answer
    * would be a guess with money on it, so the range stays, with the reason.
@@ -319,6 +336,13 @@ export interface Strings {
    */
   confidenceWeekTemplate: string;
   /**
+   * The pill's reason on a public holiday: the same evidence as the weeks
+   * templates, counted in past holidays, because a holiday half-hour is filled
+   * one holiday at a time. Singular and plural, as for weeks.
+   */
+  confidenceHolidayTemplate: string;
+  confidenceHolidaysTemplate: string;
+  /**
    * The pill's popover text when the grade rests on accumulated history and
    * that count is not exactly one week -- `ConfidenceReason`'s `"weeks"`
    * case for every `weeks` value except `1` (weeks is never `0` here: the
@@ -503,6 +527,8 @@ const en: Strings = {
   priceVaries: "rate varies",
   priceHolidayNote: "holiday rates differ",
   priceHolidayRate: "holiday rate",
+  holidayNoticeTemplate: "Public holiday — {name}. Car parks may fill differently from a usual day.",
+  holidayFromHistory: "These chances come from past holidays, and follow Sundays where a car park has seen few.",
   priceMayDifferHoliday: "may differ on holidays",
   priceUnknown: "Price unknown",
   noData: "No data",
@@ -566,6 +592,8 @@ const en: Strings = {
   confidenceLow: "Low",
   confidenceWeekTemplate: "Based on {n} week of history for this time of week.",
   confidenceWeeksTemplate: "Based on {n} weeks of history for this time of week.",
+  confidenceHolidayTemplate: "Based on {n} past public holiday at this time of day.",
+  confidenceHolidaysTemplate: "Based on {n} past public holidays at this time of day.",
   confidenceReadingTemplate: "Based on a live reading from {n} min ago.",
   confidenceThin: "Not watched at this time of week often enough yet.",
   expired: "expired",
@@ -617,6 +645,8 @@ const zh: Strings = {
   priceVaries: "依時段變動",
   priceHolidayNote: "假日費率不同",
   priceHolidayRate: "假日費率",
+  holidayNoticeTemplate: "國定假日：{name}。停車場狀況可能與平常不同。",
+  holidayFromHistory: "以下機率依據過去的國定假日；假日資料不足的停車場參考週日。",
   priceMayDifferHoliday: "假日可能不同",
   priceUnknown: "價格未知",
   noData: "無資料",
@@ -676,6 +706,8 @@ const zh: Strings = {
   confidenceLow: "低",
   confidenceWeekTemplate: "依據此時段過去 {n} 週的資料。",
   confidenceWeeksTemplate: "依據此時段過去 {n} 週的資料。",
+  confidenceHolidayTemplate: "依據過去 {n} 個國定假日此時段的資料。",
+  confidenceHolidaysTemplate: "依據過去 {n} 個國定假日此時段的資料。",
   confidenceReadingTemplate: "依據 {n} 分鐘前的即時讀數。",
   confidenceThin: "此時段的觀測資料還不夠多。",
   expired: "已過期",

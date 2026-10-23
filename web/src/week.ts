@@ -212,7 +212,17 @@ export function probabilityAt(
   const offset = (lotIndex * table.nBuckets + bucket) * 2;
   const percent = table.cells[offset]!;
   const support = table.cells[offset + 1]!;
-  return { p: percent === WEEK_UNKNOWN ? null : percent / 100, support, holiday: bucket >= N_BUCKETS };
+  return { p: percent === WEEK_UNKNOWN ? null : percent / 100, support, holiday: answersFromHolidays(table, ts) };
+}
+
+/**
+ * Whether `table` answers `ts` from its public-holiday day rather than its
+ * clock week -- the same for every lot, so the app asks once per arrival.
+ * False on an ordinary day, past the end of the calendar, and on any
+ * version-1 table, which has no holiday day to answer from.
+ */
+export function answersFromHolidays(table: WeekTable, ts: number): boolean {
+  return dayBucket(ts, table) >= N_BUCKETS;
 }
 
 /**

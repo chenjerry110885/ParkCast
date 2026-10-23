@@ -58,6 +58,12 @@ export interface LotListProps {
    * routing is per *arrival*: see `probabilityForLot` in `App.tsx`.
    */
   fromHistory: boolean;
+  /**
+   * Whether every row's support came from the week table's holiday day. One
+   * flag for the list for the same reason as `fromHistory`: it is decided by
+   * the arrival, not by the lot. See `LotCard`'s prop of the same name.
+   */
+  holidaySupport?: boolean;
   /** Id of the list's single top pick, or `null` when none applies. */
   bestId: string | null;
   /** Id of the card currently selected on the map, or `null`. */
@@ -78,6 +84,7 @@ function LotListInner({
   arrivalTs,
   supportById,
   fromHistory,
+  holidaySupport = false,
   bestId,
   selectedId,
   onSelect,
@@ -145,6 +152,7 @@ function LotListInner({
           arrivalTs={arrivalTs}
           support={supportById.get(row.id) ?? 0}
           fromHistory={fromHistory}
+          holidaySupport={holidaySupport}
           best={row.id === bestId}
           selected={row.id === selectedId}
           onSelect={onSelect}

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { BLEND_HALF_LIFE_MIN, HEADER_SIZE, WEEK_UNKNOWN, blend, dayBucket, parseWeek, probabilityAt, weekBucket } from "../src/week";
+import { BLEND_HALF_LIFE_MIN, HEADER_SIZE, WEEK_UNKNOWN, answersFromHolidays, blend, dayBucket, parseWeek, probabilityAt, weekBucket } from "../src/week";
 
 // Resolved through `fileURLToPath` rather than `new URL("...", import.meta.url)`:
 // Vite rewrites that literal pattern at transform time into an asset URL, which
@@ -285,5 +285,17 @@ describe("the holiday table (version 2, 384 buckets)", () => {
 
     expect(dayBucket(nationalDay2028, table)).toBe(weekBucket(nationalDay2028));
     expect(probabilityAt(table, 0, nationalDay2028).holiday).toBe(false);
+  });
+
+  it("says, without a lot, whether the whole table answers from its holiday day", () => {
+    // The app asks once per arrival, not once per lot: the routing is the
+    // same for every row, and a table with no lots must still answer.
+    const v2 = parseWeek(makeWeek(0, [], { version: 2, nBuckets: 384 }));
+    const v1 = parseWeek(makeWeek(0, []));
+
+    expect(answersFromHolidays(v2, NATIONAL_DAY)).toBe(true);
+    expect(answersFromHolidays(v1, NATIONAL_DAY)).toBe(false);
+    expect(answersFromHolidays(v2, taipeiAt(2026, 10, 8, 14, 10))).toBe(false);
+    expect(answersFromHolidays(v2, taipeiAt(2028, 10, 10, 14, 10))).toBe(false);
   });
 });

@@ -32,6 +32,8 @@ function reasonText(reason: ConfidenceReason, s: ReturnType<typeof t>): string {
       // are the same text, so this branch is a no-op there. See
       // `confidenceWeekTemplate`'s doc comment.
       return fillTemplate(reason.weeks === 1 ? s.confidenceWeekTemplate : s.confidenceWeeksTemplate, { n: reason.weeks });
+    case "holidays":
+      return fillTemplate(reason.holidays === 1 ? s.confidenceHolidayTemplate : s.confidenceHolidaysTemplate, { n: reason.holidays });
     case "thin":
       return s.confidenceThin;
   }

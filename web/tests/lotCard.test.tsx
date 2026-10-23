@@ -210,6 +210,23 @@ describe("LotCard", () => {
     );
   });
 
+  it("counts past holidays, not weeks, when the support came from the holiday day", () => {
+    // On a public holiday the week table answers from its holiday slot, where
+    // one observation-day is one past holiday. The same 26 observations that
+    // read "4 weeks" on an ordinary Tuesday are 4 past holidays here, and the
+    // popover saying "weeks" would describe evidence the number never used.
+    render(
+      <ol>
+        <LotCard row={row()} {...props} horizonFromReadingMin={100} support={26} holidaySupport best={false} selected={false} />
+      </ol>,
+    );
+    const card = screen.getByTestId("lot-row");
+    fireEvent.click(within(card).getByRole("button", { name: /confidence.*high/i }));
+    expect(within(card).getByRole("note")).toHaveTextContent(
+      fillTemplate(t("en").confidenceHolidaysTemplate, { n: 4 }),
+    );
+  });
+
   it("keeps the name Chinese under English and selects on tap", () => {
     const onSelect = vi.fn();
     render(<ol><LotCard row={row()} {...props} onSelect={onSelect} best={false} selected /></ol>);
@@ -251,5 +268,26 @@ describe("LotList", () => {
     const [first, second] = within(screen.getByTestId("lot-list")).getAllByTestId("lot-row");
     expect(within(first!).getByRole("button", { name: /confidence.*high/i })).toBeInTheDocument();
     expect(within(second!).getByRole("button", { name: /confidence.*low/i })).toBeInTheDocument();
+  });
+
+  it("hands every card the list's holiday flag", () => {
+    // One flag for the whole list, like `fromHistory`: whether the table
+    // answered from its holiday day is decided by the arrival, not the lot.
+    render(
+      <LotList
+        rows={rows()}
+        {...props}
+        horizonFromReadingMin={100}
+        supportById={new Map([["TPE1", 30]])}
+        holidaySupport
+        bestId={null}
+        selectedId={null}
+      />,
+    );
+    const [first] = within(screen.getByTestId("lot-list")).getAllByTestId("lot-row");
+    fireEvent.click(within(first!).getByRole("button", { name: /confidence.*high/i }));
+    expect(within(first!).getByRole("note")).toHaveTextContent(
+      fillTemplate(t("en").confidenceHolidaysTemplate, { n: 5 }),
+    );
   });
 });

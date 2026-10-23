@@ -144,7 +144,8 @@ import { readPreference, writePreference } from "./preference";
 import { listRows, notUpdating, rankLots, type Preference, type Ranked } from "./rank";
 import type { Grid, Lot, LotsDoc, WeekTable } from "./types";
 import { useGeolocation } from "./useGeolocation";
-import { blend, probabilityAt as weekProbabilityAt } from "./week";
+import { holidayName } from "./holidays";
+import { answersFromHolidays, blend, probabilityAt as weekProbabilityAt } from "./week";
 
 /**
  * The location watchdog's deadline, re-exported from the hook that now owns it.
@@ -1356,6 +1357,22 @@ export default function App() {
     [needsWeek, mapLots],
   );
 
+  /**
+   * The public holiday the arrival falls on, named in the UI's language, or
+   * `null` -- on an ordinary day, and past the end of the committed calendar,
+   * where no date is claimed to be one.
+   */
+  const arrivalHoliday = holidayName(arrivalTs, lang);
+
+  /**
+   * Whether the week table answers this arrival from its holiday day. Decided
+   * by the arrival and the table's version, never by the lot, so it is one
+   * flag: it turns the confidence pill's "weeks" into "past holidays", and --
+   * with `fromHistory` -- licenses the notice to say where the numbers came
+   * from. A version-1 table has no holiday day and never sets it.
+   */
+  const holidaySupport = week !== null && answersFromHolidays(week, arrivalTs);
+
 
   /**
    * The one lot the list crowns, and the only dot that pulses.
@@ -1688,6 +1705,7 @@ export default function App() {
                   arrivalTs={arrivalTs}
                   support={supportById.get(mapCard.id) ?? 0}
                   fromHistory={fromHistory}
+                  holidaySupport={holidaySupport}
                   best={mapCard.id === bestId}
                   selected
                   // Tapping the card itself re-centres the map on its lot and
@@ -1752,6 +1770,18 @@ export default function App() {
       {fromHistory && (
         <Notice tone="info" testId="from-history" role="status">
           {s.basedOnHistory}
+        </Notice>
+      )}
+      {/* The arrival is a public holiday by the committed calendar. Said once,
+          here, rather than on every card; the cards carry the holiday fare
+          and the holiday-count pill. Where the numbers came from is added only
+          when it is true of them: answered from the week table's holiday day.
+          Past the end of the calendar `holidayName` is null and nothing is
+          claimed. */}
+      {artifacts !== null && arrivalHoliday !== null && (
+        <Notice tone="info" testId="holiday-notice" role="status">
+          {fillTemplate(s.holidayNoticeTemplate, { name: arrivalHoliday })}
+          {fromHistory && holidaySupport && ` ${s.holidayFromHistory}`}
         </Notice>
       )}
       {/* No heading above this one: "Ranked for your arrival" over an
@@ -1828,6 +1858,7 @@ export default function App() {
             arrivalTs={arrivalTs}
             supportById={supportById}
             fromHistory={fromHistory}
+            holidaySupport={holidaySupport}
             bestId={bestId}
             selectedId={selectedLotId}
             onSelect={selectLot}
@@ -1889,6 +1920,7 @@ export default function App() {
                   arrivalTs={arrivalTs}
                   supportById={supportById}
                   fromHistory={fromHistory}
+                  holidaySupport={holidaySupport}
                   bestId={bestId}
                   selectedId={selectedLotId}
                   onSelect={selectLot}

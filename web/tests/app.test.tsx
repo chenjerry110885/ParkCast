@@ -329,15 +329,18 @@ function encodeWeek(
   filler: { percent: number; support: number },
   rosterId: number = ROSTER_ID,
   nLots = 1,
+  version: 1 | 2 = 1,
 ): ArrayBuffer {
-  const buf = new ArrayBuffer(WEEK_HEADER_SIZE + nLots * WEEK_BUCKETS * 2);
+  // Version 2 appends a public-holiday day: 384 buckets a row, not 336.
+  const buckets = version === 2 ? WEEK_BUCKETS + 48 : WEEK_BUCKETS;
+  const buf = new ArrayBuffer(WEEK_HEADER_SIZE + nLots * buckets * 2);
   const dv = new DataView(buf);
   const bytes = new Uint8Array(buf);
   bytes.set(new TextEncoder().encode("PCW1"), 0);
-  dv.setUint8(4, 1);
+  dv.setUint8(4, version);
   dv.setUint32(5, BASE_DATA_TS - 3600, true); // builtTs: rebuilt daily, not per tick
   dv.setUint16(9, nLots, true);
-  dv.setUint16(11, WEEK_BUCKETS, true);
+  dv.setUint16(11, buckets, true);
   dv.setUint8(13, 30); // bucketMin
   dv.setUint32(14, rosterId, true);
   // Row-major, lot then bucket, matching `probabilityAt`'s
@@ -345,9 +348,9 @@ function encodeWeek(
   // is all the multi-lot callers need: they are about which *card* says what,
   // not about telling two lots' climatologies apart.
   for (let lot = 0; lot < nLots; lot += 1) {
-    for (let b = 0; b < WEEK_BUCKETS; b += 1) {
+    for (let b = 0; b < buckets; b += 1) {
       const cell = b === bucket ? marked : filler;
-      const at = WEEK_HEADER_SIZE + (lot * WEEK_BUCKETS + b) * 2;
+      const at = WEEK_HEADER_SIZE + (lot * buckets + b) * 2;
       bytes[at] = cell.percent;
       bytes[at + 1] = cell.support;
     }
@@ -2672,5 +2675,88 @@ describe("the map is a separate chunk", () => {
     expect(within(rowFor("市府路一號停車場")).getByTestId("lot-probability").textContent).toContain(
       "88%",
     );
+  });
+});
+
+describe("a public holiday", () => {
+  /** Taipei wall clock as epoch seconds. */
+  const taipeiAt = (y: number, m: number, d: number, h: number, mi = 0) =>
+    Math.floor(Date.UTC(y, m - 1, d, h, mi) / 1000) - 8 * 3600;
+
+  /** Puts "now" two days before the date under test, inside the picker's week. */
+  const nowBefore = (y: number, m: number, d: number) =>
+    vi.spyOn(Date, "now").mockReturnValue(taipeiAt(y, m, d - 2, 10) * 1000);
+
+  /** A table every cell of which is 60% with four past holidays' support. */
+  const tableOf = (version: 1 | 2) =>
+    encodeWeek(0, { percent: 60, support: 24 }, { percent: 60, support: 24 }, ROSTER_ID, LOTS.length, version);
+
+  it("says so above the list, naming the holiday and the day it leans on", async () => {
+    nowBefore(2026, 10, 10);
+    stubFetch(makeGrid(), makeLotsDoc(), tableOf(2));
+    await renderLocated();
+    selectArrival(taipeiAt(2026, 10, 10, 14));
+
+    const notice = await screen.findByTestId("holiday-notice");
+    expect(notice).toHaveTextContent("National Day");
+    // The measured prior (config.HOLIDAY_PRIOR_SLOT): where a lot has few past
+    // holidays, its holiday chances are Sunday-shaped, and the notice says so.
+    await waitFor(() => expect(notice).toHaveTextContent("Sunday"));
+  });
+
+  it("names the holiday in the UI's language", async () => {
+    nowBefore(2026, 10, 10);
+    stubFetch(makeGrid(), makeLotsDoc(), tableOf(2));
+    await renderLocated();
+    selectArrival(taipeiAt(2026, 10, 10, 14));
+    fireEvent.click(screen.getByRole("button", { name: "切換為中文" }));
+
+    expect(await screen.findByTestId("holiday-notice")).toHaveTextContent("國慶日");
+  });
+
+  it("claims no holiday history from a table that has none", async () => {
+    // A version-1 table -- a browser can hold one for a week after the
+    // collector moves on -- answers a holiday from its clock bucket. The day is
+    // still a holiday and the notice still says so, but "these chances come
+    // from past holidays" would be false of the numbers below it.
+    nowBefore(2026, 10, 10);
+    stubFetch(makeGrid(), makeLotsDoc(), tableOf(1));
+    await renderLocated();
+    selectArrival(taipeiAt(2026, 10, 10, 14));
+
+    const notice = await screen.findByTestId("holiday-notice");
+    expect(notice).toHaveTextContent("National Day");
+    await screen.findByTestId("from-history");
+    expect(notice).not.toHaveTextContent("Sunday");
+  });
+
+  it("counts past holidays, not weeks, on the confidence pill", async () => {
+    nowBefore(2026, 10, 10);
+    stubFetch(makeGrid(), makeLotsDoc(), tableOf(2));
+    await renderLocated();
+    selectArrival(taipeiAt(2026, 10, 10, 14));
+
+    const card = (await screen.findAllByTestId("lot-row"))[0]!;
+    fireEvent.click(await within(card).findByRole("button", { name: /confidence/i }));
+    expect(within(card).getByRole("note")).toHaveTextContent(
+      fillTemplate(t("en").confidenceHolidaysTemplate, { n: 4 }),
+    );
+  });
+
+  it("says nothing on an ordinary day", async () => {
+    nowBefore(2026, 10, 10);
+    await renderLocated();
+    selectArrival(taipeiAt(2026, 10, 8, 14));
+
+    expect(screen.queryByTestId("holiday-notice")).toBeNull();
+  });
+
+  it("says nothing past the end of the calendar", async () => {
+    // 2028-10-10 is National Day, and the committed calendar ends in 2027.
+    nowBefore(2028, 10, 10);
+    await renderLocated();
+    selectArrival(taipeiAt(2028, 10, 10, 14));
+
+    expect(screen.queryByTestId("holiday-notice")).toBeNull();
   });
 });

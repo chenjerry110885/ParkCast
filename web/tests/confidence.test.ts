@@ -269,3 +269,26 @@ describe("confidenceFor", () => {
     });
   });
 });
+
+describe("on a public holiday", () => {
+  /** A distant arrival, so the reading cannot earn the grade and support decides. */
+  const far = { minutesFromReading: 600, readingAgeMin: 5, updating: true, probability: 0.6 };
+
+  it("counts a holiday cell's support as past holidays, not weeks", () => {
+    // 24 observations behind a HOLIDAY half-hour are four holidays at that
+    // time, not four weeks -- the holiday slot is filled one day at a time.
+    expect(confidenceFor({ ...far, support: 24, holiday: true })).toEqual({
+      level: "high",
+      reason: { kind: "holidays", holidays: 4 },
+    });
+    expect(confidenceFor({ ...far, support: 8, holiday: true })).toEqual({
+      level: "medium",
+      reason: { kind: "holidays", holidays: 1 },
+    });
+  });
+
+  it("still speaks in weeks for an ordinary day", () => {
+    expect(confidenceFor({ ...far, support: 24 })?.reason).toEqual({ kind: "weeks", weeks: 4 });
+    expect(confidenceFor({ ...far, support: 24, holiday: false })?.reason).toEqual({ kind: "weeks", weeks: 4 });
+  });
+});

@@ -99,6 +99,13 @@ export interface LotCardProps {
    * kind. See `notUpdatingHours`, which is where the distinction is spent.
    */
   fromHistory: boolean;
+  /**
+   * Whether `support` was read from the week table's public-holiday day rather
+   * than from the clock week. There one observation-day is one past holiday,
+   * so the pill counts holidays instead of weeks. Optional and false by
+   * default: a version-1 table, or any ordinary day, has no holiday cell.
+   */
+  holidaySupport?: boolean;
   /** Whether this is the list's single top pick. */
   best: boolean;
   /** Whether this card is the one currently selected on the map. */
@@ -177,6 +184,7 @@ export function LotCard({
   arrivalTs,
   support,
   fromHistory,
+  holidaySupport = false,
   best,
   selected,
   onSelect,
@@ -212,6 +220,7 @@ export function LotCard({
     support,
     updating: row.lot.u === undefined,
     probability: row.probability,
+    holiday: holidaySupport,
   });
   const [priceValue, priceLabel] = splitPrice(formatPrice(row, s, arrivalTs));
   const f = row.lot.f;

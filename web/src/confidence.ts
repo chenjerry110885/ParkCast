@@ -86,6 +86,8 @@ export type Confidence = "high" | "medium" | "low";
 export type ConfidenceReason =
   | { kind: "reading"; ageMin: number }
   | { kind: "weeks"; weeks: number }
+  /** The same evidence as `weeks`, counted in the unit a holiday cell fills by. */
+  | { kind: "holidays"; holidays: number }
   | { kind: "thin" };
 
 export interface ConfidenceInput {
@@ -102,6 +104,14 @@ export interface ConfidenceInput {
   updating: boolean;
   /** The forecast probability itself; `null` means there is nothing to grade. */
   probability: number | null;
+  /**
+   * Whether `support` counts a HOLIDAY cell (`week.ts`'s `probabilityAt(...).holiday`).
+   * The grade is unchanged -- an observation is an observation -- but the unit
+   * is not: a holiday half-hour is filled one holiday at a time, so 24
+   * observations there are four past holidays, and calling them "4 weeks" would
+   * claim a month of history this lot does not have for that day.
+   */
+  holiday?: boolean;
 }
 
 /** The blend halves its weight on the live reading every 30 min of horizon (config.BLEND_HALF_LIFE_MIN). */
@@ -127,6 +137,7 @@ export function confidenceFor({
   support,
   updating,
   probability,
+  holiday = false,
 }: ConfidenceInput): { level: Confidence; reason: ConfidenceReason } | null {
   // `typeof NaN === "number"`, so an unknown probability must be refused by
   // value, not merely by `!== null` -- see `228ce2f` on this branch for the
@@ -134,15 +145,17 @@ export function confidenceFor({
   if (probability === null || !Number.isFinite(probability) || !updating) return null;
 
   const weeks = Math.floor(support / WEEKLY_OBSERVATIONS);
+  // Six observations per half-hour per day either way, so the same division.
+  const history: ConfidenceReason = holiday ? { kind: "holidays", holidays: weeks } : { kind: "weeks", weeks };
 
   if (readingAgeMin <= READING_FRESH_MAX_MIN && minutesFromReading <= HIGH_MAX_MIN) {
     return { level: "high", reason: { kind: "reading", ageMin: readingAgeMin } };
   }
   if (support >= SUPPORT_HIGH_MIN) {
-    return { level: "high", reason: { kind: "weeks", weeks } };
+    return { level: "high", reason: history };
   }
   if (support >= SUPPORT_MEDIUM_MIN) {
-    return { level: "medium", reason: { kind: "weeks", weeks } };
+    return { level: "medium", reason: history };
   }
   if (readingAgeMin <= READING_RECENT_MAX_MIN && minutesFromReading <= MEDIUM_MAX_MIN) {
     return { level: "medium", reason: { kind: "reading", ageMin: readingAgeMin } };
