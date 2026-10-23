@@ -41,6 +41,10 @@ where = ["src"]
 # New Taipei fails exactly as it did before. Verified inside the built image.
 [tool.setuptools.package-data]
 "parkcast.sources" = ["*.pem"]
+# The holiday calendar, for the same reason as the .pem above: `pip install .`
+# leaves a data file behind unless it is named here, and every test runs from
+# `src/`, where it is always present. `tests/test_holidays.py` checks this line.
+"parkcast" = ["holidays_tw.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

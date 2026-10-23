@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkBundle, listFiles, pruneDryRunArtifacts } from "./check-deploy-bundle.mjs";
 import { writeStamp } from "./build-stamp.mjs";
+import { calendarCoverageProblem } from "./calendar-coverage.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const HOST_ROOT = ROOT.replaceAll("\\", "/"); // Docker Desktop takes forward slashes
@@ -54,6 +55,19 @@ function run(label, command, cwd = ROOT) {
 if (process.env.CLOUDFLARE_API_TOKEN) {
   console.error("CLOUDFLARE_API_TOKEN is set. Run the check phase in a shell without the deploy key.");
   process.exit(1);
+}
+
+// First, and before anything slow: a calendar about to run out is a release
+// that would stop knowing about holidays between now and the next one.
+{
+  const calendar = JSON.parse(readFileSync(join(ROOT, "web", "src", "holidaysTw.json"), "utf8"));
+  const problem = calendarCoverageProblem(calendar.covers[1]);
+  if (problem !== null) {
+    console.error(`
+holiday calendar: ${problem}`);
+    process.exit(1);
+  }
+  console.log(`holiday calendar covers through ${calendar.covers[1]}`);
 }
 
 if (process.argv.includes("--with-python")) run("python tests", PYTHON_TESTS);
