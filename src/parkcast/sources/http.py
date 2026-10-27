@@ -194,18 +194,27 @@ def _read(response, max_bytes: int) -> bytes:
     return bytes(body)
 
 
-def get_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC,
-             max_bytes: int = config.MAX_FEED_BYTES,
-             tls: TlsPolicy = STRICT) -> object:
-    """GET one feed blob as JSON, refusing redirects and oversized bodies.
+def get_bytes(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC,
+              max_bytes: int = config.MAX_FEED_BYTES,
+              tls: TlsPolicy = STRICT) -> bytes:
+    """GET one feed blob as raw bytes, refusing redirects and oversized bodies.
+
+    For a feed that is not JSON -- Taipei's availability is XML since
+    2026-10-21 -- so the source parses it itself, under the same guards.
 
     `tls` defaults to `STRICT`: a caller that says nothing is verified
     exactly as it was before per-source policies existed.
     """
     headers = {"User-Agent": USER_AGENT}
-    body = _fetch("get", url, tls=tls, max_bytes=max_bytes, timeout=timeout,
+    return _fetch("get", url, tls=tls, max_bytes=max_bytes, timeout=timeout,
                   allow_redirects=False, stream=True, headers=headers)
-    return json.loads(body)
+
+
+def get_json(url: str, *, timeout: int = config.HTTP_TIMEOUT_SEC,
+             max_bytes: int = config.MAX_FEED_BYTES,
+             tls: TlsPolicy = STRICT) -> object:
+    """GET one feed blob as JSON, refusing redirects and oversized bodies."""
+    return json.loads(get_bytes(url, timeout=timeout, max_bytes=max_bytes, tls=tls))
 
 
 def post_json(url: str, *, body: bytes = b"", content_type: str | None = None,

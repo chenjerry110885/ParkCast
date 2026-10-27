@@ -2,7 +2,11 @@
 from datetime import timedelta, timezone
 from pathlib import Path
 
-AVAILABILITY_URL = "https://tcgbusfs.blob.core.windows.net/blobtcmsv/TCMSV_allavailable.json"
+# XML, not JSON. Around 2026-10-21 Taipei stopped rewriting the .json copy of
+# this blob -- it still answers 200, frozen at a snapshot stamped 10-19 10:26 --
+# and data.taipei now lists only the .xml, which stays live. Same records, same
+# UPDATETIME, upper-case element names. See `sources.taipei.from_xml`.
+AVAILABILITY_URL = "https://tcgbusfs.blob.core.windows.net/blobtcmsv/TCMSV_allavailable.xml"
 METADATA_URL = "https://tcgbusfs.blob.core.windows.net/blobtcmsv/TCMSV_alldesc.json"
 
 DATA_DIR = Path("data")

@@ -1,8 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from parkcast.feed import FeedSnapshot, parse_updatetime
-from parkcast.sources import SourceTick, taipei
+from parkcast.sources import SourceTick, http, taipei
 
 # Reuses the fixture already captured for Task 1 (`tests/fixtures/avail_sample.json`,
 # 489,523 bytes, 1,174 records) rather than a fresh trimmed one: Taipei's data
@@ -89,3 +91,65 @@ def test_data_ts_minutes_land_on_the_expected_phase():
     payload = _fixture_payload()
     tick = taipei.parse(payload, now=_observed_at(payload))
     assert (tick.snapshot.latest_data_ts // 60) % 5 == 3, "feed stamps minutes congruent to 3 (mod 5)"
+
+
+# --- the XML feed ------------------------------------------------------------
+
+#: The head of the live `TCMSV_allavailable.xml`, captured 2026-10-27 11:24
+#: Taipei and cut to its first three records. Real bytes, trimmed, not edited.
+XML_FIXTURE = Path(__file__).parent / "fixtures" / "taipei_avail_sample.xml"
+XML_STAMP = "Tue Oct 27 11:20:00 CST 2026"
+
+
+def test_the_live_feed_is_the_xml_one():
+    """Around 2026-10-21 Taipei stopped rewriting `TCMSV_allavailable.json`.
+    It still answers 200 with a snapshot stamped 10-19 10:26, which the
+    plausibility window rightly refused -- so for eight days Taipei stored
+    nothing and its published artifacts sat still -- while
+    `TCMSV_allavailable.xml`, the resource data.taipei now lists, kept
+    updating every few minutes."""
+    assert taipei.URL.endswith("/TCMSV_allavailable.xml")
+
+
+def test_the_xml_feed_reads_as_the_json_one_did():
+    payload = taipei.from_xml(XML_FIXTURE.read_bytes())
+    assert payload["data"]["UPDATETIME"] == XML_STAMP
+    assert [p["id"] for p in payload["data"]["park"]] == ["TPE0001", "TPE0002", "TPE0003"]
+
+    tick = taipei.parse(payload, now=parse_updatetime(XML_STAMP) + 200)
+    first, second, _ = tick.snapshot.observations
+    assert first.lot_id == "taipei:TPE0001"
+    assert first.free_car == 15
+    assert first.free_motor is None, "-9 is still no data, never 0"
+    assert second.free_car == 104
+    assert {o.data_ts for o in tick.snapshot.observations} == {parse_updatetime(XML_STAMP)}
+
+
+def test_the_source_fetches_the_xml_and_parses_it(monkeypatch):
+    seen = []
+
+    def fake_get_bytes(url, **kwargs):
+        seen.append(url)
+        return XML_FIXTURE.read_bytes()
+
+    monkeypatch.setattr(taipei.http, "get_bytes", fake_get_bytes)
+    tick = taipei.Source().fetch(now=parse_updatetime(XML_STAMP) + 200)
+
+    assert seen == [taipei.URL]
+    assert len(tick.snapshot.observations) == 3
+
+
+def test_an_xml_body_declaring_a_doctype_is_refused():
+    """A feed of counts has no use for a DTD, and refusing one up front is
+    cheaper than trusting the parser to defuse whatever entities it declares."""
+    body = (b'<?xml version="1.0"?><!DOCTYPE DATA [<!ENTITY a "aaaa">]>'
+            b"<DATA><UPDATETIME>&a;</UPDATETIME></DATA>")
+    with pytest.raises(http.FeedError):
+        taipei.from_xml(body)
+
+
+def test_an_unreadable_xml_body_is_a_feed_error():
+    with pytest.raises(http.FeedError):
+        taipei.from_xml(b"<DATA><PARK>")
+    with pytest.raises(http.FeedError):
+        taipei.from_xml(b"<DATA><PARK><ID>TPE0001</ID></PARK></DATA>")   # no UPDATETIME
