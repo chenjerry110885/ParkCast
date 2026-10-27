@@ -411,7 +411,8 @@ def test_a_missing_extra_ca_file_fails_loudly_rather_than_silently():
     (newtaipei, "post_json", [], "newtaipei"),
     (tainan, "get_json", [], None),
     (taoyuan, "get_json", [], None),
-    (taipei, "get_json", {"data": {"UPDATETIME": "Fri Sep 04 09:08:00 CST 2026", "park": []}}, None),
+    # Bytes, not JSON: Taipei's availability is XML since 2026-10-21.
+    (taipei, "get_bytes", b"<DATA><UPDATETIME>Fri Sep 04 09:08:00 CST 2026</UPDATETIME></DATA>", None),
 ])
 def test_each_adapter_hands_the_transport_its_own_policy(
     monkeypatch, module, verb, payload, expected
