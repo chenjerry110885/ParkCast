@@ -56,6 +56,8 @@ interface FakeResponse {
   body?: string;
   /** Only `Last-Modified` is ever read (see `agedOut`), so only it is modelled. */
   headers?: { get(name: string): string | null };
+  /** Present only on a fake `week.bin` body (see `weekResponse`). */
+  arrayBuffer?(): Promise<ArrayBuffer>;
   clone(): FakeResponse;
 }
 
@@ -87,6 +89,8 @@ interface WorkerOptions {
   quotaFails?: boolean;
   /** Status the network answers with, by URL. Anything unlisted gets a 200. */
   status?: Record<string, number>;
+  /** A whole response the network answers with, by URL; wins over `status`. */
+  responses?: Record<string, FakeResponse>;
 }
 
 function response(status = 200, type = "basic", body = "ok", lastModified?: string): FakeResponse {
@@ -102,6 +106,20 @@ function response(status = 200, type = "basic", body = "ok", lastModified?: stri
       : { headers: { get: (name: string) => (name.toLowerCase() === "last-modified" ? lastModified : null) } }),
     clone: () => ({ ...res }),
   };
+  return res;
+}
+
+/**
+ * A `week.bin` body whose header names `roster` (uint32 LE at byte 14, as
+ * `artifacts.encode_week` writes it), labelled `body` so a test can tell which
+ * table it was handed.
+ */
+function weekResponse(roster: number, body: string, lastModified?: string): FakeResponse {
+  const res = response(200, "basic", body, lastModified);
+  const bytes = new ArrayBuffer(18);
+  new DataView(bytes).setUint32(14, roster, true);
+  res.arrayBuffer = async () => bytes;
+  res.clone = () => ({ ...res });
   return res;
 }
 
@@ -149,6 +167,8 @@ function loadWorker(options: WorkerOptions = {}): Worker {
   const fetchStub = vi.fn(async (input: string | FakeRequest) => {
     if (options.networkFails) throw new TypeError("offline");
     const url = keyOf(input);
+    const whole = options.responses?.[url];
+    if (whole) return whole;
     return response(options.status?.[url] ?? 200, "basic", `network:${url}`);
   });
 
@@ -548,6 +568,50 @@ describe("what actually lands in the cache", () => {
     worker.cacheStore.set(asset, response(200, "basic", "cached asset", daysAgo(400)));
     await expect(respondTo(worker, request(asset))).resolves.toMatchObject({ body: "cached asset" });
     expect(worker.fetch).not.toHaveBeenCalled();
+  });
+
+  describe("a week table asked for by roster", () => {
+    // The app asks for `week.bin?roster=N`, and this cache keeps a 200 under that
+    // URL for a week. Live 2026-11-04 the Worker answered N's key with the
+    // previous roster's table for a day: cached, the app refused it on every
+    // load and the cache kept handing it back. The header is the only thing
+    // that says which roster a table is for, so it is read before trusting one.
+    const asked = 292752331;
+    const url = `${SCOPE}artifacts/week.bin?roster=${asked}`;
+
+    it("never keeps a table for another roster", async () => {
+      const worker = loadWorker({ responses: { [url]: weekResponse(asked - 1, "old roster") } });
+      await expect(respondTo(worker, request(url))).resolves.toMatchObject({ body: "old roster" });
+      expect(worker.cacheStore.has(url)).toBe(false);
+    });
+
+    it("keeps the table for the roster asked for", async () => {
+      const worker = loadWorker({ responses: { [url]: weekResponse(asked, "right roster") } });
+      await respondTo(worker, request(url));
+      expect(worker.cacheStore.get(url)).toMatchObject({ body: "right roster" });
+    });
+
+    it("treats a cached table for another roster as a miss, and replaces it", async () => {
+      const worker = loadWorker({ responses: { [url]: weekResponse(asked, "right roster") } });
+      worker.cacheStore.set(url, weekResponse(asked - 1, "poisoned", daysAgo(1)));
+      await expect(respondTo(worker, request(url))).resolves.toMatchObject({ body: "right roster" });
+      expect(worker.cacheStore.get(url)).toMatchObject({ body: "right roster" });
+    });
+
+    it("still serves a cached table for the right roster without the network", async () => {
+      const worker = loadWorker();
+      worker.cacheStore.set(url, weekResponse(asked, "cached", daysAgo(2)));
+      await expect(respondTo(worker, request(url))).resolves.toMatchObject({ body: "cached" });
+      expect(worker.fetch).not.toHaveBeenCalled();
+    });
+
+    it("ages out a roster-keyed table like the bare one", async () => {
+      // `agedOut` matched the URL's end, so `?roster=` -- the only URL the app
+      // has asked for since the key was added -- was never aged out at all.
+      const worker = loadWorker({ responses: { [url]: weekResponse(asked, "fresh") } });
+      worker.cacheStore.set(url, weekResponse(asked, "old", daysAgo(9)));
+      await expect(respondTo(worker, request(url))).resolves.toMatchObject({ body: "fresh" });
+    });
   });
 
   it("serves a cached week table that does not say when it was built", async () => {

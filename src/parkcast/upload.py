@@ -408,7 +408,13 @@ class Uploader:
             self._week_guard.record(job.key, None)
             return
         status, reject, date_header = box["result"]
-        self._week_guard.record(job.key, status)
+        # A roster-mismatch 409 is a timing, not a verdict: the Worker checks the
+        # table against the pair it holds, and the pair is uploaded every five
+        # minutes. Recorded as done, the same bytes were never offered again --
+        # live 2026-11-04, the new roster's table was refused at 00:24 while the
+        # pair lagged, the pair landed at 00:29, and the site served the old
+        # roster's table all day. So it backs off and retries like a failure.
+        self._week_guard.record(job.key, None if (status == 409 and reject == "roster-mismatch") else status)
         self._check_skew(date_header)
         if status == 204:
             log.info("week uploaded: status=204 bytes=%s duration=%.1fs", total_bytes, box["seconds"])

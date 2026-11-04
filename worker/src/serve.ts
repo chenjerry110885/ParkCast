@@ -64,6 +64,18 @@ export async function serveWeek(request: Request, env: Env): Promise<Response> {
   const stored = await env.ARTIFACTS.getWithMetadata(WEEK_KEY, { type: "arrayBuffer" });
   const meta = asWeekMeta(stored.metadata);
   if (stored.value === null || meta === null) return respond(503, "No week table yet", { ...TEXT, "Retry-After": "300" });
+  // The app asks for `week.bin?roster=N`, and its service worker keeps a 200
+  // under that URL for a week. A table for another roster -- the collector's
+  // new one has not landed yet -- must not be that 200: cached under N's key it
+  // is refused by the app and handed back by the cache until N changes (live
+  // 2026-11-04, a whole day). "Not yet", uncached, is true and retries cleanly.
+  // Checked before the ETag: a matching tag on the wrong roster is no 304.
+  const asked = new URL(request.url).searchParams.get("roster");
+  if (asked !== null && asked !== String(meta.rosterId)) {
+    return respond(404, "No week table for that roster yet", {
+      ...TEXT, "Cache-Control": "no-store", "Retry-After": "300",
+    });
+  }
   const headers = {
     "Content-Type": "application/octet-stream",
     "Cache-Control": "max-age=3600",

@@ -514,6 +514,56 @@ def test_offer_week_retries_the_same_blob_until_accepted():
     assert attempts == [b"TODAY", b"TODAY"], "an accepted day's blob is a no-op duplicate"
 
 
+def test_a_week_refused_for_roster_mismatch_is_retried_once_the_pair_catches_up():
+    """Live 2026-11-04: Taipei's roster moved 1,169 -> 1,170 at 00:14 while
+    the pair lane was backing off, so at 00:24 the new week table reached a
+    Worker still holding the old pair and was refused as roster-mismatch --
+    correctly, at that moment. The pair landed at 00:29. But a 409 marked the
+    blob done, every later offer of the same bytes was a silent duplicate,
+    and the site served the old roster's table all day: no forecast for any
+    arrival past the grid's two hours, for every Taipei lot.
+
+    Roster-mismatch is the one 409 that is a timing, not a verdict: the pair
+    it is checked against is uploaded every five minutes. So it backs off and
+    retries like a failure, and only a 204 (or a stale/too-soon 409) is done."""
+    attempts = []
+    answers = iter([(409, "roster-mismatch", None), (204, None, None)])
+
+    def send_week(url, secret, week, *, city, roster_id, opener, timeout):
+        attempts.append(week)
+        return next(answers)
+
+    up = _uploader_week(send_week)
+
+    up.offer_week(b"NEW", city="taipei", roster_id=1170)   # pair still old: refused
+    assert up.process_pending_week()
+    up.offer_week(b"NEW", city="taipei", roster_id=1170)   # backing off
+    assert up.process_pending_week()
+    up.offer_week(b"NEW", city="taipei", roster_id=1170)   # pair has landed: accepted
+    assert up.process_pending_week()
+    assert attempts == [b"NEW", b"NEW"]
+
+    up.offer_week(b"NEW", city="taipei", roster_id=1170)   # and now it is done
+    assert up.process_pending_week()
+    assert attempts == [b"NEW", b"NEW"]
+
+
+def test_a_stale_week_409_is_still_done():
+    """`stale` and `too-soon` say the Worker already holds this or newer:
+    re-sending the same bytes could never change that answer."""
+    attempts = []
+
+    def send_week(url, secret, week, *, city, roster_id, opener, timeout):
+        attempts.append(week)
+        return 409, "stale", None
+
+    up = _uploader_week(send_week)
+    for _ in range(3):
+        up.offer_week(b"OLD", city="taipei", roster_id=1)
+        assert up.process_pending_week()
+    assert attempts == [b"OLD"]
+
+
 def _week_upload_record_for(caplog, status, reject):
     def week_send(url, secret, week, *, city, roster_id, opener, timeout):
         return status, reject, None

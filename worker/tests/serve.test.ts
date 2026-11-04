@@ -124,6 +124,30 @@ describe("serving the week table", () => {
     expect(await res.text()).toBe("");
   });
 
+  it("serves the table to a request naming the roster it holds", async () => {
+    const { get, week } = weekSetup();
+    const res = await get(`/artifacts/week.bin?roster=${week.rosterId}`);
+    expect(res.status).toBe(200);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(week.week);
+  });
+
+  it("refuses, uncacheably, a request naming a roster it does not hold", async () => {
+    // The app asks for `week.bin?roster=N` and its service worker keeps a 200
+    // under that URL for a week. Live 2026-11-04 the stored table was one
+    // roster behind the forecast for a day; answering 200 with it put the old
+    // table in browsers under the NEW roster's key, where the app refuses it
+    // and the cache keeps handing it back. "Not yet", uncached, lets the next
+    // attempt find the right table the moment it lands.
+    const { get, week } = weekSetup();
+    for (const init of [undefined, { headers: { "If-None-Match": `"${"w".repeat(64)}"` } }]) {
+      const res = await get(`/artifacts/week.bin?roster=${week.rosterId + 1}`, init);
+      expect(res.status).toBe(404);
+      expect(res.headers.get("Cache-Control")).toBe("no-store");
+      expect(res.headers.get("Retry-After")).toBe("300");
+      expect(res.headers.get("ETag")).toBeNull();
+    }
+  });
+
   it("says 503 when no week table has been uploaded yet", async () => {
     const { get, kv } = weekSetup(false);
     expect((await get("/artifacts/week.bin")).status).toBe(503);

@@ -294,17 +294,64 @@ async function keep(request, response) {
  * which is exactly how this path behaved before the header existed.
  */
 function agedOut(request, response) {
-  if (!request.url.endsWith("/artifacts/week.bin")) return false;
+  if (!isWeek(request)) return false;
   const builtAt = Date.parse(response.headers?.get?.("last-modified") ?? "");
   return !Number.isNaN(builtAt) && Date.now() - builtAt > WEEK_MAX_AGE_MS;
 }
 
+/**
+ * Whether `request` is for the week table, with or without `?roster=`. By
+ * path, not by the URL's end: the app has asked for `week.bin?roster=N` since
+ * the key was added, and an `endsWith` test never matched that URL at all.
+ */
+function isWeek(request) {
+  try {
+    return new URL(request.url).pathname.endsWith("/artifacts/week.bin");
+  } catch {
+    return false;
+  }
+}
+
+/** The roster a week request names (`?roster=N`), or null when it names none. */
+function askedRoster(request) {
+  if (!isWeek(request)) return null;
+  try {
+    return new URL(request.url).searchParams.get("roster");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a week table's own header names `roster` -- a uint32, little-endian,
+ * at byte 14, as `artifacts.encode_week` writes it.
+ *
+ * The URL only asks; the header answers. A Worker whose new table has not
+ * landed answered the new roster's URL with the old table (live 2026-11-04),
+ * and a cache-first copy of that under the new key is refused by the app on
+ * every load and handed back by this cache for a week. So a table is kept, and
+ * a cached one served, only when it is the roster asked for. Anything that
+ * cannot be read says no.
+ */
+async function holdsRoster(response, roster) {
+  try {
+    const bytes = await response.clone().arrayBuffer();
+    return bytes.byteLength >= 18 && String(new DataView(bytes).getUint32(14, true)) === roster;
+  } catch {
+    return false;
+  }
+}
+
 async function cacheFirst(request) {
-  const hit = await cached(request);
+  const roster = askedRoster(request);
+  let hit = await cached(request);
+  // Another roster's table under this key is not a hit: the app would refuse
+  // it, and serving it here would keep the network from ever replacing it.
+  if (hit && roster !== null && !(await holdsRoster(hit, roster))) hit = undefined;
   if (hit && !agedOut(request, hit)) return hit;
   try {
     const response = await fetch(request);
-    await keep(request, response);
+    if (roster === null || (await holdsRoster(response, roster))) await keep(request, response);
     return response;
   } catch (error) {
     // Only reachable with a hit that aged out, because every other path here
